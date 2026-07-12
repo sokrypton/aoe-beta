@@ -1,0 +1,2219 @@
+@import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Inter:wght@400;600&display=swap');
+
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{background:#0d0501;overflow:hidden;font-family:'Inter',sans-serif;user-select:none;touch-action:none;position:fixed;width:100%;height:100%;overscroll-behavior:none}
+
+/* Custom SVGs for game cursors — AoE2 style */
+
+/* Default: classic cream arrow, no selection */
+#game.cursor-default {
+  cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><path d="M3,2 L3,22 L8,17 L11,26 L14,25 L11,16 L17,16 Z" fill="%23f4e070" stroke="%232a1000" stroke-width="1.5" stroke-linejoin="round"/></svg>') 3 2, default !important;
+}
+
+/* Move: green arrow — units selected, click to move */
+#game.cursor-pointer {
+  cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><path d="M3,2 L3,22 L8,17 L11,26 L14,25 L11,16 L17,16 Z" fill="%2364d840" stroke="%23183800" stroke-width="1.5" stroke-linejoin="round"/></svg>') 3 2, pointer !important;
+}
+
+/* Attack: classic sword — tapered blade, T-bar crossguard, wrapped grip, round pommel */
+#game.cursor-crosshair {
+  cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><path d="M29,2 L20,11 L17,14 Z" fill="%23d0d8e0" stroke="%23444" stroke-width="1" stroke-linejoin="round"/><line x1="28" y1="3" x2="20" y2="11" stroke="%23f0f4ff" stroke-width="1"/><line x1="13" y1="17" x2="23" y2="7" stroke="%23c09820" stroke-width="3.5" stroke-linecap="round"/><line x1="18" y1="14" x2="10" y2="22" stroke="%236a4a20" stroke-width="2.5" stroke-linecap="round"/><circle cx="9" cy="23" r="2.5" fill="%23804020" stroke="%23333" stroke-width="1"/></svg>') 29 2, crosshair !important;
+}
+
+/* Gather: pickaxe — villager over resource */
+#game.cursor-cell {
+  cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><line x1="15" y1="16" x2="7" y2="28" stroke="%23704020" stroke-width="3" stroke-linecap="round"/><path d="M15,16 L6,5 L9,3 L17,14 Z" fill="%23909090" stroke="%23222" stroke-width="1.5" stroke-linejoin="round"/><path d="M15,16 L25,5 L28,8 L18,19 Z" fill="%23c0c0c0" stroke="%23222" stroke-width="1.5" stroke-linejoin="round"/></svg>') 26 6, cell !important;
+}
+
+/* Build: hammer — placing a building */
+#game.cursor-copy {
+  cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><line x1="13" y1="18" x2="28" y2="28" stroke="%23704020" stroke-width="3.5" stroke-linecap="round"/><polygon points="4,12 12,4 19,11 11,19" fill="%23888888" stroke="%23222" stroke-width="1.5" stroke-linejoin="round"/><polygon points="4,12 12,4 15,7 7,15" fill="%23aaaaaa" stroke="none"/></svg>') 4 4, copy !important;
+}
+
+/* Garrison: shield — units selected over allied building */
+#game.cursor-garrison {
+  cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><path d="M16,2 L28,7 L28,17 C28,23 22,28 16,30 C10,28 4,23 4,17 L4,7 Z" fill="%234488cc" stroke="%23111" stroke-width="1.5" stroke-linejoin="round"/><path d="M16,6 L24,10 L24,17 C24,21 20,25 16,27 C12,25 8,21 8,17 L8,10 Z" fill="%235599dd" stroke="none"/><line x1="16" y1="9" x2="16" y2="24" stroke="%23fff" stroke-width="2" stroke-linecap="round"/><line x1="9" y1="16" x2="23" y2="16" stroke="%23fff" stroke-width="2" stroke-linecap="round"/></svg>') 16 2, default !important;
+}
+
+canvas {
+  display: block;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: -webkit-crisp-edges;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+#ui{position:absolute;top:0;left:0;width:100%;pointer-events:none;z-index:10}
+
+/* ---- TOP BAR (AoE2 Wood Banner Style) ---- */
+#topbar{
+  background: linear-gradient(180deg, #321c0e 0%, #1f0f06 100%);
+  border-bottom: 3px double #bfa054;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  height:36px;
+  display:flex;
+  align-items:center;
+  padding:0 12px;
+  /* Purely a resource display, nothing inside is ever clickable — auto
+     pointer-events here meant this full-width strip silently ate clicks
+     meant for whatever's underneath, most noticeably the minimap's diamond
+     peak (which also starts at top:0 and overlaps this exact strip) and
+     any unit near the very top edge of the battlefield. */
+  pointer-events:none;
+}
+.res{
+  display:flex;
+  align-items:center;
+  margin-right:3px;
+  color:#ffebad;
+  font-family: 'Cinzel', Georgia, serif;
+  font-size:13px;
+  font-weight:bold;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid #5a3f1d;
+  border-radius: 4px;
+  padding: 1px 5px;
+  box-shadow: inset 0 0 4px #000;
+  text-shadow: 1px 1px 1px #000;
+  height: 22px;
+  position:relative; /* anchors the .res-vils gatherer-count badge */
+}
+.res-icon{
+  width:15px;
+  height:15px;
+  margin-right:3px;
+  flex-shrink:0;
+  /* Visually bigger than its own layout box (scale doesn't affect flex
+     sizing/spacing), so it overflows past the badge's frame on purpose. */
+  transform:scale(1.3);
+  position:relative;
+  z-index:2;
+}
+.pop-res .res-icon{
+  /* Even more exaggerated than food/wood/gold: the two-faces art has more
+     empty padding in its cell, so it needs extra scale to visually match
+     — deliberately overflowing the badge border. */
+  transform:scale(1.8);
+  font-size:11px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.pop-res .res-val{
+  min-width:34px;
+}
+.res-val{min-width:32px;text-align:right}
+/* Gatherer count (AOE3-style) as a small badge on the lower-right corner of
+   the resource icon, slightly overlapping it. Absolutely positioned so it
+   never shifts the amount; invisible when nobody's on that resource. */
+.res-vils{
+  visibility:hidden;
+  position:absolute;
+  left:14px;    /* icon spans ~5–20px; sit on its lower-right, overlapping */
+  bottom:-3px;
+  box-sizing:border-box;
+  min-width:13px;
+  padding:0 2px;
+  background:rgba(20,12,6,0.9);
+  border:1px solid rgba(122,86,56,0.9);
+  border-radius:5px;
+  color:#ffe9b3;
+  font-size:8.5px;
+  font-weight:700;
+  line-height:1.4;
+  text-align:center;
+  text-shadow:0 1px 1px #000;
+  pointer-events:none;
+  z-index:5;
+}
+.res-vils.on{visibility:visible;}
+#pop-wrap {
+  position: absolute;
+  bottom: 84px;
+  right: 6px;
+  z-index: 20;
+  display: flex;
+  gap: 6px;
+}
+/* "Back" arrow docked in the bottom-LEFT corner above the bar — the mirror
+   of the #pop-wrap shortcut cluster (chat/idle/bell/map/home) on the right,
+   matching its size and bottom offset at every breakpoint. It used to be
+   the leftmost action button, but it ate strip width that wide widgets
+   (the market exchange) need on phones. position:fixed escapes #actions'
+   overflow clipping; it only exists while something is selected (ui.js). */
+.act-btn.back-btn{
+  position: fixed;
+  left: 6px;
+  bottom: 84px;
+  z-index: 20;
+  min-width: var(--corner-size);
+  width: var(--corner-size);
+  height: var(--corner-size);
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+#home-btn, #map-btn, #idle-btn, #bell-btn, #chat-btn, #menu-btn {
+  /* Slightly translucent so the map reads through the corner controls */
+  background: linear-gradient(180deg, rgba(92,61,36,0.82) 0%, rgba(48,31,16,0.82) 100%);
+  border: 1px solid #bfa054;
+  border-radius: 4px;
+  height: var(--corner-size);
+  width: var(--corner-size);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: inset 0 0 4px #000;
+  transition: all 0.15s;
+  position: relative;
+}
+#home-btn .btn-emoji, #map-btn .btn-emoji, #idle-btn .btn-emoji, #bell-btn .btn-emoji, #chat-btn .btn-emoji, #menu-btn .btn-emoji{
+  font-size: calc(var(--corner-size) * 0.68);
+  line-height: 1;
+}
+#bell-btn .btn-emoji{
+  font-size: calc(var(--corner-size) * 0.68);
+  transform: scale(1.1);
+  transform-origin: center;
+  display: inline-block;
+}
+/* The corner minimap is always visible above the 600px breakpoint, so the
+   toggle button is redundant there — it only earns its place once the small
+   minimap disappears (see the matching max-width:600px rule below). */
+#map-btn {
+  display: none;
+}
+#bell-btn:hover, #bell-btn:active,
+#chat-btn:hover, #chat-btn:active,
+#home-btn:hover, #home-btn:active,
+#map-btn:hover, #map-btn:active,
+#idle-btn:hover, #idle-btn:active,
+#menu-btn:hover, #menu-btn:active {
+  background: linear-gradient(180deg, rgba(124,88,55,0.9) 0%, rgba(68,45,24,0.9) 100%);
+  border-color: #ffebad;
+}
+#pop{
+  color:#ffebad;
+  font-family: 'Cinzel', Georgia, serif;
+  font-size:13px;
+  font-weight:bold;
+  white-space:nowrap;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid #5a3f1d;
+  border-radius: 4px;
+  padding: 2px 8px;
+  box-shadow: inset 0 0 4px #000;
+  text-shadow: 1px 1px 1px #000;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---- BOTTOM PANEL (AoE2 HUD Command Box) ---- */
+#bottom {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 80px;
+  background: linear-gradient(180deg, #3d2310 0%, #1f0f04 100%);
+  border-top: 3px double #bfa054;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.6);
+  display: flex;
+  pointer-events: auto;
+  z-index: 10;
+}
+
+#sel-info {
+  /* Narrow: the card is tiles-only now (lone tile / grouped tiles / the age
+     crest when idle) — no name or detail text to make room for. */
+  width: 100px;
+  padding: 6px;
+  color: #ffebad;
+  border-left: 2px double #5a3e1a;
+  overflow: hidden;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+#sel-portrait {
+  width: var(--tile-size);
+  height: var(--tile-size);
+  /* background-image (not the `background` shorthand) so it doesn't reset
+     background-position/size/repeat — those are set by .sprite-icon /
+     .icon-* below, at lower specificity, when a sprite icon is shown. */
+  background-image: radial-gradient(circle, #805c36 0%, #3e2612 100%);
+  border: 2px solid #bfa054;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  flex-shrink: 0;
+  box-shadow: inset 0 0 6px #000, 1px 1px 3px rgba(0,0,0,0.5);
+  text-shadow: 1px 1px 2px #000;
+  cursor: pointer;
+}
+#sel-portrait.sprite-icon{
+  background-image: url('sprites.png');
+  background-size: 800% 800%;
+  background-repeat: no-repeat;
+}
+/* Sprite tiles render on an inner clipper>img pair (setPortraitIcon,
+   js/ui.js) so skins can zoom the art past the sheet cell's baked-in
+   margins without touching the tile's own border/box. */
+#sel-portrait{ position: relative; }
+.tile-sprite{ position: absolute; inset: 0; overflow: hidden; border-radius: inherit; }
+.tile-sprite-img{ width: 100%; height: 100%; }
+#sel-portrait.cam-locked {
+  border-color: #4ade80;
+  box-shadow: inset 0 0 6px #000, 0 0 8px #4ade80, 1px 1px 3px rgba(0,0,0,0.5);
+}
+/* Classic-only HP slot under the portrait (page-shell.js) — the mobile skin
+   keeps HP inline in #sel-details, so this stays empty AND hidden here. */
+#sel-hp { display: none; }
+#sel-stats {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+}
+#sel-name {
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: 11px;
+  font-weight: bold;
+  color: #ffd700;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow: 1px 1px 2px #000;
+}
+#sel-details {
+  font-size: 10px;
+  color: #d1c499;
+  line-height: 1.35;
+  /* normal wrapping (pre-line rendered stray newlines in generated markup as
+     hard line breaks); long content scrolls instead of clipping mid-line */
+  white-space: normal;
+  overflow-y: auto;
+  max-height: 100%;
+  text-shadow: 1px 1px 1px #000;
+}
+/* Grid-mode card sizes to its TILES and just keeps growing — one tile hugs
+   it, each extra unit type widens it, and with enough types it eats the
+   bar (the #sel-info border-left is the moving actions|selection divider).
+   The cap only reserves ONE action-button slot, and .no-actions (js/ui.js:
+   strip built with no real buttons) lifts even that, letting the card take
+   the whole bar. Overrides per breakpoint match the act-btn sizes. */
+#sel-info.multi-select {
+  width: auto;
+  min-width: 88px;
+  max-width: calc(100% - 90px);
+  flex: 0 0 auto;
+}
+#bottom.no-actions #sel-info.multi-select { max-width: 100%; }
+#sel-stats {
+  max-height: 100%;
+}
+#sel-details .hp-bar-bg {
+  /* Fluid, NOT a fixed 100px: the narrowed portrait card can leave less
+     than 100px for the stats column, and a fixed-width bar overflowed it —
+     #sel-details{overflow-y:auto} forces overflow-x:auto too, so phones
+     drew a horizontal SCROLLBAR right under the HP bar (an "extra grey
+     bar" under every selection's health readout). */
+  width: auto;
+  max-width: 100px;
+  margin-top: 3px;
+  margin-bottom: 2px;
+}
+/* Detail rows inside #sel-details (js/ui.js det strings) — same look the
+   old inline styles produced; classes so the classic skin can restyle
+   them as recessed chips without forking the markup. */
+.det-stats {
+  color: #ffd700;
+  font-weight: bold;
+  font-size: 11px;
+  margin-top: 1px;
+}
+.det-row { margin-top: 1px; }
+.det-alert {
+  color: #ff4444;
+  font-weight: bold;
+}
+/* Per-stat spans inside .det-stats/.sel-combat-stats — spacing matches the
+   old '  ' string join; the classic skin restyles them as recessed chips. */
+.stat-chip { margin-right: 6px; }
+.stat-chip:last-child { margin-right: 0; }
+/* Classic-only training-queue lane in the center panel (page-shell.js);
+   mobile shows queue state on the train-button badge instead. */
+#sel-queue { display: none; }
+/* ---- MULTI-SELECT GRID ----
+   When >1 unit is selected, #sel-info swaps its single portrait+stats card
+   for a scrollable grid of every selected unit's own icon (AoE2-style),
+   each with its own mini HP bar. Clicking one narrows the selection to it. */
+#sel-grid {
+  display: none;
+  flex: 1;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 3px;
+  /* Scrolls rather than clips: with act-btn-sized tiles a garrison of two
+     unit types can exceed the bar's height in the narrow card. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  height: 100%;
+  /* Top/right padding must cover .sel-unit-count's negative overhang, or
+     the count badge on the last icon in a row gets clipped. */
+  padding: 6px 7px 0 5px;
+}
+#sel-info.multi-select #sel-portrait,
+#sel-info.multi-select #sel-stats {
+  display: none;
+}
+#sel-info.multi-select #sel-grid {
+  display: flex;
+}
+.sel-unit-icon {
+  position: relative;
+  /* One tile size everywhere, matching .act-btn at each breakpoint — the
+     selection tiles and action buttons share a single visual rhythm,
+     whether one thing or a group is selected. */
+  width: var(--tile-size);
+  height: var(--tile-size);
+  border: 2px solid #bfa054;
+  border-radius: 4px;
+  background-image: radial-gradient(circle, #805c36 0%, #3e2612 100%);
+  box-shadow: inset 0 0 6px #000, 1px 1px 3px rgba(0,0,0,0.5);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.sel-unit-icon:hover {
+  border-color: #ffd700;
+}
+.sel-unit-icon.cam-locked {
+  border-color: #4ade80;
+  box-shadow: inset 0 0 6px #000, 0 0 8px #4ade80, 1px 1px 3px rgba(0,0,0,0.5);
+}
+.sel-unit-hp {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  bottom: 2px;
+  height: 3px;
+  background: #251408;
+  border-radius: 1px;
+  overflow: hidden;
+}
+.sel-unit-hp-fill {
+  height: 100%;
+}
+/* Count badge on a grouped multi-select/garrison icon (e.g. "x5" archers) —
+   same corner-badge pattern as .idle-badge, just anchored top-right of a
+   much smaller 32px tile. */
+.sel-unit-count {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  background: #1a1a1a;
+  color: #ffd700;
+  border: 1px solid #ffebad;
+  border-radius: 50%;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 2px;
+  font-size: 10px;
+  font-weight: bold;
+  font-family: sans-serif;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 3px rgba(0,0,0,0.7);
+  z-index: 2;
+}
+
+.hp-bar-bg {
+  width: 140px;
+  height: 6px;
+  background: #251408;
+  border: 1px solid #5c3b1e;
+  border-radius: 1px;
+  margin-top: 3px;
+  margin-bottom: 2px;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.8);
+  overflow: hidden;
+}
+.hp-bar-fill {
+  height: 100%;
+  transition: width 0.15s ease, background-color 0.15s ease;
+}
+#actions {
+  flex: 1;
+  padding: 8px;
+  display: flex;
+  /* single row: overflow scrolls horizontally — swipe on touch, drag or
+     mouse-wheel on desktop (see the drag-to-scroll handlers in ui.js). The
+     thin scrollbar below makes the overflow discoverable. */
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-right: none;
+  scrollbar-width: thin;                      /* Firefox */
+  scrollbar-color: #bfa054 rgba(0,0,0,0.3);
+}
+#actions::-webkit-scrollbar { height: 5px; }
+#actions::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); }
+#actions::-webkit-scrollbar-thumb { background: #bfa054; border-radius: 3px; }
+#bottom.menu-active #actions {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 15;
+  background: linear-gradient(180deg, #3d2310 0%, #1f0f04 100%);
+  /* Same padding as the base #actions — the Back button must not shift
+     when entering/leaving a submenu (it did, by 4px, and reads as the
+     whole row "jumping"). */
+  padding: 8px;
+}
+/* ONE size for every square control in the bar — action buttons, selection
+   tiles, the idle age crest. Breakpoints change the variable, never the
+   selectors, so the pieces cannot drift apart. */
+:root {
+  --tile-size: 58px;
+  /* Corner shortcut cluster (home/map/idle/bell/chat) + the back arrow —
+     one knob per breakpoint, same discipline as --tile-size. Bigger than
+     the old 28px even on desktop: these are frequent-use controls. */
+  --corner-size: 40px;
+}
+
+.act-btn{
+  position:relative; /* anchors the queue-cancel-hover badge, not the button itself */
+  flex-shrink:0; /* keep full size when there's not enough row width, scroll instead of squeezing */
+  min-width:var(--tile-size);
+  height:var(--tile-size);
+  /* Match the wooden-frame language of the baked-frame icons (.framed —
+     back/eco/mil art): dark chocolate interior + thick rounded brown
+     frame, gold reserved for hover/active. Before this, submenu building
+     buttons wore a thin gold border next to wooden-framed icons and the
+     two menu levels read as different UIs. */
+  background: linear-gradient(180deg, #453022 0%, #2b1d12 100%);
+  border: 3px solid #7a5638;
+  border-radius: 10px;
+  color:#ffebad;
+  font-family: 'Inter', sans-serif;
+  font-size:11px;
+  font-weight:bold;
+  cursor:pointer;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  line-height:1.2;
+  text-align:center;
+  padding:0; /* no inset — the sprite icon fills the button border-to-border */
+  box-shadow: inset 0 0 5px #000, 1px 1px 3px rgba(0,0,0,0.5);
+  transition: all 0.15s ease-in-out;
+  -webkit-tap-highlight-color:transparent;
+}
+.act-btn:hover, .act-btn:active{
+  background: linear-gradient(180deg, #5c4028 0%, #362413 100%);
+  border-color:#d9b45e;
+  color:#fff;
+  box-shadow: 0 0 8px rgba(255,215,0,0.4), inset 0 0 5px #000;
+}
+/* These icons (econ/mil/back/reseed) already have their own frame baked
+   into the artwork, so skip the button's own border/background to avoid
+   a double-frame look — the icon art is the whole button. */
+.act-btn.framed{
+  background:none;
+  border:none;
+  box-shadow:none;
+  padding:0;
+}
+.act-btn.framed:hover, .act-btn.framed:active{
+  background:none;
+  border:none;
+  box-shadow:0 0 8px rgba(255,215,0,0.6);
+  filter:brightness(1.15);
+}
+.act-btn .cost{
+  display:none; /* shown in the tooltip instead, so the icon can be bigger */
+}
+/* Costs render as mini resource-icon+number chips pinned to the button's
+   bottom edge (costChips, js/ui.js) — always on in this skin: the hover
+   tooltip still exists on desktop, but the chips make costs glanceable
+   everywhere and are the ONLY cost display on touch (no hover there).
+   Each chip sits in its own dark badge so icon+number read as one tag. */
+.act-btn .cost.cost-chips{
+  display:flex;
+  /* One row, CENTERED horizontally and dropped so it straddles the button's
+     bottom border — a cost banner clear of the icon art above it. */
+  position:absolute; left:50%; transform:translateX(-50%); bottom:-7px; right:auto;
+  flex-direction:row; justify-content:center; gap:0;
+  white-space:nowrap;
+  font-size:9.5px; font-weight:700; color:#ffe9b3;
+  pointer-events:none; /* never eat the button tap */
+}
+.cost-chip{
+  display:inline-flex; align-items:center; gap:1px;
+  background:rgba(20,12,6,0.72);
+  border:1px solid rgba(122,86,56,0.8);
+  border-radius:5px;
+  padding:0 3px 0 1px;
+  text-shadow:0 1px 1px #000;
+}
+/* adjacent chips fuse into one continuous strip */
+.cost-chip + .cost-chip{ border-left:0; border-top-left-radius:0; border-bottom-left-radius:0; }
+.cost-chip:not(:last-child){ border-top-right-radius:0; border-bottom-right-radius:0; }
+.cost-chip .res-mini-icon{ width:10px; height:10px; vertical-align:0; }
+
+/* Unaffordable actions: greyed out, no hover glow, click is swallowed in JS */
+.act-btn.disabled{
+  opacity:0.4;
+  filter:grayscale(0.8);
+  cursor:not-allowed;
+}
+.act-btn.disabled:hover, .act-btn.disabled:active{
+  background: linear-gradient(180deg, #5c3d24 0%, #301f10 100%);
+  border-color:#7a5638;
+  box-shadow: inset 0 0 4px #000;
+  filter:grayscale(0.8);
+}
+
+
+/* Active/pulsing state when waiting for map tap */
+.act-btn.rally-active {
+  border-color: #ffd700 !important;
+  background: linear-gradient(180deg, #5a3800 0%, #2a1800 100%) !important;
+  box-shadow: 0 0 12px rgba(255,215,0,0.7), inset 0 0 5px #000 !important;
+  animation: rally-pulse 1s ease-in-out infinite;
+}
+@keyframes rally-pulse {
+  0%   { box-shadow: 0 0 8px  rgba(255,215,0,0.6), inset 0 0 5px #000; }
+  50%  { box-shadow: 0 0 18px rgba(255,215,0,1.0), inset 0 0 5px #000; }
+  100% { box-shadow: 0 0 8px  rgba(255,215,0,0.6), inset 0 0 5px #000; }
+}
+.btn-emoji{
+  font-size:16px;
+  margin-bottom:2px;
+  line-height:1;
+}
+
+/* ---- SPRITE ICONS (sprites.png) ----
+   8 columns x 8 rows. background-size:800%/800% makes each cell exactly
+   fill the element regardless of its box size, so background-position is
+   expressed as fractions (c/7, r/7) rather than fixed pixel offsets — the
+   same .icon-* class works at any display size (button icon, portrait, etc).
+   The original 7x7 art occupies cells (0..6, 0..6) unchanged; column 7 and
+   row 7 are the new cells: icon-tradecart (7,0, "cart" placeholder) plus
+   icon-spare1..14 — empty labeled boxes to draw future art into.
+   Step = 100/7 ≈ 14.2857%.
+*/
+.sprite-icon{
+  display:inline-block;
+  background-image:url('sprites.png');
+  background-repeat:no-repeat;
+  background-size:800% 800%; /* one 8x8 master sheet — see the labeled placeholder cells */
+}
+/* New spare cells (empty labeled boxes) — column 7 (rows 1-7) then row 7
+   (cols 0-6). Wire any of these up by renaming the class + drawing its cell. */
+/* ---- MARKET buy/sell exchange (js/ui.js): two labeled rows (Buy / Sell) of
+   resource icons with the live gold price printed below each. Dedicated .mkt-*
+   classes (not .act-btn) so it stays visible in both skins, which hide
+   .act-btn labels/costs. Spans the full action area in either layout. ---- */
+/* Sized to content (not width:100%): in the portrait bottom bar the rows are
+   wider than the visible action strip, and a 100%-wide box CLIPS them — at
+   max-content they extend the bar's normal horizontal scroll instead. */
+.mkt-exchange{ flex:0 0 auto; width:max-content; box-sizing:border-box;
+  display:flex; flex-direction:column; gap:2px; padding:2px; }
+.mkt-row{ display:flex; align-items:center; gap:4px; }
+.mkt-row-label{ flex:0 0 30px; font:bold 10px sans-serif; color:#e8dab0;
+  text-transform:uppercase; letter-spacing:0.5px; }
+/* Icon-beside-price (not stacked): keeps the two rows short enough to fit
+   the classic skin's 80px bottom panel, so both skins share one shape.
+   Uniform min-width so the Buy and Sell rows form aligned equal columns. */
+.mkt-cell{ display:flex; align-items:center; justify-content:center; gap:4px;
+  cursor:pointer; min-width:60px; box-sizing:border-box;
+  padding:4px 7px; border-radius:4px; background:rgba(0,0,0,0.28); }
+.mkt-cell:hover{ background:rgba(255,255,255,0.14); }
+.mkt-cell.disabled{ opacity:0.4; filter:grayscale(0.8); cursor:not-allowed; }
+.mkt-cell.disabled:hover{ background:rgba(0,0,0,0.28); }
+.mkt-ico{ width:20px; height:20px; }
+.mkt-price{ display:flex; align-items:center;
+  font:bold 10px sans-serif; color:#ffe14d; }
+
+/* ---- Market exchange POPUP (mobile skin, js/ui.js refreshMktPopup): a
+   dismissible card over the battlefield — the inline exchange filled the
+   whole landscape rail and buried the other buttons. Bigger cells and
+   prices than the old strip widget. ---- */
+#mkt-popup{
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  /* Clear of BOTH the bottom bar and the corner controls floating above
+     it (back arrow bottom-left, bell/map/home cluster bottom-right — their
+     top edges reach ~142px from the bottom at every breakpoint). */
+  bottom: 158px;
+  z-index: 60;
+  background: linear-gradient(180deg, #3d2310 0%, #1f0f04 100%);
+  border: 2px solid #bfa054;
+  border-radius: 10px;
+  padding: 8px 10px 10px;
+  box-shadow: 0 6px 22px rgba(0,0,0,0.65), inset 0 0 6px rgba(0,0,0,0.5);
+}
+#mkt-popup-head{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #ffd700;
+  font: bold 14px 'Cinzel', Georgia, serif;
+  margin-bottom: 7px;
+}
+#mkt-popup-ico{ width: 20px; height: 20px; display: inline-block; }
+#mkt-popup-head span:nth-child(2){ flex: 1; }
+#mkt-popup-x{
+  background: none;
+  border: 1px solid #bfa054;
+  color: #ffebad;
+  border-radius: 4px;
+  width: 24px; height: 24px;
+  font-size: 13px;
+  cursor: pointer;
+  line-height: 1;
+}
+#mkt-popup-x:hover{ background: rgba(140,29,29,0.6); border-color: #fff; }
+#mkt-popup .mkt-exchange{ width: auto; }
+#mkt-popup .mkt-ico{ width: 26px; height: 26px; }
+#mkt-popup .mkt-price{ font-size: 14px; }
+#mkt-popup .mkt-cell{ min-width: 82px; padding: 7px 9px; justify-content: center; }
+#mkt-popup .mkt-row-label{ flex-basis: 34px; font-size: 11px; }
+/* Landscape rail: the bar is a left rail, so the popup can sit low and
+   centered over the remaining battlefield width. */
+@media (orientation: landscape) and (max-height: 500px) {
+  #mkt-popup{ bottom: 14px; left: calc(50% + 48px); }
+}
+
+/* ---- Queue/prepaid count badge on action buttons (js/ui.js): the number
+   of queued units sits ON the train button (progress fill along its bottom
+   edge shows the active one, same anatomy as Advance Age) — there is no
+   separate queue widget. Tapping the badge cancels one; the Mill's prepaid
+   variant is display-only. ---- */
+.act-btn .queue-count{
+  position:absolute; top:2px; right:2px; z-index:2;
+  min-width:20px; height:20px; padding:0 5px; box-sizing:border-box;
+  display:flex; align-items:center; justify-content:center;
+  border-radius:10px; background:#1d5c2e; border:1px solid #ffd700;
+  color:#fff; font:bold 12px sans-serif;
+  box-shadow:1px 1px 2px rgba(0,0,0,0.6);
+  /* DISPLAY-ONLY: taps pass through to the button underneath. A tappable
+     badge sat exactly where a rapid second tap lands and cancelled the
+     unit that tap meant to queue. Cancelling queued units is a classic-
+     skin affordance (its AoE2-style queue slots). */
+  pointer-events:none;
+}
+
+.btn-emoji.sprite-icon{
+  /* Fill the button's content box, same as #minimap{width:100%;height:100%}
+     fills #minimap-wrap — it auto-adapts to the button's current size
+     with no separate rules needed. */
+  width:100%;
+  height:100%;
+  margin-bottom:0;
+}
+/* The house cell art sits a touch small in its cell — nudge it up slightly so
+   it matches the visual weight of the other building icons (same per-icon
+   scale trick as #bell-btn). */
+.sprite-icon.icon-HOUSE{ transform: scale(1.1); }
+.btn-label{
+  display:none; /* name is hidden to let the icon fill the button space */
+}
+
+/* ---- MINIMAP ----
+   The isometric diamond drawn inside this box (see drawMinimap in
+   render-fx.js / getMiniTransform in iso.js) has a fixed ~2:1 (wide:tall)
+   aspect ratio — it's MAP*TW by MAP*TH, and TW/TH (64/32) are themselves
+   2:1. A *square* box (the old width===height rule) forces the diamond's
+   scale to be bounded by its own height, wasting roughly the entire top
+   and bottom halves of the box as dead padding — visible as a tiny diamond
+   floating in a mostly-empty square. Sizing the box itself to the same
+   2:1 ratio (aspect-ratio, height as the driving dimension) means the
+   diamond actually fills its box, in both this skin and classic's.
+   right:0 + overflow:hidden clips the transparent canvas corners flush to
+   the screen edge — no more negative right offset hacks. */
+#minimap-wrap {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: min(22vw, 190px);
+  aspect-ratio: 2 / 1;
+  overflow: hidden;
+  z-index: 20;
+  flex-shrink: 0;
+  /* The wrap (and the canvas inside it) never intercepts pointer events —
+     the game canvas underneath always receives every click/tap, and its own
+     input handlers decide whether a point falls on the minimap's diamond
+     (via isInMinimapDiamond in input.js, the same geometry drawMinimap uses
+     to paint it) before treating it as a minimap pan vs. a game command.
+     That single JS-side check is the one source of truth for "is this the
+     minimap," instead of an approximate CSS clip-path that has to be kept
+     in sync with the canvas geometry by hand. */
+  pointer-events: none;
+}
+#minimap-wrap.minimap-expanded {
+  width: 100% !important;
+  height: 50vw !important;
+  max-width: none !important;
+  max-height: none !important;
+  left: 0 !important;
+  right: 0 !important;
+  top: 0 !important;
+  bottom: auto !important;
+  margin: 0 !important;
+  background: none;
+}
+#minimap{
+  width:100%;
+  height:100%;
+}
+/* Map toggle button glows while the minimap is expanded */
+#map-btn.map-active{
+  filter:drop-shadow(0 0 6px #ffd700) brightness(1.25);
+}
+/* Visual-only cues (the wrap is always pointer-events:none, so these can't
+   actually block anything — they just de-emphasize the minimap while
+   something else has priority: placing a building/wall, or dragging a
+   selection box). */
+#minimap-wrap.build-active,
+#minimap-wrap.drag-select-active {
+  opacity: 0.45;
+}
+
+/* ---- FLOATING NOTIFICATIONS ---- */
+#msg{
+  position:fixed;
+  top:48px;
+  left:50%;
+  transform:translateX(-50%);
+  color:#ffd700;
+  font-family: 'Times New Roman', Georgia, serif;
+  font-size:15px;
+  font-weight:bold;
+  text-shadow:1px 1px 4px #000, -1px -1px 4px #000, 0 0 8px #000;
+  opacity:0;
+  transition:opacity .3s;
+  white-space:nowrap;
+  z-index:10000;
+}
+#help-hint{
+  position:fixed;
+  top:44px;
+  left:50%;
+  transform:translateX(-50%);
+  color:#d1c499;
+  font-size:11px;
+  text-shadow:0 0 4px #000, 0 0 2px #000;
+  z-index:10000;
+  pointer-events:none;
+  opacity:0;
+  transition:opacity .5s;
+}
+
+/* ---- PARCHMENT START SCROLL DIALOG ---- */
+#tutorial{
+  position:fixed;
+  top:0;
+  left:0;
+  width:100%;
+  height:100%;
+  background:rgba(0,0,0,0.85);
+  z-index:100;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:default;
+  padding:12px;
+  overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
+  touch-action:pan-y;
+}
+#tutorial-box {
+  background: radial-gradient(circle, #f9f2db 0%, #dec99a 100%);
+  border: 5px double #5c3b1e;
+  border-radius: 6px;
+  padding: 0;
+  width: min(460px, calc(100vw - 16px));
+  max-width: none;
+  color: #3b220c;
+  text-align: left;
+  box-shadow: 0 15px 45px rgba(0,0,0,0.9), inset 0 0 40px rgba(92,59,30,0.25);
+  font-family: 'Inter', sans-serif;
+  overflow-x: hidden; /* clip #title-logo's edge-to-edge bleed to the box's rounded corners */
+  overflow-y: hidden;
+  max-height: calc(100vh - 16px);
+  max-height: calc(100dvh - 16px);
+  display: flex;
+  flex-direction: column;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+#title-logo {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+}
+.menu-shell{
+  display:flex;
+  flex-direction:column;
+  width:100%;
+  min-height:0;
+}
+.menu-hero{
+  display:block;
+  flex:0 0 auto;
+}
+.title-pane{
+  display:block;
+}
+.menu-content{
+  display:flex;
+  flex-direction:column;
+  justify-content:space-between;
+  min-width:0;
+  width:100%;
+  padding:2px 14px 0;
+}
+.menu-divider {
+  height: 2px;
+  background: linear-gradient(90deg, transparent 0%, #8b6c43 50%, transparent 100%);
+  margin: 0;
+}
+/* Settings as compact segmented controls grouped into a simple mobile-friendly
+   stack: difficulty/map, speed, then sound/music. Symmetric top/bottom margin
+   (paired with .menu-divider's own zero margin above) keeps every gap in the
+   menu — divider-to-grid, grid-to-divider, divider-to-button-row — at the
+   same 8px rhythm as the button rows themselves (.menu-button-container's
+   margin-top), instead of the previous asymmetric 3px/13px mix. */
+.setup-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+.setup-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.setup-row-audio {
+  opacity: 0.85;
+}
+.setup-col-speed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.setup-col {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.setup-col h3 {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex: 0 0 92px;
+  gap: 5px;
+  font-family: 'Cinzel', serif;
+  font-size: 12px;
+  font-weight: 700;
+  color: #5c3b1e;
+  margin-bottom: 0;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+/* The base rules above stack every setting as its own full-width row
+   (deliberately, for narrow/mobile screens — see the "mobile-friendly
+   stack" comment on .setup-grid). But the HTML already groups these into
+   row-pairs (Difficulty+Map Size, then Speed+Sound+Music) that were never
+   actually laid out side by side at ANY width — every screen size got the
+   single-column mobile stack, which is why the menu reads as tall and
+   asymmetric on desktop (5 full-width rows, one of which — Music — only
+   has 2 segments instead of 3, so its two halves don't line up with any
+   other row's column edges). This turns each .setup-row into a real
+   side-by-side grid on wider screens, label-above-control per column
+   (rather than label-left/control-right, which doesn't fit in a narrower
+   per-column width) — narrower screens keep the original stacked layout
+   completely untouched. */
+@media (min-width: 700px) {
+  .setup-row {
+    flex-direction: row;
+    gap: 14px;
+  }
+  .setup-col {
+    flex: 1 1 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+  .setup-col h3 {
+    flex: 0 0 auto;
+    justify-content: center;
+  }
+}
+.segmented {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 2px solid #8b6c43;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #ebd9af;
+}
+.segment {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 4px 2px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  font-family: Georgia, serif;
+  font-size: 12px;
+  font-weight: bold;
+  color: #3b220c;
+  text-align: center;
+}
+.segment:not(:last-child) {
+  border-right: 2px solid #8b6c43;
+}
+.segment:hover {
+  background: rgba(92, 59, 30, 0.12);
+}
+.segment input[type="radio"] {
+  display: none;
+}
+.segment:has(input:checked) {
+  background: #8c1d1d;
+  color: #ffebad;
+}
+/* ---- PRE-MATCH LOBBY panel (#menu-panel-lobby, built by js/lobby.js) ---- */
+#lobby-roster {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+.lobby-seat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 2px solid #8b6c43;
+  border-radius: 6px;
+  background: #ebd9af;
+}
+.lobby-seat.lobby-seat-empty { opacity: 0.6; }
+/* Add-AI button + its E/M/H difficulty on one row. */
+.lobby-addai-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.lobby-addai-row #lobby-addai-btn { flex: 1 1 auto; }
+.lobby-addai-row .segmented { flex: 0 0 auto; width: auto; min-width: 108px; }
+/* The swap partner mid-slide — lifted above its neighbours so it reads as
+   moving into the other team while it animates across. */
+.lobby-seat.lobby-seat-previewing {
+  position: relative;
+  z-index: 5;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.3);
+}
+/* Live "make room" gap that opens where the dragged seat will land; its growing
+   height slides the other tiles aside. */
+.lobby-seat-placeholder {
+  height: 0;
+  overflow: hidden;
+  border: 2px dashed #8c1d1d;
+  border-radius: 6px;
+  background: rgba(140, 29, 29, 0.08);
+  margin-bottom: 6px;
+  box-sizing: border-box;
+  transition: height 0.14s ease;
+}
+.lobby-seat-swatches {
+  display: flex;
+  gap: 4px;
+}
+.lobby-swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 2px solid #5c3b1e;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: inset 0 0 2px rgba(0,0,0,0.4);
+}
+.lobby-swatch.lobby-swatch-sel { border-color: #ffebad; box-shadow: 0 0 0 2px #8c1d1d; }
+.lobby-swatch[disabled] { cursor: not-allowed; opacity: 0.35; }
+.lobby-seat-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: rgba(255,255,255,0.35);
+  border: 1px solid #8b6c43;
+  border-radius: 3px;
+  color: #3b220c;
+  font-family: Georgia, serif;
+  font-size: 14px;
+  font-weight: bold;
+  padding: 3px 6px;
+  outline: none;
+}
+.lobby-seat-name[readonly] { background: transparent; border-color: transparent; }
+.lobby-seat-badge {
+  flex: 0 0 auto;
+  font-family: 'Cinzel', serif;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #5c3b1e;
+}
+.lobby-seat-badge.lobby-ready { color: #1f6e30; }
+.lobby-team-select {
+  flex: 0 0 auto;
+  background: rgba(255,255,255,0.35);
+  border: 1px solid #8b6c43;
+  border-radius: 3px;
+  color: #3b220c;
+  font-family: Georgia, serif;
+  font-size: 13px;
+  font-weight: bold;
+  padding: 2px 3px;
+  outline: none;
+}
+.lobby-team-select[disabled] { opacity: 0.6; }
+#lobby-invite-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 2px 6px;
+  font-size: 12px;
+  color: #5c3b1e;
+  font-family: 'Cinzel', serif;
+  font-weight: 700;
+}
+#lobby-invite-link {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: rgba(255,255,255,0.35);
+  border: 1px solid #8b6c43;
+  border-radius: 3px;
+  color: #3b220c;
+  font-size: 11px;
+  padding: 2px 6px;
+  outline: none;
+}
+.lobby-team-group {
+  border: 2px dashed transparent;
+  border-radius: 6px;
+  padding: 2px 4px;
+  margin-bottom: 4px;
+  transition: border-color 0.12s, background 0.12s;
+}
+.lobby-team-group.lobby-drop-over {
+  border-color: #8c1d1d;
+  background: rgba(140, 29, 29, 0.08);
+}
+/* The boundary between the two teams. Dragging a player above it drops them on
+   Team 1, below it on Team 2. Emphasised while a drag is in progress. */
+.lobby-team-divider {
+  height: 2px;
+  margin: 8px 4px;
+  border-radius: 2px;
+  background: repeating-linear-gradient(90deg, #8b6c43 0 8px, transparent 8px 15px);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+#lobby-roster.lobby-dragging-active .lobby-team-divider {
+  background: #8c1d1d;
+  box-shadow: 0 0 7px rgba(140, 29, 29, 0.6);
+}
+.lobby-team-header {
+  font-family: 'Cinzel', serif;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #5c3b1e;
+  margin: 4px 0 3px;
+  border-bottom: 1px solid #8b6c43;
+  padding-bottom: 2px;
+}
+.lobby-drag-handle {
+  flex: 0 0 auto;
+  cursor: grab;
+  color: #7a5c2e;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  user-select: none;
+  touch-action: none; /* let the custom pointer drag own touch gestures */
+}
+.lobby-drag-handle:active { cursor: grabbing; }
+.lobby-seat-dragging { opacity: 0.35; }
+.lobby-hint {
+  font-family: Georgia, serif;
+  font-size: 12px;
+  color: #7a3b1e;
+  text-align: center;
+  margin: 2px 0 4px;
+}
+/* The live clone that follows the pointer/finger during a drag. */
+.lobby-drag-ghost {
+  position: fixed;
+  left: 0; top: 0;
+  z-index: 300; /* above #tutorial (100) */
+  margin: 0;
+  pointer-events: none; /* so elementFromPoint sees the team group beneath */
+  box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+  opacity: 0.96;
+  cursor: grabbing;
+}
+.lobby-mini-btn {
+  font-family: Georgia, serif;
+  font-size: 11px;
+  font-weight: bold;
+  color: #3b220c;
+  background: #ebd9af;
+  border: 1px solid #8b6c43;
+  border-radius: 3px;
+  padding: 2px 5px;
+  cursor: pointer;
+}
+.lobby-mini-btn:hover:not([disabled]) { background: rgba(92, 59, 30, 0.14); }
+.lobby-mini-btn[disabled] { opacity: 0.4; cursor: not-allowed; }
+#lobby-chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  height: 92px;
+  overflow-y: auto;
+  margin: 8px 0 6px;
+  padding: 6px 8px;
+  border: 2px solid #8b6c43;
+  border-radius: 6px;
+  background: rgba(20, 12, 4, 0.06);
+  font-family: Georgia, serif;
+  font-size: 13px;
+  text-align: left;
+}
+#lobby-chat-input-wrap { display: flex; margin-bottom: 6px; }
+#lobby-chat-input {
+  width: 100%;
+  background: rgba(255,255,255,0.4);
+  border: 1px solid #8b6c43;
+  border-radius: 4px;
+  color: #3b220c;
+  font-family: Georgia, serif;
+  font-size: 14px;
+  padding: 5px 8px;
+  outline: none;
+}
+/* Standalone game-over "See Map" button, centered just below the canvas
+   VICTORY/DEFEAT banner (banner spans the vertical middle). */
+#see-map-btn {
+  position: fixed;
+  left: 50%;
+  top: calc(50% + 74px);
+  transform: translateX(-50%);
+  z-index: 140; /* above the canvas banner, below the help/menu overlays */
+  width: auto;
+  min-width: 160px;
+}
+/* Keep a SOLID background on hover/press (the default hover swaps in a
+   translucent fill that reads as "faded" over the map), and preserve the
+   centering transform so the button doesn't jump. */
+#see-map-btn:hover, #see-map-btn:active {
+  background: #e0c586;
+  border-color: #5c3b1e;
+  transform: translateX(-50%);
+}
+/* ---- HOW TO PLAY overlay ---- */
+#help-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.72);
+  z-index: 150; /* above the start menu (#tutorial is 100), below the tooltip (200) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+#help-box {
+  position: relative;
+  background: linear-gradient(180deg, #3d2812 0%, #241505 100%);
+  border: 2px solid #bfa054;
+  border-radius: 8px;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.8);
+  color: #e8dcb8;
+  width: 560px;
+  max-width: 94vw;
+  max-height: 86vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 18px 22px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+#help-box h2 {
+  font-family: 'Cinzel', Georgia, serif;
+  color: #ffd700;
+  font-size: 20px;
+  margin: 0 0 10px;
+  text-align: center;
+}
+#help-box h4 {
+  font-family: 'Cinzel', Georgia, serif;
+  color: #ffcf5e;
+  font-size: 14px;
+  margin: 0 0 6px;
+  border-bottom: 1px solid #5a3e1a;
+  padding-bottom: 3px;
+}
+#help-box p { margin: 6px 0; color: #d8caa4; }
+.help-section { margin-bottom: 14px; }
+.help-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 3px 0;
+  color: #e2d5ac;
+}
+.help-ico { flex-shrink: 0; }
+#help-close {
+  position: sticky;
+  float: right;
+  top: 0;
+  background: #5c3d24;
+  border: 1px solid #bfa054;
+  color: #ffebad;
+  border-radius: 4px;
+  width: 30px;
+  height: 30px;
+  font-size: 15px;
+  cursor: pointer;
+}
+/* Controls: two labeled columns of "input → what it does" rows — far easier
+   to scan than prose with dot separators. Stacks to one column on phones. */
+.help-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 18px;
+}
+.help-controls-title {
+  font-weight: bold;
+  color: #ffcf5e;
+  margin-bottom: 4px;
+}
+.help-kv {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 3px 0;
+}
+.help-k {
+  flex: 0 0 46%;
+  color: #f0e3ba;
+  font-weight: bold;
+}
+.help-v { color: #c9bb94; }
+.help-kv kbd {
+  background: #1d1206;
+  border: 1px solid #8a6a3a;
+  border-radius: 3px;
+  padding: 0 5px;
+  font-family: inherit;
+  font-size: 11px;
+}
+@media (max-width: 600px) {
+  .help-controls { grid-template-columns: 1fr; }
+}
+
+.help-disclaimer {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid #5a3e1a;
+  font-size: 10px;
+  color: #9c8a5e;
+  line-height: 1.5;
+}
+@media (max-width: 600px) {
+  #help-box { font-size: 12px; padding: 14px 14px 10px; }
+  #help-box h2 { font-size: 17px; }
+}
+
+.menu-action-btn {
+  border: 2px solid #8b6c43;
+  background: #ebd9af;
+  color: #3b220c;
+  box-shadow: none;
+  font-family: Georgia, serif;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 0;
+  padding: 0 14px;
+  min-height: 46px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  border-radius: 4px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+}
+.menu-action-btn:active {
+  transform: translateY(1px);
+  background: #e0c586;
+}
+.menu-action-btn:hover {
+  background: rgba(92, 59, 30, 0.12);
+  border-color: #5c3b1e;
+}
+.menu-action-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+  filter: grayscale(0.3);
+  box-shadow: none;
+}
+.menu-action-btn:disabled:active {
+  transform: none; /* no press-down feedback while it can't actually be clicked */
+}
+.menu-button-container {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  margin-top: 8px;
+  padding: 8px 0 max(10px, env(safe-area-inset-bottom));
+}
+/* Puts #save-load-row and #mp-row on one visual line (Load Game next to
+   Host Multiplayer Game) while keeping them as separate elements — both
+   are independently shown/hidden in several places in js/init.js
+   (restoreMenuForMatch, enterGuestJoinMode, onHostClicked), so merging
+   them into one container would mean updating every one of those. */
+.menu-row-pair {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+.menu-row-pair > .menu-button-container {
+  flex: 1 1 0;
+  margin-top: 0;
+}
+#start-game-btn,
+#resume-game-btn,
+#save-game-btn,
+#load-game-btn,
+#host-game-btn {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.menu-help-btn {
+  flex: 0 0 46px;
+  width: 46px;
+  filter: saturate(0.7);
+  font-size: 13px;
+}
+
+/* ---- RESPONSIVE BREAKPOINTS ---- */
+@media(max-width:600px){
+  /* The top bar is cramped on phones — the age chip moves to the idle
+     info box in the bottom-right corner (see updateUI, js/ui.js), so hide
+     it here to free the resource row. */
+  .age-res{display:none}
+  #tutorial{
+    /* Inherits the base center/center alignment (the old top-align
+       override caused a visible snap-to-top at this breakpoint). Safe
+       because #tutorial-box's max-height below always leaves room for
+       the switch link — a centered flex child TALLER than its scroll
+       container would get its top clipped unreachably. */
+    padding:
+      max(8px, env(safe-area-inset-top))
+      max(8px, env(safe-area-inset-right))
+      max(8px, env(safe-area-inset-bottom))
+      max(8px, env(safe-area-inset-left));
+  }
+  #tutorial-box{
+    width: min(460px, calc(100vw - 16px));
+    max-width: none;
+    min-height: 0;
+    /* Leaves room for the switch-UI link below the box (see the
+       centering note on #tutorial above). */
+    max-height: calc(100dvh - 56px);
+    max-height: calc(100dvh - 16px);
+    padding: 0;
+    border-width: 3px;
+    overflow-y: hidden;
+    text-align: left;
+  }
+  #pop{font-size:13px;padding:3px 5px;height:30px}
+  /* Corner action buttons (idle/bell/map/home/chat) grow on small screens
+     for touch — a ~28px desktop chip is far below a comfortable finger
+     target, and it's exactly on small phones that these one-tap shortcuts
+     matter most. (Duplicate 30px override further down this block removed;
+     this is the single source at ≤600px.) */
+  :root{--corner-size:42px}
+  .act-btn.back-btn{bottom:100px}
+  #pop-wrap{bottom:100px}
+  #minimap-wrap:not(.minimap-expanded) { display: none; }
+  /* Corner minimap is gone at this width — the only way back to a map view
+     is this button, so it earns its keep here (hidden by default above). */
+  #map-btn { display: flex; }
+
+  #bottom{height:96px}
+  #sel-info{
+    width: 96px;
+    padding: 6px 8px;
+  }
+  #sel-portrait{font-size:24px}
+  #sel-details{font-size:10px}
+  :root{--tile-size:70px}
+  .act-btn{font-size:13px}
+  #sel-info.multi-select{max-width:calc(100% - 102px)}
+  /* Minimap sizing is handled by the base min(28vw,220px) rule — no override needed. */
+  #msg{font-size:14px;top:56px;left:8px;transform:none;white-space:normal;max-width:52%;text-align:left}
+  #help-hint{top:56px;left:8px;transform:none;white-space:normal;max-width:52%;text-align:left}
+}
+@media(max-width:480px){
+  #bottom{height:90px}
+  #sel-info{
+    width: 88px;
+    padding: 5px 7px;
+  }
+  #sel-portrait{font-size:20px}
+  #sel-details{font-size:9px}
+  :root{--tile-size:64px}
+  .act-btn{font-size:12px}
+  #sel-info.multi-select{max-width:calc(100% - 94px)}
+  /* Even larger on the smallest phones — biggest tap target where fingers
+     cover the most screen. */
+  :root{--corner-size:48px}
+  .act-btn.back-btn{bottom:94px}
+  #pop{font-size:12px;padding:3px 4px;height:27px}
+  #pop-wrap{bottom:94px}
+}
+
+@media (max-width: 1200px) and (max-height: 700px) and (min-aspect-ratio: 4/3) {
+  #tutorial{
+    /* SYMMETRIC horizontal padding: in landscape a notched phone reports a
+       large inset on one side only (the notch side), and per-side padding
+       shifted the flex-centered box toward the other edge — "menu snaps
+       left". Both sides take the LARGER of the two insets so the box
+       stays visually centered on the screen. */
+    padding: max(2px, env(safe-area-inset-top))
+             max(8px, env(safe-area-inset-left), env(safe-area-inset-right))
+             max(2px, env(safe-area-inset-bottom))
+             max(8px, env(safe-area-inset-left), env(safe-area-inset-right));
+  }
+  #tutorial-box{
+    width:min(960px, calc(100vw - 12px));
+    max-height:calc(100dvh - 4px);
+    display:flex;
+    flex-direction:row;
+    gap:0;
+    align-items:stretch;
+  }
+  .menu-shell{
+    flex-direction:row;
+    width:100%;
+    min-width:0;
+    gap:0;
+    align-items:stretch;
+  }
+  .menu-hero{
+    flex:0 0 56%;
+    display:flex;
+    min-width:0;
+    overflow:hidden;
+    position:relative;
+  }
+  .title-pane{
+    position:relative;
+    width:100%;
+    display:flex;
+    align-items:center;
+    min-width:0;
+    overflow:hidden;
+  }
+  /* The logo's natural aspect drives the BOX height: full pane width,
+     height follows — the parchment box hugs the artwork instead of
+     stretching to fill the screen. */
+  #title-logo{
+    position:static;
+    display:block;
+    width:100%;
+    height:auto;
+    margin:0;
+  }
+  .menu-content{
+    flex:1 1 auto;
+    display:flex;
+    flex-direction:column;
+    justify-content:center;
+    padding:2px 10px;
+  }
+}
+
+
+/* ---- STANCE / AUTO-ATTACK BUTTON STYLES ---- */
+.stance-status {
+  display: block;
+  font-size: 10px;
+  font-weight: bold;
+  margin-top: 2px;
+  text-shadow: 1px 1px 1px #000;
+}
+.status-on {
+  color: #00ffcc;
+}
+.status-off {
+  color: #ff4444;
+}
+.stance-btn:hover {
+  background: linear-gradient(180deg, #4a3e2a 0%, #261f12 100%);
+  border-color: #ffd700;
+}
+
+#global-stance-btn {
+  color: #ffebad;
+  font-size: 11px;
+  font-weight: bold;
+  margin-left: 8px;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid #5a3f1d;
+  border-radius: 4px;
+  padding: 2px 8px;
+  box-shadow: inset 0 0 4px #000;
+  text-shadow: 1px 1px 1px #000;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+#global-stance-btn:hover {
+  border-color: #ffd700;
+  background: rgba(40, 20, 5, 0.65);
+}
+
+.idle-active {
+  animation: flash-gold 1.2s infinite alternate;
+  border-color: #ffd700 !important;
+}
+/* Town bell ringing: same 🔔 icon, but the button lights up while active */
+#bell-btn.bell-active {
+  animation: flash-gold 1.2s infinite alternate;
+  border-color: #ffd700 !important;
+  background: linear-gradient(180deg, #8a5a20 0%, #5c3810 100%);
+  box-shadow: 0 0 8px #ffd700, inset 0 0 4px #000;
+}
+.idle-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  background: #ff4444;
+  color: #fff;
+  border-radius: 50%;
+  font-size: 9px;
+  width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  border: 1px solid #ffebad;
+  box-shadow: 0 0 3px rgba(0,0,0,0.5);
+  font-family: sans-serif;
+  z-index: 10;
+}
+
+@keyframes flash-gold {
+  0% {
+    background-color: rgba(90, 60, 20, 0.6);
+    box-shadow: 0 0 4px #ffd700, inset 0 0 4px #000;
+  }
+  100% {
+    background-color: rgba(220, 160, 40, 0.85);
+    box-shadow: 0 0 12px #ffd700, inset 0 0 4px #000;
+    color: #fff;
+  }
+}
+
+#menu-btn, #fs-btn {
+  color: #ffd700;
+  font-family: 'Cinzel', serif;
+  font-size: 13px;
+  font-weight: bold;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid #5a3f1d;
+  border-radius: 4px;
+  padding: 0;
+  height: 24px;
+  width: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 0 4px #000;
+  text-shadow: 1px 1px 1px #000;
+  white-space: nowrap;
+  transition: all 0.15s;
+  position: fixed;
+  top: 4.5px;
+  z-index: 30;
+  pointer-events: auto;
+}
+#menu-btn .btn-emoji, #fs-btn .btn-emoji{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:100%;
+  height:100%;
+  line-height:1;
+}
+#fs-btn .btn-emoji{
+  position: relative;
+  top: 1px;
+}
+#menu-btn:hover, #fs-btn:hover {
+  border-color: #fff;
+  background: rgba(140, 29, 29, 0.65);
+  box-shadow: 0 0 6px rgba(229, 193, 88, 0.4), inset 0 0 4px #000;
+}
+#fs-btn{
+  right: 42px;
+}
+#menu-btn{
+  right: 8px;
+}
+/* Multiplayer bandwidth readout (js/net.js shows it only with a connected
+   peer, on non-touch devices, when the window is wide enough that it
+   doesn't crowd the resource bar). Sits left of the fullscreen button,
+   same chrome as the menu/fs buttons. Display is toggled by JS — flex
+   when active. */
+#net-stats{
+  /* In-flow flex child of #topbar, sitting right after the resource chips
+     so it stays aligned with them at any width. */
+  display: none;
+  align-items: center;
+  margin-left: 10px;
+  height: 22px;
+  padding: 0 8px;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid #5a3f1d;
+  border-radius: 4px;
+  box-shadow: inset 0 0 4px #000;
+  color: #d9c98f;
+  font-family: monospace;
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+
+
+/* ---- HOVER TOOLTIP (desktop only) ---- */
+#tooltip {
+  position: fixed;
+  z-index: 200;
+  pointer-events: none;
+  max-width: 220px;
+  padding: 8px 12px;
+  background: radial-gradient(ellipse at top left, #2e1a08 0%, #160b02 100%);
+  border: 2px solid #bfa054;
+  border-radius: 4px;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.85), inset 0 0 8px rgba(0,0,0,0.5);
+  color: #ffebad;
+  font-family: 'Inter', sans-serif;
+  font-size: 11px;
+  line-height: 1.45;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  /* hidden by default; JS shows/hides via .visible */
+  display: none;
+}
+#tooltip.visible {
+  display: block;
+  opacity: 1;
+}
+#tooltip .tip-name {
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: 12px;
+  font-weight: bold;
+  color: #ffd700;
+  text-shadow: 1px 1px 2px #000;
+  margin-bottom: 4px;
+}
+#tooltip .tip-desc {
+  color: #d1c499;
+  font-size: 10px;
+  margin-bottom: 5px;
+  line-height: 1.4;
+}
+#tooltip .tip-stats {
+  color: #ffd700;
+  font-size: 10px;
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+#tooltip .tip-cost {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid #5a3f1d;
+}
+#tooltip .tip-cost-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+}
+/* Small inline resource icon for the selection card's task line (icons +
+   counts instead of words — e.g. 🪓 [wood]7 for "chopping, carrying 7 wood") */
+.res-mini-icon {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  vertical-align: -2px;
+  background-image: url('sprites.png');
+  background-repeat: no-repeat;
+  background-size: 800% 800%;
+}
+#tooltip .tip-cost-icon {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  background-image: url('sprites.png');
+  background-repeat: no-repeat;
+  background-size: 800% 800%;
+  flex-shrink: 0;
+}
+#tooltip .tip-cost-label {
+  color: #ffebad;
+}
+#tooltip .tip-hp-bar {
+  width: 100%;
+  height: 5px;
+  background: #251408;
+  border: 1px solid #5c3b1e;
+  border-radius: 1px;
+  margin: 4px 0 2px;
+  overflow: hidden;
+}
+#tooltip .tip-hp-fill {
+  height: 100%;
+  transition: width 0.15s;
+}
+@media (hover: none) {
+  /* Completely suppress tooltip on touch-only devices */
+  #tooltip { display: none !important; }
+}
+
+/* ---- UI SWITCH LINK (index.html <-> classic.html) ---- */
+.ui-switch-link {
+  text-align: center;
+  margin-top: 6px;
+}
+.ui-switch-link a {
+  color: #b89a5e;
+  font-size: 11px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.ui-switch-link a:hover {
+  color: #ffd700;
+}
+
+/* ---- MULTIPLAYER (host/join) ---- */
+#mp-status-panel {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(0,0,0,0.25);
+  border: 1px solid #8b6c43;
+  border-radius: 6px;
+  text-align: center;
+}
+#mp-status-text {
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: 12px;
+  color: #5c3b1e;
+  margin-bottom: 6px;
+}
+#mp-link-row {
+  display: flex;
+  gap: 6px;
+}
+#mp-link-box {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  padding: 6px 8px;
+  border: 2px solid #8b6c43;
+  border-radius: 4px;
+  background: #ebd9af;
+  color: #3b220c;
+}
+
+/* Full-screen block while a connection is dropped mid-match — deliberately
+   reuses #tutorial-box's parchment look for visual consistency, but is its
+   own overlay since #tutorial itself is hidden for the entire match. */
+#mp-disconnect-overlay {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.75);
+  z-index: 180; /* above in-match UI, below the tooltip layer (200) */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+}
+#mp-disconnect-box {
+  background: radial-gradient(circle, #f9f2db 0%, #dec99a 100%);
+  border: 5px double #5c3b1e;
+  border-radius: 6px;
+  padding: 22px 28px;
+  max-width: min(380px, calc(100vw - 32px));
+  color: #3b220c;
+  text-align: center;
+  box-shadow: 0 15px 45px rgba(0,0,0,0.9), inset 0 0 40px rgba(92,59,30,0.25);
+  font-family: 'Inter', sans-serif;
+}
+#mp-disconnect-title {
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: 20px;
+  color: #5c3b1e;
+  margin-bottom: 10px;
+}
+#mp-disconnect-text {
+  font-size: 14px;
+  line-height: 1.4;
+  margin-bottom: 14px;
+}
+#mp-disconnect-spinner {
+  width: 26px;
+  height: 26px;
+  margin: 0 auto;
+  border: 3px solid #8b6c43;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: mp-disconnect-spin 0.9s linear infinite;
+}
+@keyframes mp-disconnect-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ---- MULTIPLAYER CHAT ---- */
+#chat-log {
+  position: fixed;
+  top: 72px;
+  left: 8px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 46%;
+  pointer-events: none;
+  font-family: 'Times New Roman', Georgia, serif;
+  font-size: 14px;
+  font-weight: bold;
+  text-shadow: 1px 1px 3px #000, -1px -1px 3px #000;
+}
+.chat-line {
+  color: #f2e8c9;
+  opacity: 1;
+  transition: opacity 1.2s;
+  word-break: break-word;
+}
+.chat-line-faded { opacity: 0; }
+.chat-name-host { color: #6db3ff; }
+.chat-name-guest { color: #ff6d6d; }
+#chat-input-wrap {
+  position: fixed;
+  bottom: 240px;
+  left: 8px;
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: rgba(20, 12, 4, 0.85);
+  border: 1px solid #5a3f1d;
+  border-radius: 4px;
+  box-shadow: inset 0 0 4px #000;
+}
+#chat-input-prefix {
+  color: #ffd700;
+  font-family: 'Cinzel', serif;
+  font-size: 12px;
+  font-weight: bold;
+  white-space: nowrap;
+}
+#chat-input {
+  width: 260px;
+  background: rgba(0, 0, 0, 0.5);
+  border: 1px solid #7a5c2e;
+  border-radius: 3px;
+  color: #f2e8c9;
+  font-family: 'Times New Roman', Georgia, serif;
+  font-size: 14px;
+  padding: 3px 6px;
+  outline: none;
+}
+
+
+/* ---- TWO-LEVEL MENU: new elements ---- */
+/* Primary action (Start/Play Again/Resume) gets the same deep red as a
+   checked segment so the menu has one clear "go" affordance. */
+#start-game-btn, #resume-game-btn {
+  background: #8c1d1d;
+  color: #ffebad;
+  border-color: #5c1010;
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: 14px;
+  letter-spacing: 0.5px;
+}
+#start-game-btn:hover, #resume-game-btn:hover {
+  background: #a32626;
+  border-color: #5c1010;
+}
+#start-game-btn:active, #resume-game-btn:active {
+  background: #781616;
+}
+#options-back-row {
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+}
+#options-back-btn {
+  flex: 1 1 auto;
+}
+#mp-cancel-btn, #mp-retry-btn {
+  width: 100%;
+  margin-top: 6px;
+  min-height: 38px;
+}
+#game-over-banner {
+  text-align: center;
+  padding: 10px 0 2px;
+}
+#game-over-title {
+  font-family: 'Cinzel', Georgia, serif;
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: 1px;
+}
+#game-over-title.game-over-victory { color: #9a7b1a; text-shadow: 0 1px 0 rgba(255,255,255,0.4); }
+#game-over-title.game-over-defeat  { color: #8c1d1d; text-shadow: 0 1px 0 rgba(255,255,255,0.35); }
+#game-over-sub {
+  font-family: Georgia, serif;
+  font-style: italic;
+  font-size: 13px;
+  color: #5c3b1e;
+  margin-top: 2px;
+}
+
+#mp-disconnect-save {
+  margin-top: 14px;
+  min-height: 40px;
+  padding: 0 18px;
+}
+
+#mp-qr {
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+}
+#mp-qr img {
+  background: #fff;
+  padding: 8px;
+  border-radius: 4px;
+  width: 148px;
+  height: 148px;
+  image-rendering: pixelated;
+}
+
+/* Sits INSIDE #tutorial but below the menu box — the overlay is a flex
+   column so the box stays centered with the link floating beneath it. */
+#tutorial { flex-direction: column; }
+#ui-switch-row {
+  width: 100%;
+  text-align: center;
+  margin-top: 10px;
+  flex: 0 0 auto;
+}
+#ui-switch-link {
+  font-family: Georgia, serif;
+  font-size: 11px;
+  opacity: 0.75;
+  text-decoration: underline;
+  cursor: pointer;
+}
+#ui-switch-link:hover { opacity: 1; }
+#ui-switch-link { color: #d1c499; text-shadow: 0 1px 3px #000; }
+
+#mp-share-note {
+  margin-top: 7px;
+  font-family: Georgia, serif;
+  font-size: 11px;
+  font-style: italic;
+  opacity: 0.85;
+  text-align: center;
+}
+#mp-share-note { color: #7a4a1e; }
+
+/* ==== SHORT LANDSCAPE: left HUD rail + tall toggled minimap ====
+   Height is the scarce dimension on a landscape phone (~390px) — and
+   equally on a tiny desktop window — the old bottom bar spent ~96px of it
+   and the always-on corner minimap covered the top-right. The HUD becomes
+   a LEFT VERTICAL RAIL (info card in portrait orientation on top, action
+   buttons in a 2-across grid below, under the left thumb), and the minimap
+   hides behind the 🌍 button, expanding top-to-bottom as a right-side
+   panel. Applies to ANY short landscape viewport (no pointer:coarse gate —
+   a squeezed desktop window needs the rail for the same height reason).
+   Keep this media condition aligned with isMobileLandscape() in js/ui.js. */
+@media (orientation: landscape) and (max-height: 500px) {
+  #bottom {
+    top: 36px;
+    bottom: 0;
+    left: 0;
+    /* Same 96px as the portrait bottom bar's HEIGHT — the HUD keeps one
+       consistent thickness whichever edge it lives on. Buttons stack in a
+       single centered column and scroll vertically. */
+    width: 96px;
+    height: auto;
+    flex-direction: column;
+    border-top: none;
+    border-right: 3px double #bfa054;
+  }
+  /* Buttons on top (thumb zone), info card at the BOTTOM of the rail in
+     portrait orientation — compact and tightened at rail width */
+  #sel-info {
+    order: 1;
+    width: 100%;
+    flex-shrink: 0;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    text-align: center;
+    gap: 2px;
+    padding: 5px 4px 6px;
+    border-left: none;
+    border-top: 1px solid #8b6c43;
+  }
+
+  #sel-stats { flex: 0 0 auto; width: 100%; }
+  #sel-name { font-size: 11px; line-height: 1.15; margin: 0; }
+  #sel-details { font-size: 9px; line-height: 1.3; }
+  #sel-details .hp-bar-bg { margin: 2px auto; max-width: 80px; }
+  /* Multi-select: same act-btn-sized tiles as everywhere else. The rail is
+     a COLUMN — the card keeps the rail's full width and grows downward, so
+     the width-expansion cap above must not apply. */
+  #sel-grid { justify-content: center; gap: 6px; }
+  #sel-info.multi-select { width: 100%; max-width: none; }
+
+  /* Actions below: single centered column, scrolls vertically */
+  #actions {
+    flex: 1 1 auto;
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: center;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 8px;
+  }
+  #actions::-webkit-scrollbar { height: auto; width: 5px; }
+  :root { --tile-size: 64px; }
+  /* Submenu takeover: same trick as portrait but over the whole rail —
+     identical padding in both states so the Back button never shifts. */
+  #bottom.menu-active #actions {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    padding: 8px;
+  }
+  /* No bottom bar to clear anymore. The shortcut cluster becomes a VERTICAL
+     column hugging the right edge (thumb zone), portrait-sized 42px buttons,
+     with the back arrow docked below it in the very corner. Fixed offsets:
+     the column grows upward as chat/idle/bell toggle in, so the back button
+     never moves. */
+  #pop-wrap { bottom: 6px; right: 6px; flex-direction: column; gap: 6px; }
+  :root { --corner-size: 42px; }
+  /* Back arrow in the UPPER-right, tucked under the topbar's ☰/⛶ corner —
+     the bottom-right corner stays with the shortcut column. */
+  .act-btn.back-btn { left: auto; right: 6px; top: 44px; bottom: auto; }
+  /* Chat anchors clear of the rail */
+  #chat-log { left: 104px; top: 44px; }
+  #chat-input-wrap { left: 104px; bottom: 8px; }
+  /* Minimap: hidden by default, 🌍 button toggles a tall right panel */
+  #minimap-wrap:not(.minimap-expanded) { display: none; }
+  #map-btn { display: flex; }
+  #minimap-wrap.minimap-expanded {
+    /* Same PHYSICAL size as portrait's expanded map (100vw x 50vw there =
+       100vh x 50vh here, the device just rotated), keeping the diamond's
+       2:1. Anchored flush to the upper-right corner (top:0, overlapping
+       the topbar region) — exactly like the desktop corner minimap. Only
+       the drawn diamond shows — the wrap is a positioning box (canvas is
+       cleared, not filled). */
+    top: 0 !important;
+    bottom: auto !important;
+    left: auto !important;
+    right: 0 !important;
+    height: 50vh !important;
+    width: auto !important;
+    aspect-ratio: 2 / 1 !important;
+    background: none;
+    border: none;
+  }
+}
+
+
+/* Mobile skin: combat stat numbers (attack/range/armor/speed) are hidden
+   from the selection card to save space — the tooltips carry the same
+   numbers. The job/carry/idle status icons on the same row stay. Classic
+   (its own stylesheet) shows everything. */
+.sel-combat-stats { display: none; }
+
+/* ==== FIXED-SIZE MENU DESIGNS ====
+   The menu is authored at exactly TWO design sizes — portrait (390px wide,
+   stacked) and landscape (720px wide, hero beside buttons; the existing
+   aspect-ratio media query supplies the side-by-side structure) — and
+   #menu-scale-wrap is uniformly scale()d to fit the viewport
+   (scaleMenuToFit, js/init.js), like a game splash screen. No fluid
+   breakpoint resizing = no snap points; the menu always looks identical,
+   only bigger or smaller. */
+#tutorial { overflow: hidden; }
+#menu-scale-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 0 auto;
+}
+#tutorial-box {
+  width: 390px !important;
+  max-height: none !important;
+}
+@media (max-width: 1200px) and (max-height: 700px) and (min-aspect-ratio: 4/3) {
+  #tutorial-box { width: 720px !important; }
+}
