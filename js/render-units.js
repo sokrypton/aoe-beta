@@ -23,6 +23,27 @@ function swordSwingAngle(id){
   let t=(ph-0.68)/0.32;return -1.1+1.6*(t*t*(3-2*t));                    // recover -> 0.5
 }
 
+// Should this unit be showing its attack/harvest ANIMATION right now? The
+// animation must match what the sim actually DOES: the sim only deals damage /
+// harvests when the unit is genuinely in range (see updateUnit — damageEntity
+// gated by adjToBuilding / distToTarget<=range, harvest by SHEEP_HARVEST_RANGE).
+// The old gates ("has a target and is standing still") let a unit that halted
+// just OUTSIDE range — or a surplus attacker with no reachable slot — swing at
+// thin air with nothing happening. This mirrors the sim's range checks EXACTLY,
+// so a swing always coincides with a real hit. Render-only: reads sim state,
+// never writes it.
+function inActionRange(e){
+  if(e.__animAttack) return true;            // style-gallery preview swings freely
+  if(!e.target) return false;
+  let t = entitiesById.get(e.target);
+  if(!t || t.hp<=0) return false;
+  let range = (typeof UNITS!=='undefined' && UNITS[e.utype] && UNITS[e.utype].range) || 0;
+  if(t.type==='building') return range>0 ? distToTarget(e,t)<=range : adjToBuilding(e.x,e.y,t);
+  let maxD = range>0 ? range
+           : (e.utype==='villager' && (t.utype==='sheep'||t.utype==='sheep_carcass')) ? SHEEP_HARVEST_RANGE : 1.5;
+  return distToTarget(e,t)<=maxD;
+}
+
 function drawBigSword(swinging, id){
   if(swinging){
     X.rotate(swordSwingAngle(id));
@@ -1763,6 +1784,11 @@ function drawUnit(e){
   let tc=teamColor(e.team);
   let anim=Math.sin(tick*0.15+e.id*2);
   let isActive=e.task||e.target||e.path.length>0;
+  // "Moving" for animation = following a path OR pressing into contact this
+  // tick (js/logic.js pressToContact sets e.pressWalk=tick when it steps). A
+  // pressing unit walks at its normal pace now, so it should show the walk
+  // cycle (legs), not the planted attack/idle pose, until it settles at contact.
+  let moving = e.path.length>0 || e.pressWalk===tick;
 
   // Shadow — not part of the body silhouette: the outline mask pass must
   // skip it or the selection ring traces the shadow blob too.
@@ -1852,8 +1878,8 @@ function drawUnit(e){
   e.lastY = e.y;
 
   // Torso / Head bobbing
-  let bob=e.path.length>0?Math.sin(tick*0.3+e.id)*1.5:0;
-  let sbob=e.path.length>0?Math.sin(tick*0.2+e.id)*1:0;
+  let bob=moving?Math.sin(tick*0.3+e.id)*1.5:0;
+  let sbob=moving?Math.sin(tick*0.2+e.id)*1:0;
 
   // Save context and apply horizontal flipping based on facing direction
   X.save();
@@ -1981,11 +2007,11 @@ function drawUnit(e){
   } else if(e.utype==='bear'){
     // Bear — heavy quadruped in the sheep's style: one black silhouette
     // pass, then fur fill. Side profile; X.scale(e.facing,…) flips it.
-    let attacking = (e.target||e.__animAttack) && e.path.length===0;
+    let attacking = inActionRange(e) && !moving;
     // Chase/attack read: forward lunge while mauling, slight prowl sway walking
     let lunge = attacking ? Math.max(0, Math.sin(tick*0.35+e.id)) * 3 : 0;
-    let sway = e.path.length>0 ? Math.sin(tick*0.25+e.id)*0.05 : 0;
-    let breath = (e.path.length===0 && !attacking && !e.corpseRot) ? Math.sin(tick*0.05+e.id)*0.25 : 0;
+    let sway = moving ? Math.sin(tick*0.25+e.id)*0.05 : 0;
+    let breath = (!moving && !attacking && !e.corpseRot) ? Math.sin(tick*0.05+e.id)*0.25 : 0;
 
     X.save();
     X.rotate(sway);
@@ -1995,7 +2021,7 @@ function drawUnit(e){
 
     // Stub-leg walk cycle: comically short, thick legs mostly hidden
     // under the body mass — just paws scuttling along
-    let lw1 = e.path.length>0 ? Math.sin(tick*0.5+e.id)*1.8 : 0;
+    let lw1 = moving ? Math.sin(tick*0.5+e.id)*1.8 : 0;
     let lw2 = -lw1;
     let legPts = [[-6,2,lw1],[-3,2.5,lw2],[2.5,2.5,lw1],[5.5,2,lw2]];
     X.beginPath();
@@ -2121,7 +2147,7 @@ function drawUnit(e){
       let useDirM = mirroredDir(e);
       if (useDirM === 7 || useDirM === 0) {
         const coatM = e.utype==='knight'?'#9a948a':'#3f2810';
-        let idleM = e.path.length===0 && !e.corpseRot;
+        let idleM = !moving && !e.corpseRot;
         let swishM = e.corpseRot ? 0 : Math.sin(tick*0.08+e.id)*(idleM?0.2:0.08);
         let kM = useDirM === 7 ? 1 : 0.72;
         X.save(); X.translate(0,-1); X.scale(1.35,1.35);
@@ -2134,7 +2160,7 @@ function drawUnit(e){
     }
     // Walking leg cycle (swinging legs with constant leg length)
     if(isMountedUnit(e.utype)){
-      let walk = e.path.length>0 ? Math.sin(tick*0.45+e.id)*4.5 : 0;
+      let walk = moving ? Math.sin(tick*0.45+e.id)*4.5 : 0;
       X.save(); X.translate(0,-1); X.scale(1.35,1.35); // horse is drawn larger than the rider grid
       X.beginPath();
       
@@ -2195,7 +2221,7 @@ function drawUnit(e){
       // Knight rides a darker courser; scout keeps the bay.
       // Knight rides a WHITE charger (unmistakable vs the scout's bay).
       const coat=e.utype==='knight'?'#e9e6de':'#8b5a2b', maneC=e.utype==='knight'?'#9a948a':'#3f2810';
-      let idle = e.path.length===0 && !e.corpseRot;
+      let idle = !moving && !e.corpseRot;
       let nod = idle ? Math.sin(tick*0.05+e.id)*0.8 : 0;
       let swish = e.corpseRot ? 0 : Math.sin(tick*0.08+e.id)*(idle?0.2:0.08);
       X.save(); X.translate(0,-1); X.scale(1.35,1.35); // match the enlarged legs
@@ -2281,7 +2307,7 @@ function drawUnit(e){
         X.fillStyle=coat;
         X.beginPath(); X.ellipse(0,-5.5,5.6,5.2,0,0,Math.PI*2); X.fill(); X.stroke();
         horseHeadFront = () => {
-          let nod2 = (e.path.length===0) ? Math.sin(tick*0.05+e.id)*0.8 : 0;
+          let nod2 = (!moving) ? Math.sin(tick*0.05+e.id)*0.8 : 0;
           X.save(); X.translate(0,-1+nod2); X.scale(1.35,1.35);
           X.strokeStyle='#000'; X.lineWidth=1.2/UNIT_SCALE; X.fillStyle=coat;
           ear(2.4,-12.6,-0.3); ear(5.8,-12.4,0.3);
@@ -2340,7 +2366,7 @@ function drawUnit(e){
     const drawBodyLayer = () => {
     if(!isMountedUnit(e.utype)){
       // Human legs (visible both when standing and walking)
-      let walk = e.path.length>0 ? Math.sin(tick*0.4+e.id)*2.5 : 0;
+      let walk = moving ? Math.sin(tick*0.4+e.id)*2.5 : 0;
       X.beginPath();
       X.moveTo(-2+humanXOffset, -bob); X.lineTo(-2-walk+humanXOffset, 3-bob);
       X.moveTo(2+humanXOffset, -bob); X.lineTo(2+walk+humanXOffset, 3-bob);
@@ -2380,7 +2406,7 @@ function drawUnit(e){
       // rounded bodice (smaller than the male torso) flowing into a
       // bell-shaped skirt wider than the shoulders, with a single outline
       // so there's no seam at the waist. Boots peek out below the hem.
-      let sway = e.path.length>0 ? Math.sin(tick*0.4+e.id)*0.7 : 0;
+      let sway = moving ? Math.sin(tick*0.4+e.id)*0.7 : 0;
       X.fillStyle=tc;
       X.beginPath();
       X.arc(0,-6,4.1,Math.PI,0);                        // rounded bodice over the chest
@@ -2413,22 +2439,22 @@ function drawUnit(e){
 
     // Arms: rear arm hangs at the side, front arm reaches toward the weapon/tool hand
     {
-      let armSwing = e.path.length>0 ? Math.sin(tick*0.4+e.id)*1.5 : 0;
+      let armSwing = moving ? Math.sin(tick*0.4+e.id)*1.5 : 0;
       // While a villager works a tool, the front hand grips the handle base
       // (the tool's rotation anchor at (3,-9)) instead of hanging loose.
-      let gripping = e.utype==='villager' && e.path.length===0 &&
+      let gripping = e.utype==='villager' && !moving &&
         (e.task==='chop'||e.task==='mine_gold'||e.task==='mine_stone'||e.task==='build');
       // Picking (berries/farm/butchering a carcass): no tool — the front arm
       // just reaches out and down repeatedly, like plucking. Carcass
       // harvesters are target-driven (no task), hence the extra check.
       let carcassTarget = !e.task&&e.target&&entitiesById.get(e.target)?.utype==='sheep_carcass';
-      let picking = e.utype==='villager' && e.path.length===0 &&
+      let picking = e.utype==='villager' && !moving &&
         (e.task==='forage'||e.task==='farm'||carcassTarget);
       let pick = Math.sin(tick*0.18+e.id);
       // Fighting (AoE2 villagers have an attack animation): a fast forward
       // jab — sharp punch out, slower recovery — whenever a villager is
       // engaging a combat target (incl. slaughtering a live sheep).
-      let fighting = e.utype==='villager' && e.path.length===0 && !e.task &&
+      let fighting = e.utype==='villager' && !moving && !e.task &&
         e.target && !picking && !carcassTarget;
       let jabPh = ((tick*0.06 + e.id*0.41) % 1 + 1) % 1;
       let jab = jabPh < 0.25 ? jabPh/0.25 : 1-(jabPh-0.25)/0.75; // 0..1 spike
@@ -2802,6 +2828,10 @@ function drawUnit(e){
       } else if (e.task === 'build' && e.buildTarget) {
         let bt = entitiesById.get(e.buildTarget);
         atSite = !!bt && distToTarget(e, bt) < 1.8;
+      } else if (e.target) {
+        // Harvesting/attacking a target (sheep, carcass, enemy): only swing when
+        // actually in range to act on it — not while halted just short of it.
+        atSite = inActionRange(e);
       }
       let working = isActive && e.path.length===0 && atSite;
       let phRaw = tick*0.055 + e.id*0.37;
@@ -2995,7 +3025,7 @@ function drawUnit(e){
       // sword (drawCorpse draws it on the ground); the shield stays
       // strapped to the arm.
       if(!e.corpseRot){
-        let swinging=(e.target||e.__animAttack)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
+        let swinging=inActionRange(e)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
         // Sword hand is fixed to the body — mirrored to the other screen
         // side when the militia faces away from the camera. While
         // swinging, the hand itself pumps with the slash (back and up on
@@ -3011,7 +3041,7 @@ function drawUnit(e){
       // Long spear with a big leaf-shaped head; the thrust is shaped —
       // slow pull-back, fast jab along the shaft. (Corpses drop it —
       // drawCorpse lays it on the ground.)
-      let swinging=(e.target||e.__animAttack)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
+      let swinging=inActionRange(e)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
       X.save(); X.translate(3, -6+humanYOffset);
       if(swinging){
         // Point the shaft at the target: un-mirror first (same trick as
@@ -3047,7 +3077,7 @@ function drawUnit(e){
       // when the real arrow leaves, so the flight reads as THE arrow off
       // the string. Works on the guest too — atkCooldown/target ride the
       // entity sync.
-      let swinging=(e.target||e.__animAttack)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
+      let swinging=inActionRange(e)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
       let bowRof=(UNITS.archer&&UNITS.archer.rof)||60;
       let bowCd=e.atkCooldown||0;
       let justFired=bowCd>bowRof*0.85;                         // string still snapping forward
@@ -3097,7 +3127,7 @@ function drawUnit(e){
       // At rest it parks on the rider's LEFT side, mirrored — the right is
       // where the horse's head rises, and the blade would point into it.
       // (Corpses drop it — drawCorpse lays it on the ground.)
-      let swinging=(e.target||e.__animAttack)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
+      let swinging=inActionRange(e)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
       X.save();
       if(swinging){
         X.translate(6+humanXOffset, -6+humanYOffset);

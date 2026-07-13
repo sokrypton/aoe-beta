@@ -13,6 +13,17 @@ let justPlaced=false; // flag to prevent mouseup selection clearing when placing
 let middleDrag=false;
 let middleDragLast=null;
 
+// Snap the camera to a map tile (viewer-local). Also releases camera-follow so
+// handleScroll() won't yank it back to a followed unit next frame — every
+// "jump to X" action needs this, so it lived copy-pasted in 6 places across
+// input.js/ui.js/init.js. Shared here (global scope; called at runtime).
+function jumpCameraToTile(tx, ty){
+  let iso = toIso(tx, ty);
+  camX = iso.ix; camY = iso.iy;
+  window.targetCamX = camX; window.targetCamY = camY;
+  window.cameraFollowId = null;
+}
+
 function selectTownCenter() {
   if (gameOver) return;
   let tcs = entities.filter(e => e.team === myTeam && e.type === 'building' && e.btype === 'TC');
@@ -25,13 +36,8 @@ function selectTownCenter() {
   selected = [tc];
   
   // Center camera on Town Center
-  let iso = toIso(tc.x + tc.w/2, tc.y + tc.h/2);
-  camX = iso.ix;
-  camY = iso.iy;
-  window.targetCamX = camX;
-  window.targetCamY = camY;
-  window.cameraFollowId = null;
-  
+  jumpCameraToTile(tc.x + tc.w/2, tc.y + tc.h/2);
+
   if (window.playSound) window.playSound('select_military');
   updateUI();
 }
@@ -107,6 +113,7 @@ function requestDeleteOwned(ownIds){
 }
 
 document.addEventListener('keydown',e=>{
+  if(window.__editorMode && !window.__editorPlaying)return; // scenario editor supplies its own keys
   // While reviewing the finished map (See Map), keep the arrow keys panning —
   // but nothing else (no command hotkeys post-game).
   if(gameOver && window.seeMapMode && (e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='ArrowLeft'||e.key==='ArrowRight')) keys[e.key]=true;
@@ -392,6 +399,7 @@ window.addEventListener('mousemove',e=>{
 });
 
 C.addEventListener('mousedown',e=>{
+  if(window.__editorMode && !window.__editorPlaying)return; // scenario editor handles its own canvas input
   if((gameOver && !window.seeMapMode)||recentTouch())return; // ignore synthetic mouse events (pan/select stay live in See Map)
   // Trust the event's own modifier snapshot over the keydown/keyup-tracked
   // keys map: OS-level shortcuts (e.g. macOS Cmd+Shift+5 for screen
@@ -425,11 +433,15 @@ C.addEventListener('mousedown',e=>{
       minimapJump(e.clientX,e.clientY);
       return;
     }
-    dragStart={x:e.clientX,y:e.clientY};dragEnd=null;isDragging=false;
+    // No box-select once the match is over (See Map is view-only): without this
+    // the drag rectangle still DRAWS over the frozen map even though the commit
+    // (doBoxSelect) is gated — the box just never resolves to a selection.
+    if(!gameOver){ dragStart={x:e.clientX,y:e.clientY};dragEnd=null;isDragging=false; }
     justPlaced=false;
   }
 });
 C.addEventListener('mousemove',e=>{
+  if(window.__editorMode && !window.__editorPlaying)return; // scenario editor handles its own canvas input
   if((gameOver && !window.seeMapMode)||recentTouch())return;
   mouseX=e.clientX;mouseY=e.clientY;
   if(middleDrag && (e.buttons&4 || e.button===1)){
@@ -493,6 +505,10 @@ function isTrackpadWheel(e){
   return e.deltaMode===0;
 }
 C.addEventListener('wheel',e=>{
+  // Camera-only (pan/zoom) — safe in the scenario editor too, so it runs in
+  // BOTH edit and play there (the editor no longer defines its own wheel
+  // handler): two-finger trackpad swipe pans, pinch/ctrl zooms around the
+  // cursor, wheel notch zooms — identical gestures to normal gameplay.
   if(gameOver && !window.seeMapMode)return; // zoom stays live in See Map
   e.preventDefault();
   if(e.ctrlKey){
@@ -514,7 +530,13 @@ C.addEventListener('wheel',e=>{
   setZoomAroundPoint(ZOOM*factor,mouseX,mouseY);
 },{passive:false});
 C.addEventListener('mouseup',e=>{
-  if(gameOver||recentTouch())return;
+  if(window.__editorMode && !window.__editorPlaying)return; // scenario editor handles its own canvas input
+  // Match mousedown/mousemove/wheel: stay live in See-Map review mode even
+  // after gameOver so PAN/ZOOM keep working and the drag cleanup at the end of
+  // this handler still runs (bailing here left the minimap stuck dimmed). The
+  // actual unit interaction is view-only after the match: doSelect/doBoxSelect/
+  // handleTap all bail on gameOver, so no selecting or commanding the frozen map.
+  if((gameOver && !window.seeMapMode)||recentTouch())return;
   if(e.button===1){
     middleDrag=false;
     middleDragLast=null;
@@ -563,6 +585,7 @@ C.addEventListener('mouseup',e=>{
 });
 document.addEventListener('contextmenu',e=>{
   e.preventDefault();
+  if(window.__editorMode && !window.__editorPlaying)return; // scenario editor handles its own canvas input
   if(gameOver||recentTouch())return;
   if(e.target===C){
     if(isPointOnMinimap(e.clientX,e.clientY))return; // right-click over the minimap is a no-op, not a world command
@@ -606,7 +629,6 @@ window.addEventListener('blur',()=>{
 let touchAnchor=null;  // where the touch started (for tap detection)
 let touchLast=null;    // last touch position (for pan delta)
 let touchMoved=false;  // did finger travel > threshold?
-let touchId=null;      // track which finger is primary
 let pinchStartDist=null; // two-finger distance at pinch start, for pinch-zoom
 let pinchStartZoom=null; // ZOOM at pinch start
 let touchLongPressTimer=null; // arms box-select if the finger holds still on empty ground
@@ -618,6 +640,7 @@ let touchLastTapWallId=null;  // unfinished wall foundation tapped last (chain-s
 
 C.addEventListener('touchstart',e=>{
   e.preventDefault();
+  if(window.__editorMode && !window.__editorPlaying)return; // scenario editor handles its own canvas input
   if(gameOver && !window.seeMapMode)return; // touch pan/pinch stay live in See Map
   lastTouchTime=performance.now();
   let touches=e.touches;
@@ -630,7 +653,6 @@ C.addEventListener('touchstart',e=>{
       minimapJump(t.clientX,t.clientY);
       return;
     }
-    touchId=t.identifier;
     touchAnchor={x:t.clientX,y:t.clientY};
     touchLast={x:t.clientX,y:t.clientY};
     touchMoved=false;
@@ -655,7 +677,9 @@ C.addEventListener('touchstart',e=>{
       touchBoxSelectMode=false;
       let hitU=getUnitUnderCursor(t.clientX,t.clientY);
       let hitB=hitU?null:getBuildingUnderCursor(t.clientX,t.clientY);
-      if(!hitU&&!hitB){
+      // Never arm box-select over a finished match (See Map is view-only) —
+      // otherwise a long-press+drag paints a selection box that can't select.
+      if(!hitU&&!hitB&&!gameOver){
         let anchorAtArm=touchAnchor;
         touchLongPressTimer=setTimeout(()=>{
           if(touchAnchor===anchorAtArm && !touchMoved){
@@ -693,6 +717,7 @@ C.addEventListener('touchstart',e=>{
 
 C.addEventListener('touchmove',e=>{
   e.preventDefault();
+  if(window.__editorMode && !window.__editorPlaying)return; // scenario editor handles its own canvas input
   lastTouchTime=performance.now(); // keep the mouse-suppression window alive through long drags
   let touches=e.touches;
   if(touches.length>=2){
@@ -785,6 +810,7 @@ C.addEventListener('touchmove',e=>{
 
 C.addEventListener('touchend',e=>{
   e.preventDefault();
+  if(window.__editorMode && !window.__editorPlaying)return; // scenario editor handles its own canvas input
   lastTouchTime=performance.now(); // synthetic mouse events fire right after touchend
   // Only process tap when all fingers are lifted
   if(e.touches.length===0){
@@ -846,7 +872,6 @@ C.addEventListener('touchend',e=>{
     touchAnchor=null;
     touchLast=null;
     touchMoved=false;
-    touchId=null;
     pinchStartDist=null;
     pinchStartZoom=null;
     touchBoxSelectMode=false;
@@ -972,6 +997,7 @@ function tryRightClickGuard(sx, sy){
 // mouseup dispatch forks here when !isClassicUI). `shift` is only ever
 // passed by the desktop caller; touch leaves it undefined.
 function handleTap(sx,sy,shift){
+  if(gameOver)return; // match is over — See Map is view-only (no select/command)
   // 1. If placing a building, place it
   if(placing){
     doPlace(sx,sy);
@@ -1170,13 +1196,7 @@ function minimapJump(sx, sy) {
   // Clamp to map bounds so dragging past the edge snaps to the corner
   p.x = Math.max(0, Math.min(MAP, p.x));
   p.y = Math.max(0, Math.min(MAP, p.y));
-  let iso = toIso(p.x, p.y);
-  camX = iso.ix; camY = iso.iy;
-  window.targetCamX = camX; window.targetCamY = camY;
-  // Manual camera jump should release camera-follow, same as any other
-  // manual pan — otherwise handleScroll() snaps straight back to the
-  // followed unit on the very next frame and the minimap click does nothing.
-  window.cameraFollowId = null;
+  jumpCameraToTile(p.x, p.y);
 }
 
 function toggleMinimap(){
@@ -1232,22 +1252,14 @@ function centerCameraOnSelection(){
     let w=s.type==='building'?(s.w||1):0, h=s.type==='building'?(s.h||1):0;
     cx+=s.x+w/2; cy+=s.y+h/2; n++;
   });
-  let iso=toIso(cx/n,cy/n);
-  camX=iso.ix; camY=iso.iy;
-  window.targetCamX=camX; window.targetCamY=camY;
-  window.cameraFollowId=null;
+  jumpCameraToTile(cx/n, cy/n);
 }
 
 function focusTownCenter(){
   if(gameOver)return;
   let tc = entities.find(e => e.type === 'building' && e.team === myTeam && e.btype === 'TC');
   if(tc) {
-    let iso = toIso(tc.x + tc.w / 2, tc.y + tc.h / 2);
-    camX = iso.ix;
-    camY = iso.iy;
-    window.targetCamX = camX;
-    window.targetCamY = camY;
-    window.cameraFollowId = null;
+    jumpCameraToTile(tc.x + tc.w / 2, tc.y + tc.h / 2);
     if(window.playSound) window.playSound('click');
   }
 }
@@ -1542,6 +1554,7 @@ function getResourceUnderCursor(sx, sy) {
 }
 
 function doSelect(sx,sy,shift){
+  if(gameOver)return; // match is over — See Map is view-only (pan/zoom stay live)
   let tile=screenToTile(sx,sy);
   let clicked=getUnitUnderCursor(sx, sy);
   if(clicked && clicked.team!==myTeam){
@@ -1577,6 +1590,7 @@ function doSelect(sx,sy,shift){
 }
 
 function doBoxSelect(x1,y1,x2,y2){
+  if(gameOver)return; // match is over — no selecting over the frozen map
   let sx1=Math.min(x1,x2),sy1=Math.min(y1,y2);
   let sx2=Math.max(x1,x2),sy2=Math.max(y1,y2);
   selected=entities.filter(en=>{
@@ -1614,6 +1628,7 @@ function doBoxSelect(x1,y1,x2,y2){
 }
 
 function doCommand(sx,sy){
+  if(gameOver)return; // match is over — no commands over the frozen map
   placing=null; // cancel building placement preview when commanding units
   if(selected.length===0)return;
   // Clicks never mutate world state directly — this resolves the click to
@@ -1830,10 +1845,6 @@ function doPlace(sx,sy){
 }
 
 // ---- CAMERA SCROLL (Desktop) ----
-let mouseInGame=false;
-C.addEventListener('mouseenter',()=>{mouseInGame=true;});
-C.addEventListener('mouseleave',()=>{mouseInGame=false;});
-
 function handleScroll(elapsed){
   if(gameOver && !window.seeMapMode)return; // keep panning while reviewing the map
   let dt = elapsed !== undefined ? elapsed / 16.67 : 1.0;
@@ -1880,6 +1891,7 @@ window.addEventListener('resize',()=>{
 
 // Double click to select all units of same type on screen
 C.addEventListener('dblclick', e => {
+  if (window.__editorMode) return; // scenario editor handles its own canvas input
   if (gameOver || recentTouch()) return;
   let clicked = getUnitUnderCursor(e.clientX, e.clientY);
   if (clicked && clicked.team === myTeam) {

@@ -189,7 +189,11 @@ function execCommand(cmd, team){
       // as AI in a loaded save resumes its plans); a never-AI seat gets a
       // fresh brain.
       if (team === 0 && isPlayerTeam(cmd.t) && cmd.t !== 0) {
-        let diff = AI_LEVELS[cmd.diff] ? cmd.diff : (typeof aiDifficulty !== 'undefined' ? aiDifficulty : 'standard');
+        // Difficulty is stamped into the command payload by the host at submit
+        // time (see kickDisconnectedPlayers) so every peer applies the SAME
+        // value. Reading the client-local `aiDifficulty` global here instead
+        // would desync: it's set independently per peer from menus/lobby/saves.
+        let diff = AI_LEVELS[cmd.diff] ? cmd.diff : 'standard';
         teamControllers[cmd.t] = { type: 'ai', difficulty: diff };
         if (!AI_STATES[cmd.t]) AI_STATES[cmd.t] = freshAIState(cmd.t);
         // Everyone should see this, not just the issuer (feedbackFor would
@@ -233,7 +237,47 @@ function execCommand(cmd, team){
     case 'guard':
       execGuard(cmd, team);
       break;
+    case 'set-stance':
+      execSetStance(cmd, team);
+      break;
   }
+}
+
+// The 4 AoE2 stances (must match STANCES in js/editor.js and the reads in
+// js/logic.js). Set from the HUD stance buttons (js/ui.js) via this command —
+// lockstep-safe like auto-scout/guard: queued to a shared tick, ids re-resolved
+// against the local entitiesById + ownership-filtered on every peer.
+const VALID_STANCES = new Set(['aggressive', 'defensive', 'standground', 'passive']);
+function execSetStance(cmd, team){
+  if (!VALID_STANCES.has(cmd.stance)) return; // never trust a wire value
+  let units = (cmd.unitIds || []).map(id => entitiesById.get(id))
+    .filter(u => u && u.type === 'unit' && u.team === team && u.hp > 0 &&
+                 typeof isSoldierUnit === 'function' && isSoldierUnit(u));
+  if (!units.length) return;
+  units.forEach(u => {
+    u.stance = cmd.stance;
+    // Postures are mutually exclusive: picking a stance is the off-switch for
+    // the other two dispositions. Guard (a placed anchor + leash) and Auto
+    // Scout (frontier wander) each override how the unit reacts to enemies, so
+    // leaving them set would fight the stance the player just chose. Mirrors
+    // execGuard/execAutoScout clearing each other — the UI shows exactly one
+    // highlighted posture, and this keeps the behavior matching the highlight.
+    u.guardX = null; u.guardY = null; u.guardTargetId = null; u.guardFlagged = false;
+    u.autoScout = false;
+    // No Attack must DISENGAGE, not just stop acquiring new targets: the
+    // passive gate in js/logic.js only blocks the auto-acquire scan, so a unit
+    // that was already attacking (auto-acquired OR an explicit attack order)
+    // keeps hammering its target. Drop the current FIGHT so "No Attack" means
+    // what it says. AoE2 does the same — switching to No Attack halts attacks.
+    // But ONLY the fight: a unit merely walking to a destination (no target)
+    // keeps its move order — clearing the path would cancel a legitimate walk.
+    if (cmd.stance === 'passive' && (u.target != null || u.explicitAttack)) {
+      u.target = null; u.explicitAttack = false; u.siegeSpot = null;
+      if (typeof clearUnitPath === 'function') clearUnitPath(u);
+    }
+  });
+  feedbackFor(team, () => { if (window.playSound) playSound('click'); });
+  if (team === myTeam && typeof updateUI === 'function') updateUI();
 }
 
 // Which units carry a guard post: soldiers, plus RAMS — a ram doesn't
@@ -538,7 +582,11 @@ function execUnitCommand(cmd){
         let unseen = tileHiddenForTeam(s.team, tileY*MAP + tileX);
         if (gTask && !unseen) {
           let g = claimGatherTileNear(s, t.t, tileX, tileY);
-          s.task = gTask; s.gatherX = g.x; s.gatherY = g.y; pathUnitTo(s, g.x, g.y);
+          s.task = gTask; s.gatherX = g.x; s.gatherY = g.y;
+          // Walk to a DISTINCT adjacent tile of the node (resources are solid)
+          // so the group approaches from different sides and rings it evenly.
+          let stand = (typeof pickGatherStand === 'function') ? pickGatherStand(s, g.x, g.y) : null;
+          pathUnitTo(s, stand ? stand.x : g.x, stand ? stand.y : g.y);
         } else {
           // Move command (also the unexplored-tile case): use formation offset
           let ox = offsets[idx] ? offsets[idx][0] : 0, oy = offsets[idx] ? offsets[idx][1] : 0;
@@ -559,6 +607,67 @@ function execUnitCommand(cmd){
 
 // Building placement (moved verbatim from doPlace's mutation half —
 // `placing` global replaced by cmd.btype, screen coords by cmd tile).
+// ---- Shared building-placement primitives ----
+// The geometry + wall-replacement rules for placing a WALL/GATE/TOWER/any
+// building live here so the player build command, the AI, and the scenario
+// editor (js/editor.js) all place identically — no reinvented gate-footprint
+// or wall-consume logic drifting between them. Two halves so a caller can
+// price the placement (refund consumed walls, afford-check) BEFORE committing:
+//   resolveBuildingPlacement() — PURE: where it sits + which walls it replaces.
+//   commitBuildingPlacement()  — mutates: removes those walls, creates the bldg.
+//
+// A gate sizes to the run of matching same-team walls through the click
+// (gateFootprint); a tower/stone-wall on a wall tile replaces it. `replaced`
+// is the same wall set the old inline code removed (deduped; order doesn't
+// affect the sim — removal is set-based and wall-cost refund is commutative).
+function resolveBuildingPlacement(btype, tx, ty, team){
+  let b = BLDGS[btype];
+  let ox = tx, oy = ty, gw = b ? b.w : 1, gh = b ? b.h : 1;
+  if (isGateBtype(btype)) {
+    ({ ox, oy, gw, gh } = gateFootprint(tx, ty, (x, y) => gateBaseAt(x, y, btype, team)));
+  }
+  let replaced = [];
+  for (let dy = 0; dy < gh; dy++) for (let dx = 0; dx < gw; dx++) {
+    let w = entities.find(en => en.type === 'building' && en.x === ox + dx && en.y === oy + dy && isWallBtype(en.btype) && en.team === team);
+    if (w && replaced.indexOf(w) < 0) replaced.push(w);
+  }
+  if (isTowerBtype(btype)) {
+    let ex = entities.find(en => en.type === 'building' && en.x === tx && en.y === ty && isWallBtype(en.btype) && en.team === team);
+    if (ex && replaced.indexOf(ex) < 0) replaced.push(ex);
+  }
+  if (isGateBtype(btype)) {
+    // Rebuilding a gate over an existing same-type gate (repair): collect it so
+    // it's replaced. Occupancy grid → finds the multi-tile gate on any tile.
+    for (let dy = 0; dy < gh; dy++) for (let dx = 0; dx < gw; dx++) {
+      let row = map[oy + dy]; let id = row && row[ox + dx] && row[ox + dx].occupied;
+      let g = id && entitiesById.get(id);
+      if (g && g.type === 'building' && g.btype === btype && g.team === team && replaced.indexOf(g) < 0) replaced.push(g);
+    }
+  }
+  return { ox, oy, gw, gh, replaced };
+}
+// Remove the replaced walls and create the building. `complete` → a finished
+// building at full HP (scenario editor); otherwise a foundation at hp 1 that
+// villagers build up (gameplay). Returns the new building (or null).
+function commitBuildingPlacement(btype, plan, team, complete){
+  if (plan.replaced.length) {
+    let ids = new Set(plan.replaced.map(w => w.id));
+    entities = entities.filter(en => !ids.has(en.id));
+    selected = selected.filter(s => !ids.has(s.id));
+    ids.forEach(id => entitiesById.delete(id));
+  }
+  let bldg = createBuilding(btype, plan.ox, plan.oy, team, plan.gw, plan.gh);
+  if (!bldg) return null;
+  if (complete) {
+    bldg.complete = true;
+  } else {
+    bldg.complete = false; bldg.buildProgress = 0;
+    bldg.hp = 1; // AoE2: foundations start at ~no HP and gain it as construction progresses
+    if (plan.replaced.length) bldg.wasWall = true;
+  }
+  return bldg;
+}
+
 function execBuildPlacement(cmd){
   let btype = cmd.btype;
   if (!BLDGS[btype]) return;
@@ -567,20 +676,7 @@ function execBuildPlacement(cmd){
   if (vils.length === 0) return;
   if (canPlace(btype, tile.x, tile.y, myTeam)) {
     let b = BLDGS[btype];
-    let gw = b.w, gh = b.h;
-    let ox = tile.x, oy = tile.y;
-    if (isGateBtype(btype)) {
-      let wallB = GATE_WALL_MATCH[btype];
-      let isWall = (tx, ty) => !!entities.find(en => en.type === 'building' && en.x === tx && en.y === ty && en.btype === wallB && en.team === myTeam);
-      ({ ox, oy, gw, gh } = gateFootprint(tile.x, tile.y, isWall));
-    }
-    let wallsToRemove = [];
-    for (let dy = 0; dy < gh; dy++) {
-      for (let dx = 0; dx < gw; dx++) {
-        let w = entities.find(en => en.type === 'building' && en.x === ox + dx && en.y === oy + dy && isWallBtype(en.btype) && en.team === myTeam);
-        if (w) wallsToRemove.push(w);
-      }
-    }
+    let plan = resolveBuildingPlacement(btype, tile.x, tile.y, myTeam);
     let actualCost = { ...b.cost };
     // Refund each consumed wall's OWN cost (palisades refund wood, stone
     // walls refund stone) against whatever this building costs.
@@ -591,40 +687,20 @@ function execBuildPlacement(cmd){
         });
       });
     };
-    if (isGateBtype(btype)) {
-      refundWalls(wallsToRemove);
-    } else if (btype === 'SWALL') {
-      // Stone-on-palisade upgrade: the footprint loop already collected the
-      // palisade being replaced — refund its wood against the stone's cost.
-      refundWalls(wallsToRemove);
-    } else if (isTowerBtype(btype)) {
-      let existing = entities.find(en => en.type === 'building' && en.x === tile.x && en.y === tile.y && isWallBtype(en.btype) && en.team === myTeam);
-      if (existing) {
-        wallsToRemove.push(existing);
-        refundWalls([existing]);
-      }
-    }
+    // Gates, stone-on-palisade upgrades, and towers all consume the walls they
+    // sit on (collected in plan.replaced) — refund those against the cost.
+    if (isGateBtype(btype) || btype === 'SWALL' || isTowerBtype(btype)) refundWalls(plan.replaced);
     if (!canAfford(myTeam, actualCost)) { feedbackFor(myTeam, () => showMsg('Not enough resources!')); return; }
     spendCost(myTeam, actualCost);
-    if (wallsToRemove.length > 0) {
-      let ids = new Set(wallsToRemove.map(w => w.id));
-      entities = entities.filter(en => !ids.has(en.id));
-      selected = selected.filter(s => !ids.has(s.id));
-      ids.forEach(id => entitiesById.delete(id));
-    }
-    let bldg = createBuilding(btype, ox, oy, myTeam, gw, gh);
-    bldg.complete = false; bldg.buildProgress = 0;
-    bldg.hp = 1; // AoE2: foundations start at ~no HP and gain it as construction progresses
-    if (wallsToRemove.length > 0) {
-      bldg.wasWall = true;
-    }
+    let bldg = commitBuildingPlacement(btype, plan, myTeam, false);
+    if (!bldg) return;
     vils.forEach(v => {
       v.buildQueue = v.buildQueue || [];
       v.buildQueue.push(bldg.id);
       // Start construction task immediately if not already building
       if (v.task !== 'build' || !v.buildTarget) {
         v.task = 'build'; v.buildTarget = bldg.id; v.target = null; v.savedTask = null;
-        let pt = b.isFarm ? { x: ox, y: oy } : (typeof nearestBldgPerimeter === 'function' ? nearestBldgPerimeter(v.x, v.y, bldg, v.id) : { x: ox + gw, y: oy + gh });
+        let pt = b.isFarm ? { x: plan.ox, y: plan.oy } : (typeof nearestBldgPerimeter === 'function' ? nearestBldgPerimeter(v.x, v.y, bldg, v.id) : { x: plan.ox + plan.gw, y: plan.oy + plan.gh });
         pathUnitTo(v, pt.x, pt.y);
       }
     });
@@ -795,9 +871,7 @@ function execGateLock(cmd, team){
 
 function execCancelResearch(tc){
   if (!tc.research) return;
-  let cost = AGES[tc.research.target].cost;
-  let store = resourceStore(tc.team);
-  Object.entries(cost).forEach(([key, amount]) => { store[resourceName(key)] += amount; });
+  refundCost(tc.team, AGES[tc.research.target].cost);
   tc.research = undefined;
   feedbackFor(tc.team, () => showMsg('Age research cancelled (refunded)'));
   if (typeof updateUI === 'function') updateUI();
@@ -809,9 +883,7 @@ function execCancelQueue(bldgId, idx, team){
   let utype = bldg.queue[idx];
   if (!utype) return;
   bldg.queue.splice(idx, 1);
-  let cost = UNITS[utype].cost;
-  let store = resourceStore(bldg.team);
-  Object.entries(cost).forEach(([key, amount]) => { store[resourceName(key)] += amount; });
+  refundCost(bldg.team, UNITS[utype].cost);
   if (idx === 0) bldg.trainTick = 0;
   feedbackFor(myTeam, () => showMsg(UNITS[utype].name + ' cancelled (refunded)'));
 }

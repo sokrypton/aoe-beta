@@ -67,7 +67,9 @@ function update(){
   // renderer viewport-culls, so buildings scouted while the camera was
   // elsewhere never got marked scouted and stayed invisible on the main
   // map even though the minimap (which ignores culling) showed them.
-  markScoutedBuildings(); // js/core.js — also called guest-side in js/net-sync.js
+  // Viewer-local memory of scouted enemy buildings — skip in headless self-play
+  // (no viewer, no minimap), like updateFog above. Also called guest-side in net-sync.js.
+  if (!window.__headlessSim) markScoutedBuildings(); // js/core.js
 
   rebuildUnitBlock(); // stationary-unit collision grid (see pathfinding.js)
   nudgeAside(); // villagers/sheep STEP OUT of approaching traffic's way
@@ -81,7 +83,6 @@ function update(){
   });
   separateUnits();
   updateStuckWatchdog(); // js/logic.js — general safety net over every task/path state machine
-  refreshPopulationCounts();
   // Run every AI-controlled team's brain. Which teams those are is DATA
   // (teamControllers, js/core.js): clicking "Host Game" flips slot 1 to
   // human before any guest connects (see onHostClicked), so the AI can't
@@ -98,6 +99,13 @@ function update(){
     }
   }
   refreshPopulationCounts();
+
+  // Headless self-play never runs render() (js/render.js), the only place
+  // corpses (cosmetic, wall-clock lifetimed) get pruned — so trim them here by
+  // tick age to bound memory over long simulated matches. No-op with UI.
+  if (window.__headlessSim && corpses.length) {
+    corpses = corpses.filter(c => tick - (c.deathTick || 0) < CORPSE_LIFE_TICKS);
+  }
 
   detExitSim();
   if (DET.enabled) detAfterTick();
@@ -119,6 +127,13 @@ function updateCosmetics(elapsedMs){
     window.__cosmeticSweepDone = true;
     buildingFxTick.forEach((_, id) => { if (!entitiesById.has(id)) buildingFxTick.delete(id); });
     workSwingCycles.forEach((_, id) => { if (!entitiesById.has(id)) workSwingCycles.delete(id); });
+    // Per-entity render caches keyed by entity id (render-units.js / render.js):
+    // these previously only cleared on a MAP-size change, so every dead
+    // vehicle/gate/market/farm leaked an entry for the whole session.
+    if (typeof ramCreakCycles !== 'undefined') ramCreakCycles.forEach((_, id) => { if (!entitiesById.has(id)) ramCreakCycles.delete(id); });
+    if (typeof _gateProxyPool !== 'undefined') _gateProxyPool.forEach((_, id) => { if (!entitiesById.has(id)) _gateProxyPool.delete(id); });
+    if (typeof _marketProxyPool !== 'undefined') _marketProxyPool.forEach((_, id) => { if (!entitiesById.has(id)) _marketProxyPool.delete(id); });
+    if (typeof _farmProxyPool !== 'undefined') _farmProxyPool.forEach((_, id) => { if (!entitiesById.has(id)) _farmProxyPool.delete(id); });
     let liveCorpses = new Set(corpses.map(c => c.id));
     corpseImpactFxDone.forEach(id => { if (!liveCorpses.has(id)) corpseImpactFxDone.delete(id); });
   } else if ((Math.floor(tick) % 600) !== 0) {
@@ -307,11 +322,17 @@ function separateUnits(){
   let minDist=0.5;
   // Per-unit flag computed once — the old all-pairs loop recomputed it,
   // including an entitiesById lookup, for every PAIR (n²/2 times per tick).
-  // Skip units actively gathering on a resource tile, building, or harvesting a sheep carcass
+  // Skip units working IN PLACE on a fixed tile (resource gather, construction)
+  // — they must not be slid off their claimed tile. Carcass harvesters are NOT
+  // skipped: they press onto the carcass (js/logic.js pressToContact) and need
+  // separation to spread them into a ring around it rather than stack.
+  // Gatherers and builders work IN PLACE (exempt from separation). Each
+  // gatherer stands on the DISTINCT adjacent tile pickGatherStand assigned it
+  // (js/logic.js) — an even surround around the solid node — so they never
+  // overlap and must not be shoved off their tile.
   let gathering=units.map(a=>
     (a.gatherX >= 0 && a.path.length === 0) ||
-    (a.buildTarget !== null && a.path.length === 0) ||
-    (a.target !== null && a.path.length === 0 && entitiesById.get(a.target)?.utype === 'sheep_carcass'));
+    (a.buildTarget !== null && a.path.length === 0));
   // Spatial hash on 1-tile cells: only same-or-adjacent-cell units can be
   // within minDist (0.5), so each unit compares against its 3×3 cell
   // neighborhood instead of every other unit on the map. The j>i guard keeps
@@ -328,7 +349,14 @@ function separateUnits(){
     let a=units[i], b=units[j];
     let aGathering=gathering[i], bGathering=gathering[j];
     let dx=a.x-b.x, dy=a.y-b.y;
-    let d=Math.sqrt(dx*dx+dy*dy);
+    // Squared-distance early-out: the branches below only fire for d<minDist,
+    // so skip the sqrt entirely for the (vast majority of) neighborhood pairs
+    // that don't overlap. Math.sqrt is correctly-rounded and minDist²(0.25)/
+    // minDist(0.5) are exact, so d2>=minDist² ⟺ sqrt(d2)>=minDist bit-for-bit —
+    // behavior-neutral (verified by checksum equality).
+    let d2=dx*dx+dy*dy;
+    if(d2>=minDist*minDist)return;
+    let d=Math.sqrt(d2);
     if(d<minDist&&d>0.01){
       let push=sep*(minDist-d)/d;
       let px=dx*push, py=dy*push;

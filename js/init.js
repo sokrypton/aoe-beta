@@ -9,6 +9,9 @@ function init(){
   window.lastWarTick=undefined;
   genMap();
   initFog(); // Initialize Fog of War grid
+  // Scenario loader (js/scenario.js) provides its OWN entities on the blank
+  // base — skip the default starting town + wildlife.
+  if(!window.__scenarioMode){
   STARTS.forEach(start=>{
     let tc=createBuilding('TC',start.x,start.y,start.team);
     tc.complete=true;
@@ -24,6 +27,7 @@ function init(){
   });
   placeStartingSheep();
   placeWildBears();
+  }
   let iso=toIso(STARTS[0].x+1,STARTS[0].y+1);camX=iso.ix;camY=iso.iy;
   window.targetCamX=camX;window.targetCamY=camY;
   refreshPopulationCounts();
@@ -283,6 +287,12 @@ function onStartClicked(){
   // (the guest's game-over menu dismisses in its lockstep-start handler).
   if (netRole === 'host' && netConnected && gameOver) {
     let speedSel = document.querySelector('input[name="gamespeed"]:checked');
+    // Set GAME_SPEED directly (not via applyGameSettings): hostStartLockstepMatch
+    // below reads GAME_SPEED into its start payload, and applyGameSettings's
+    // lockstep branch only ENQUEUES a set-speed command (executes ticks later)
+    // without updating GAME_SPEED now — so the payload would ship a stale speed.
+    // The set-speed command applyGameSettings then skips (v===GAME_SPEED) is
+    // intentional: this is a fresh-match start, not a mid-match speed change.
     setGameSpeed(speedSel ? parseFloat(speedSel.value) : 2);
     applyAudioSettings();
     applyGameSettings();
@@ -438,7 +448,9 @@ function kickDisconnectedPlayers(){
   for (const seat of missing) {
     if (typeof netCloseGuest === 'function') netCloseGuest(seat, 'kicked', true);
     guestMenuOpenBySeat.delete(seat);
-    submitCommand({ kind: 'set-controller', t: seat });
+    // Stamp the host's authoritative difficulty into the payload so the new
+    // AI brain is identical on every peer (commands.js set-controller).
+    submitCommand({ kind: 'set-controller', t: seat, diff: (typeof aiDifficulty !== 'undefined' ? aiDifficulty : 'standard') });
   }
   hostBroadcastDcPause();
 }
@@ -1582,7 +1594,13 @@ let bootParams = (typeof window !== 'undefined' && window.location)
 let joinHostId = bootParams.get('join');
 let resumeHostId = joinHostId ? null : bootParams.get('host');
 
-if (!joinHostId) {
+if (window.__editorMode) {
+  // Scenario editor (editor.html): skip the normal init()/menu. The editor
+  // boots its blank editable world via enterEditor() at the end of
+  // js/editor.js (loaded after this file). gameLoop() below still runs — the
+  // editor reuses it, rendering every frame and stepping the sim only when
+  // unpaused (Play).
+} else if (!joinHostId) {
   init();
 }
 gameLoop();
@@ -1591,6 +1609,14 @@ if (typeof window !== 'undefined' && window.location && window.location.search.i
   setMapSize('medium');
   window.fogDisabled = true;
   restartGame('standard');
+}
+
+// ?scenario=<url> — load a hand-authored / editor-exported scenario JSON
+// (js/scenario.js) in place of the default world, for visual testing. Fog off
+// so the whole authored map is visible. No-op without the param.
+if (typeof window !== 'undefined' && window.location && new URLSearchParams(window.location.search).get('scenario')) {
+  window.fogDisabled = true;
+  maybeLoadScenarioFromURL();
 }
 
 if (joinHostId) {

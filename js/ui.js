@@ -308,6 +308,13 @@ function updateUI(){
     if (e.type === 'building' && isGateBtype(e.btype)) currentSelectionDetails += ':gl' + selected.filter(s => s.locked).length;
     // Auto Scout state, so the toggle button label flips the instant it lands.
     if (e.type === 'unit' && e.utype === 'scout') currentSelectionDetails += ':as' + selected.filter(s => s.autoScout).length;
+    // Stance, so the highlighted stance button moves the instant a set-stance
+    // command lands. This is the COARSE gate (updateUI early-returns unless
+    // stateChanged) — the selKey below then rebuilds the strip. Both need it.
+    if (e.type === 'unit') currentSelectionDetails += ':st' + selected.filter(s => s.type === 'unit').map(s => s.stance || '-').join('.');
+    // Guard state (posture highlight): whether each unit holds a post, so the
+    // Guard tile lights/unlights the instant a guard or stance command lands.
+    if (e.type === 'unit') currentSelectionDetails += ':gd' + selected.filter(s => s.type === 'unit').map(s => s.guardX != null ? 1 : 0).join('');
     if (e.queue) {
       // Structural signature only (queue contents), NOT trainTick: progress
       // changes every tick, and keying on it rebuilt the whole details panel
@@ -511,6 +518,13 @@ function updateUI(){
     // Auto Scout state: the button EXISTS only while some selected scout
     // isn't auto-scouting, so the strip must rebuild when the command lands.
     +':as'+selected.filter(s=>s.type==='unit'&&s.autoScout).length
+    // Stance: the highlighted stance button must refresh when a set-stance
+    // command lands (the button set is fixed, but which one is `stance-on`
+    // changes). Fold the selection's stances into the key.
+    +':st'+selected.filter(s=>s.type==='unit').map(s=>s.stance||'-').join('.')
+    // Guard state: the Guard tile's highlight (and the fact that a stance clears
+    // it) must refresh the strip when a guard/stance command lands.
+    +':gd'+selected.filter(s=>s.type==='unit').map(s=>s.guardX!=null?1:0).join('')
     +':'+(selected[0]&&selected[0].btype==='MILL'?(resourceStore(myTeam).prepaidFarms||0):'')
     +':'+(selected[0]&&selected[0].btype==='MARKET'?marketPrices.food+'.'+marketPrices.wood+'.'+marketPrices.stone:'');
   let rebuildActions=selKey!==lastSelKey;
@@ -673,11 +687,17 @@ function updateUI(){
   // for the panel in every state. (Classic keeps its title/portrait box.)
   let idleCrest = !isClassicUI && selected.length===0 && gameStarted && !gameOver
     && typeof teamAge !== 'undefined' && teamAge && isPlayerTeam(myTeam);
+  // Game over on mobile renders the outcome (🏆/💀) as the SAME single tile as
+  // every other selection state, so the panel keeps one width and position and
+  // never shifts ("slides") into the legacy portrait+stats card. Classic keeps
+  // its worded card.
+  let gameOverTile = !isClassicUI && gameOver;
+  let iWonOutcome = gameOver ? (typeof didIWin==='function' && didIWin()) : false;
   // (No separate 'has-selection' class: in the mobile skin EVERY selection
   // state — single, group, garrison, idle crest — goes through the grid,
   // and .multi-select already hides the whole #sel-stats card; classic
   // never had a rule for it. One class, one meaning.)
-  if(selInfo) selInfo.classList.toggle('multi-select', (isMulti||!!garrisonSel||singleGrid||idleCrest) && !gameOver);
+  if(selInfo) selInfo.classList.toggle('multi-select', ((isMulti||!!garrisonSel||singleGrid||idleCrest) && !gameOver) || gameOverTile);
   // The grid gets its OWN dirty key: only what it actually renders (selection
   // membership, per-unit HP, garrison members). Keying it on the full
   // currentSelectionDetails rebuilt every icon ~30×/s while watching a
@@ -691,6 +711,7 @@ function updateUI(){
     // this function — no second full-entities scan.
     gridKey += ':idleage' + (myResearchTC ? 'adv' + myResearchTC.research.target : teamAge[myTeam]);
   }
+  if (gameOverTile) gridKey += ':over' + (iWonOutcome ? 1 : 0);
   if (garrisonSel) gridKey += ':gar' + garrisonSel.garrison.map(id => {
     let u = entitiesById.get(id);
     return u ? id + '_' + u.hp : id;
@@ -794,6 +815,15 @@ function updateUI(){
       icon.dataset.tipName = advTC ? ('Advancing to ' + AGES[crestIdx].name + '…') : AGES[crestIdx].name;
       if (advTC) icon.dataset.tipDesc = 'Villager training is paused at the Town Center while advancing.';
       selGrid.appendChild(icon);
+    } else if(gameOverTile){
+      // OUTCOME tile: the trophy/skull drawn as the exact same single tile as
+      // any selection — icon only, no text — so the panel keeps its shape and
+      // doesn't slide into the old portrait+stats card at game over.
+      let icon = document.createElement('div');
+      icon.className = 'sel-unit-icon outcome-tile';
+      setPortraitIcon(icon, null, iWonOutcome ? '🏆' : '💀');
+      icon.dataset.tipName = iWonOutcome ? 'Victory' : 'Defeat';
+      selGrid.appendChild(icon);
     }
   }
 
@@ -803,8 +833,11 @@ function updateUI(){
     let iWon = didIWin();
     if (port) { setPortraitIcon(port, null, iWon ? '🏆' : '💀'); port.classList.remove('cam-locked'); }
     setSelHp('');
-    document.getElementById('sel-name').textContent=iWon?'VICTORY!':'DEFEAT!';
-    document.getElementById('sel-details').textContent=iWon?'You destroyed the enemy Town Center!':'Your Town Center was destroyed!';
+    // Mobile (index.html): the trophy/skull icon alone carries the outcome —
+    // no text rows next to it. Classic keeps the AoE2-style worded card.
+    let modern = !isClassicUI;
+    document.getElementById('sel-name').textContent = modern ? '' : (iWon?'VICTORY!':'DEFEAT!');
+    document.getElementById('sel-details').textContent = modern ? '' : (iWon?'You destroyed the enemy Town Center!':'Your Town Center was destroyed!');
     return;
   }
   if(!gameStarted){
@@ -1226,45 +1259,93 @@ function updateUI(){
     // Auto Scout toggle — shown only when the selection is all own scouts. The
     // explore/stop glyph differs so the on/off state reads even in the classic
     // skin (which hides button labels). Command is deterministic (js/commands.js).
-    // Guard Position — any all-military selection (mixed types included,
-    // AoE2-style): tap the flag button, then tap the map; the units hold
-    // that spot, leash their chases to it, and walk back after fights.
-    // Reuses the rally flag sprite — it IS a flag-the-ground order, just
-    // for units instead of a building. execGuard (js/commands.js) runs it
-    // deterministically; a manual order cancels, like Auto Scout.
-    if(rebuildActions && allGuardable(selected)){
-      if(window.settingGuard){
-        let btn=document.createElement('div');btn.className='act-btn rally-btn';
+    // Posture row (AoE2 stances + Guard + Auto Scout) — ONE mutually-exclusive
+    // set of dispositions, exactly one highlighted at a time. A unit's EFFECTIVE
+    // posture is: auto-scouting > guarding (a placed anchor) > its stance. The
+    // three off-switch each other in the sim (execSetStance/execGuard/
+    // execAutoScout each clear the others), so the highlight can never show two,
+    // and the behavior always matches the lit tile. Stances render for all-
+    // soldier selections; Guard for anything guardable (soldiers + rams); Auto
+    // Scout for all-scout selections. Reuses the rally flag sprite for Guard.
+    // Selection is KEPT so the player can keep adjusting (AoE2-style).
+    let allSoldiers = selected.length>0 && selected.every(s=>s.type==='unit'&&s.team===myTeam&&isSoldierUnit(s));
+    let allScouts   = selected.length>0 && selected.every(s=>s.type==='unit'&&s.utype==='scout'&&s.team===myTeam);
+    let guardRow    = allGuardable(selected);
+    if(rebuildActions && (allSoldiers || guardRow)){
+      let ids = selected.map(s=>s.id);
+      // Guard tile is HIDDEN for soldiers for now — the four stances already
+      // cover "hold this area" (Defensive/Stand Ground), so a separate flag
+      // just multiplied near-identical options. The whole guard implementation
+      // stays wired (execGuard, ram guard, rally-spawn posts); flip this to
+      // re-expose the soldier flag later. Rams keep it (no stance to fall back
+      // on). Note: soldiers can still CARRY a guard post (new units guard their
+      // rally flag) — we just don't surface the button.
+      const GUARD_FOR_SOLDIERS = false;
+      let showGuard = guardRow && (!allSoldiers || GUARD_FOR_SOLDIERS);
+      // Effective posture of a unit, and the common one across the selection
+      // (null if mixed) — drives which single tile is highlighted. When the
+      // Guard tile isn't shown, a guarding unit falls back to its stance so it
+      // still lights SOMETHING (rather than pointing at an absent Guard tile).
+      let posture = s => s.autoScout ? 'auto' : ((showGuard && s.guardX!=null) ? 'guard' : (s.stance||'aggressive'));
+      let common = selected.every(s=>posture(s)===posture(selected[0])) ? posture(selected[0]) : null;
+
+      // Stances (soldiers only — rams carry no stance).
+      if(allSoldiers){
+        let STANCE_BTNS=[
+          {stance:'aggressive', label:'Aggressive',   desc:'Attacks any enemy it sees and pursues.'},
+          {stance:'defensive',  label:'Defensive',    desc:'Attacks nearby enemies but returns to its post.'},
+          {stance:'standground',label:'Stand Ground', desc:'Holds position; attacks only what comes into range.'},
+          {stance:'passive',    label:'No Attack',    desc:'Never attacks or retaliates.'},
+        ];
+        STANCE_BTNS.forEach(sb=>{
+          let btn=document.createElement('div');btn.className='act-btn'+(common===sb.stance?' stance-on':'');
+          btn.dataset.tipType='action';
+          btn.dataset.tipLabel=sb.label;
+          btn.dataset.tipDesc=sb.desc;
+          btn.innerHTML=`<div class="btn-emoji sprite-icon icon-stance-${sb.stance}"></div><div class="btn-label">${sb.label}</div>`;
+          btn.onclick=()=>{ if(gameOver)return; submitCommand({kind:'set-stance',unitIds:ids,stance:sb.stance}); };
+          act.appendChild(btn);
+        });
+      }
+
+      // Guard — a flag-the-ground order (rams for now; soldiers hidden via
+      // GUARD_FOR_SOLDIERS above). Highlighted while the selection holds a
+      // post; while arming it flips to a Cancel tile.
+      if(showGuard){
+        if(window.settingGuard){
+          let btn=document.createElement('div');btn.className='act-btn stance-on rally-btn';
+          btn.dataset.tipType='action';
+          btn.dataset.tipLabel='Cancel Guard';
+          btn.dataset.tipDesc='Click to stop setting the guard position.';
+          btn.innerHTML=`<div class="btn-emoji sprite-icon icon-rally"></div><div class="btn-label">Tap map to<br>guard</div>`;
+          btn.onclick=()=>{ window.settingGuard=false; showMsg('Guard cancelled'); updateUI(); };
+          act.appendChild(btn);
+        } else {
+          let btn=document.createElement('div');btn.className='act-btn'+(common==='guard'?' stance-on':'');
+          btn.dataset.tipType='action';
+          btn.dataset.tipLabel='Guard';
+          btn.dataset.tipDesc='Tap ground to hold that spot, a building to stand watch there, or one of your units to escort it. Guards chase enemies only a short way and return to their post; a plain move relocates the post, and picking another stance ends the guard.';
+          btn.innerHTML=`<div class="btn-emoji sprite-icon icon-rally"></div><div class="btn-label">Guard</div>`;
+          btn.onclick=()=>{ if(gameOver)return; window.settingGuard=true; showMsg('Tap the map to set guard position'); updateUI(); };
+          act.appendChild(btn);
+        }
+      }
+
+      // Auto Scout (scouts only) — frontier explore that avoids fights.
+      // Highlighted while active; pick another posture (or order it somewhere)
+      // to stop. Kept in the row so it reads as one of the dispositions.
+      if(allScouts){
+        let btn=document.createElement('div');btn.className='act-btn'+(common==='auto'?' stance-on':'');
         btn.dataset.tipType='action';
-        btn.dataset.tipLabel='Cancel Guard';
-        btn.dataset.tipDesc='Click to stop setting the guard position.';
-        btn.innerHTML=`<div class="btn-emoji sprite-icon icon-rally"></div><div class="btn-label">Tap map to<br>guard</div>`;
-        btn.onclick=()=>{ window.settingGuard=false; showMsg('Guard cancelled'); updateUI(); };
-        act.appendChild(btn);
-      } else {
-        let btn=document.createElement('div');btn.className='act-btn';
-        btn.dataset.tipType='action';
-        btn.dataset.tipLabel='Guard';
-        btn.dataset.tipDesc='Tap ground to hold that spot, a building to stand watch there, or one of your units to escort it. Guards chase enemies only a short way and return to their post; a plain move order relocates the post. New units guard their rally flag automatically.';
-        btn.innerHTML=`<div class="btn-emoji sprite-icon icon-rally"></div><div class="btn-label">Guard</div>`;
-        btn.onclick=()=>{ if(gameOver)return; window.settingGuard=true; showMsg('Tap the map to set guard position'); updateUI(); };
+        btn.dataset.tipLabel='Auto Scout';
+        btn.dataset.tipDesc='The scout automatically explores unmapped areas and avoids fights. To stop it, pick another stance or order it somewhere.';
+        btn.innerHTML=`<div class="btn-emoji sprite-icon icon-compass"></div><div class="btn-label">Auto Scout</div>`;
+        // Auto Scout is a dispatch task, not an adjust-in-place toggle: like a
+        // build/gather order it DESELECTS the scout so the player can get on
+        // with other things (the highlight is for when you re-select it).
+        btn.onclick=()=>{ if(gameOver)return; submitCommand({kind:'auto-scout',unitIds:ids,on:true}); deselectAfterTask(); };
         act.appendChild(btn);
       }
-    }
-
-    // Auto Scout — no Stop button: any manual order (just send the scout
-    // somewhere) already cancels it, so the button only shows while at
-    // least one selected scout ISN'T auto-scouting yet.
-    let allScouts = selected.length>0 && selected.every(s=>s.type==='unit'&&s.utype==='scout'&&s.team===myTeam);
-    if(rebuildActions&&allScouts&&selected.some(s=>!s.autoScout)){
-      let ids = selected.map(s=>s.id);
-      let btn=document.createElement('div');btn.className='act-btn';
-      btn.dataset.tipType='action';
-      btn.dataset.tipLabel = 'Auto Scout';
-      btn.dataset.tipDesc = 'The scout automatically explores unmapped areas and avoids fights. To stop it, just order it somewhere.';
-      btn.innerHTML=`<div class="btn-emoji sprite-icon icon-compass"></div><div class="btn-label">Auto Scout</div>`;
-      btn.onclick=()=>{ if(gameOver)return; submitCommand({kind:'auto-scout',unitIds:ids,on:true}); deselectAfterTask(); };
-      act.appendChild(btn);
     }
     let allVillagers = selected.every(s=>s.type==='unit'&&s.utype==='villager'&&s.team===myTeam);
     if(rebuildActions&&allVillagers){
@@ -1314,7 +1395,6 @@ function updateUI(){
           btn.dataset.tipKey=bi.type;
           let bData=BLDGS[bi.type];
           btn.dataset.cost=JSON.stringify(bData.cost);
-          let costStr=formatCost(bData.cost);
           // Buildings without a sprites.png cell (MARKET) fall back to their
           // emoji glyph — same rule as the train buttons above.
           let bIcon=SPRITE_ICON_KEYS.has(iconKey(bi.type))
@@ -1368,7 +1448,6 @@ function updateUI(){
           btn.dataset.tipKey=bi.type;
           let bData=BLDGS[bi.type];
           btn.dataset.cost=JSON.stringify(bData.cost);
-          let costStr=formatCost(bData.cost);
           btn.innerHTML=`<div class="btn-emoji sprite-icon icon-${iconKey(bi.type)}"></div><div class="btn-label">${bi.label}</div>${costChips(bData.cost)}`;
           btn.onclick=()=>{
             if(gameOver)return;
@@ -1520,14 +1599,7 @@ window.selectIdleVillager = function() {
   selected = [vil];
   
   // Center camera
-  let iso = toIso(vil.x, vil.y);
-  camX = iso.ix;
-  camY = iso.iy;
-  window.targetCamX = camX;
-  window.targetCamY = camY;
-  // Manual camera jump should release camera-follow, same as any other
-  // manual pan — otherwise handleScroll() snaps straight back next frame.
-  window.cameraFollowId = null;
+  jumpCameraToTile(vil.x, vil.y);
 
   if (window.playSound) window.playSound('select_villager');
   showMsg('Selected idle villager');
@@ -1546,10 +1618,7 @@ window.selectIdleMilitary = function() {
   let u = mil[window.lastIdleMilIndex % mil.length];
   window.lastIdleMilIndex++;
   selected = [u];
-  let iso = toIso(u.x, u.y);
-  camX = iso.ix; camY = iso.iy;
-  window.targetCamX = camX; window.targetCamY = camY;
-  window.cameraFollowId = null;
+  jumpCameraToTile(u.x, u.y);
   if (window.playSound) window.playSound('select_military');
   showMsg('Selected idle soldier');
   updateUI();
@@ -1595,11 +1664,25 @@ window.updateBottomHeight = function() {
     // Use the GLOBAL dpr (js/core.js) — it caps at 2x on mobile for render
     // cost; a raw devicePixelRatio here silently undid that cap on every
     // resize/rotate (this function runs at load too).
-    C.width = W * dpr;
-    C.height = window.innerHeight * dpr;
-    C.style.width = W + 'px';
-    C.style.height = window.innerHeight + 'px';
-    if (X) X.scale(dpr, dpr);
+    let needW = W * dpr, needH = window.innerHeight * dpr;
+    // ONLY touch the backing store when the pixel size actually changed:
+    // assigning C.width/C.height CLEARS the canvas and resets the transform.
+    // iOS Safari fires a stream of `resize` events (often with identical
+    // dimensions) as its toolbar animates in/out during a pan — re-clearing on
+    // each one made the whole screen flicker while reviewing the map. Guarding
+    // it (as the minimap already does) keeps the resize idempotent.
+    if (C.width !== needW || C.height !== needH) {
+      C.width = needW;
+      C.height = needH;
+      C.style.width = W + 'px';
+      C.style.height = window.innerHeight + 'px';
+      if (X) X.scale(dpr, dpr); // transform was reset by the width/height write
+    } else {
+      // Size unchanged — refresh the CSS box only (never clears), leaving the
+      // existing dpr transform intact.
+      C.style.width = W + 'px';
+      C.style.height = window.innerHeight + 'px';
+    }
   }
   // Exposes the current bar heights to CSS. Only classic-style.css reads
   // these (to size/place the corner minimap against the real bar height

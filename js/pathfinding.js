@@ -25,6 +25,15 @@ function rebuildUnitBlock(){
   });
 }
 
+// Reused A* scratch — avoids a new Array(MAP²) + Uint8Array(MAP²) on EVERY
+// findPath call (27k+ calls/match; ~20k elements each on a large map — a major
+// per-tick GC source). Generation-stamped so "clearing" between calls is a
+// single counter bump, never an O(MAP²) fill: a cell is closed iff
+// _pfClosedGen[k]===_pfGen, and open iff _pfOpenGen[k]===_pfGen (its node is
+// _pfOpenNode[k]). Purely a storage change — the A* algorithm and the path it
+// returns are byte-for-byte identical (verified by checksum equality).
+let _pfGen=0, _pfClosedGen=null, _pfOpenGen=null, _pfOpenNode=null;
+
 function walkable(x,y,ignore,ignoreUnits){
   if(x<0||x>=MAP||y<0||y>=MAP)return false;
   // Stationary-unit collision (see rebuildUnitBlock above). ignoreUnits is
@@ -110,8 +119,10 @@ function walkable(x,y,ignore,ignoreUnits){
   // thousands of times per search), and most of those checks are against
   // plain open/already-passable tiles where this lookup would be wasted.
   let walker=entitiesById.get(ignore);
-  // Allow villagers to walk onto the specific resource tile they are working on
-  if(walker && walker.gatherX === x && walker.gatherY === y) return true;
+  // AoE2: a resource (tree/gold/stone/berries) is SOLID — villagers gather it
+  // from an ADJACENT tile, never by standing on it. (Farms are walkable ground
+  // above; sheep are units with their own harvest exception.) This is what
+  // caps villagers-per-node and rings them around the tile instead of stacking.
   // Allow builders to stand on the building foundation they are constructing
   if(t.occupied && walker && walker.buildTarget === t.occupied) return true;
   if(isResource)return false;
@@ -133,12 +144,25 @@ function walkable(x,y,ignore,ignoreUnits){
   }
   return false;
 }
-function findPath(sx,sy,ex,ey,ignore){
+// stopDist>0: don't path ONTO (ex,ey) — path to the nearest reachable tile
+// WITHIN stopDist of it, and stop there. This is how an attacker approaches to
+// its own attack range instead of piling onto the target's tile: melee (~1.5)
+// ends up on an adjacent tile, ranged (its range) stops out in an arc. Distinct
+// approach directions land on distinct in-range tiles, so a group distributes
+// itself around the target with no per-unit-type logic and no forced ring.
+function findPath(sx,sy,ex,ey,ignore,stopDist){
   sx=Math.round(sx);sy=Math.round(sy);ex=Math.round(ex);ey=Math.round(ey);
   if(ex<0)ex=0;if(ey<0)ey=0;if(ex>=MAP)ex=MAP-1;if(ey>=MAP)ey=MAP-1;
-  // Only redirect for truly impassable destinations (water, buildings)
-  // Resource tiles (forest, gold, stone, berries) are valid destinations
-  if(!walkable(ex,ey,ignore)){
+  let sd=stopDist||0, sd2=sd*sd;
+  // Goal test: an exact tile normally, or "within stopDist of the goal" in
+  // range-approach mode. inGoal is the single place the two modes differ.
+  let inGoal = sd>0 ? (x,y)=>{let dx=x-ex,dy=y-ey;return dx*dx+dy*dy<=sd2;}
+                    : (x,y)=>x===ex&&y===ey;
+  if(sd>0){
+    if(inGoal(sx,sy))return []; // already in range — no move needed
+  } else if(!walkable(ex,ey,ignore)){
+    // Only redirect for truly impassable destinations (water, buildings)
+    // Resource tiles (forest, gold, stone, berries) are valid destinations
     let found=false;
     let t = map[ey] && map[ey][ex];
     let isRes = t && (t.t === TERRAIN.FOREST || t.t === TERRAIN.GOLD || t.t === TERRAIN.STONE || t.t === TERRAIN.BERRIES);
@@ -153,9 +177,13 @@ function findPath(sx,sy,ex,ey,ignore){
   let startH=Math.max(startAdx,startAdy)+0.41*Math.min(startAdx,startAdy);
   let startNode={x:sx,y:sy,g:0,h:startH,f:startH,p:null};
   let open=[startNode];
-  let openMap=new Array(MAP*MAP);
-  openMap[sx+sy*MAP]=startNode;
-  let closed=new Uint8Array(MAP*MAP);
+  // (Re)allocate scratch on first use / map-size change, then bump the
+  // generation so all prior stamps read as stale — no per-call clearing.
+  let N=MAP*MAP;
+  if(!_pfClosedGen||_pfClosedGen.length!==N){_pfClosedGen=new Int32Array(N);_pfOpenGen=new Int32Array(N);_pfOpenNode=new Array(N);_pfGen=0;}
+  if(++_pfGen>=2147483647){_pfClosedGen.fill(0);_pfOpenGen.fill(0);_pfGen=1;} // stamp overflow (astronomically rare) → reset
+  let gen=_pfGen;
+  _pfOpenGen[sx+sy*MAP]=gen;_pfOpenNode[sx+sy*MAP]=startNode;
   let iters=0;
   // Track the node that got closest to the goal so far. If the search runs out
   // of budget (large/obstructed maps can need more than the iteration cap) we
@@ -169,13 +197,13 @@ function findPath(sx,sy,ex,ey,ignore){
     for(let i=1;i<open.length;i++){if(open[i].f<open[minIdx].f)minIdx=i;}
     let cur=open[minIdx];
     open[minIdx]=open[open.length-1];open.pop();
-    if(cur.x===ex&&cur.y===ey){
+    if(inGoal(cur.x,cur.y)){
       let path=[];while(cur.p){path.unshift({x:cur.x,y:cur.y});cur=cur.p;}
       return path;
     }
     let ck=cur.x+cur.y*MAP;
-    openMap[ck]=undefined;
-    closed[ck]=1;
+    _pfOpenNode[ck]=undefined; // popped from the open set
+    _pfClosedGen[ck]=gen;
     for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
       if(dx===0&&dy===0)continue;
       let nx=cur.x+dx,ny=cur.y+dy;
@@ -183,15 +211,15 @@ function findPath(sx,sy,ex,ey,ignore){
       // Block diagonal moves that cut through the gap between two touching obstacles
       if(dx&&dy&&(!walkable(cur.x+dx,cur.y,ignore)||!walkable(cur.x,cur.y+dy,ignore)))continue;
       let k=nx+ny*MAP;
-      if(closed[k])continue;
+      if(_pfClosedGen[k]===gen)continue;
       let g=cur.g+(dx&&dy?1.41:1);
-      let existing=openMap[k];
+      let existing=_pfOpenGen[k]===gen?_pfOpenNode[k]:undefined;
       if(existing){if(g<existing.g){existing.g=g;existing.f=g+existing.h;existing.p=cur;}}
       else{
         let adx=Math.abs(nx-ex),ady=Math.abs(ny-ey);
         let h=Math.max(adx,ady)+0.41*Math.min(adx,ady);
         let node={x:nx,y:ny,g,h,f:g+h,p:cur};
-        open.push(node);openMap[k]=node;
+        open.push(node);_pfOpenGen[k]=gen;_pfOpenNode[k]=node;
         if(h<bestNode.h)bestNode=node;
       }
     }

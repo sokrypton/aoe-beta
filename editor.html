@@ -1,16 +1,15 @@
 <!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Age of Epochs II (Classic UI)</title>
+<html><head><meta charset="UTF-8"><title>Age of Epochs II — Scenario Editor</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<link rel="stylesheet" href="classic-style.css">
-<!-- Cookieless, privacy-first traffic analytics (GoatCounter): referrer/UTM
-     acquisition data, no cookies, no IP stored, no consent banner needed. -->
-<script data-goatcounter="https://ageofepochs.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
-</head><body class="classic-ui">
-<!-- All shared markup (HUD, menus, overlays) lives in js/page-shell.js —
-     this page and classic.html are thin variant shells so the two skins
-     can never drift apart again. UI_VARIANT picks the skin-specific bits
-     (idle-button placement, switch-link label). -->
-<script>window.UI_VARIANT='classic';</script>
+<link rel="stylesheet" href="styles.css">
+</head><body class="editor-ui">
+<!-- Scenario editor. A thin sibling of index.html: it loads the SAME engine
+     (page-shell markup + full js/ stack) so restartGame / loadScenario /
+     gameLoop / the sim / gamePaused all work unmodified, then js/editor.js
+     hides the game HUD, swaps canvas input for click-to-place, and boots into
+     a blank scenario world instead of the menu. __editorMode (set below,
+     before any script) gates the additive guards in init.js and input.js. -->
+<script>window.UI_VARIANT='mobile'; window.__editorMode=true;</script>
 <script src="js/page-shell.js"></script>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script src="https://unpkg.com/qrcode-generator@1.4.4/qrcode.js"></script>
@@ -41,5 +40,5 @@
 <script src="js/chat.js"></script>
 <script src="js/input.js"></script>
 <script src="js/init.js"></script>
-<script src="js/boot.js"></script>
+<script src="js/editor.js"></script>
 </body></html>
