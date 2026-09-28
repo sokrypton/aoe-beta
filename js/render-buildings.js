@@ -117,9 +117,9 @@ function drawBuildingBlock(sx,sy,bw,bhh,bh,wallL,wallR,roofType,roofH,roofL,roof
   X.moveTo(sx - bw, sy + bhh - bh + 1.5); X.lineTo(sx, sy + bhh * 2 - bh + 1.5);
   X.lineTo(sx + bw, sy + bhh - bh + 1.5);
   X.stroke();
-  // (a white "ridge highlight" down peaked roofs' front edge used to be
-  // stroked here — at the small scale every peaked roof is drawn at, it
-  // read as a stray gray line rather than a specular edge)
+  // (no white "ridge highlight" down peaked roofs' front edge — at the
+  // small scale every peaked roof is drawn at, it reads as a stray gray
+  // line rather than a specular edge)
   X.restore();
 }
 
@@ -296,21 +296,6 @@ function drawDoorRight(sx,sy,bw,bhh,color,darken=false){
   X.strokeStyle='#000000';X.lineWidth=1;X.stroke();
 }
 
-// Draws a double gate wrapping the bottom corner of a building block
-function drawCornerDoubleGate(sx,sy,bhh,gateH,colorL,colorR,darken=false){
-  X.strokeStyle='#000000';X.lineWidth=1;
-  let cL = darken ? darkenColor(colorL) : colorL;
-  let cR = darken ? darkenColor(colorR) : colorR;
-  // Left leaf
-  X.fillStyle=cL;X.beginPath();
-  X.moveTo(sx-6,sy+bhh*2-3);X.lineTo(sx,sy+bhh*2);
-  X.lineTo(sx,sy+bhh*2-gateH);X.lineTo(sx-6,sy+bhh*2-gateH-3);X.closePath();X.fill();X.stroke();
-  // Right leaf
-  X.fillStyle=cR;X.beginPath();
-  X.moveTo(sx,sy+bhh*2);X.lineTo(sx+6,sy+bhh*2-3);
-  X.lineTo(sx+6,sy+bhh*2-gateH-3);X.lineTo(sx,sy+bhh*2-gateH);X.closePath();X.fill();X.stroke();
-}
-
 // Draws a flagpole and team-colored waving flag on top of a keep
 function drawWavingFlag(sx,sy,bh,color,colorDark,poleLen=22){
   // Pole base sits at sy-bh-2; poleLen lets tall buildings (TC) plant the
@@ -325,7 +310,7 @@ function drawWavingFlag(sx,sy,bh,color,colorDark,poleLen=22){
   // plus a slight quadratic sag. Two superposed sines keep the motion from
   // looking metronomic.
   const L=17, H=8.5, N=8;
-  let t=tick*0.13;
+  let t=animTick*0.13;
   let lift=(u)=>Math.sin(t-u*4.2)*3.0*u + Math.sin(t*0.63-u*7.0)*0.9*u + 2.4*u*u;
   let pts=[];
   for(let i=0;i<=N;i++){
@@ -380,15 +365,6 @@ function drawTCAnnexRoof(sx, sy, side, tc, tcD, darken){
   let O2 = { x: sx + 48*s, y: sy + 72 }; // outer front corner
   let up = (p, h) => ({ x: p.x, y: p.y - h });
   let K1r = up(K1,hK), K2r = up(K2,hK), O1r = up(O1,hO), O2r = up(O2,hO);
-  // shade on the ground under the open shelter — skipped in the selection-
-  // outline mask pass (window._maskDraw): shadow, not shape, and it filled
-  // the whole quadrant under the roof with a gold haze when selected.
-  if (!window._maskDraw) {
-    X.fillStyle = 'rgba(0,0,0,0.10)';
-    X.beginPath();
-    X.moveTo(K1.x,K1.y); X.lineTo(O1.x,O1.y); X.lineTo(O2.x,O2.y); X.lineTo(K2.x,K2.y);
-    X.closePath(); X.fill();
-  }
   // roof plane: wooden planks, lit by orientation (left plane faces the
   // light, right plane faces away)
   let plank = s < 0 ? WOOD.plankL : WOOD.plankR;
@@ -492,15 +468,15 @@ function drawPennant(px,py,color,darken){
 // Draws animated chimney smoke puffs
 function drawChimneySmoke(cx,cy){
   X.fillStyle='rgba(180,180,180,0.4)';
-  let smokeOffset = (tick % 60) / 60;
+  let smokeOffset = (animTick % 60) / 60;
   let syy = cy - smokeOffset * 18;
-  let sxx = cx + Math.sin(tick*0.08)*2;
+  let sxx = cx + Math.sin(animTick*0.08)*2;
   X.beginPath();X.arc(sxx,syy,2.5+smokeOffset*4,0,Math.PI*2);X.fill();
 }
 
 // Draws animated rotating windmill sails
 function drawWindmillSails(hx,hy,id,scale=1,canvasCol='#f0ead8',canvasCol2=null){
-  let rot = tick * 0.012 + id*0.5; // slow, ponderous turn — mills are heavy
+  let rot = animTick * 0.012 + id*0.5; // slow, ponderous turn — mills are heavy
 
   // Front-facing rotor: the fan spins in a (slightly flattened)
   // screen-plane circle, sails alternating canvas colors around the hub.
@@ -579,7 +555,16 @@ function getConnectedBuilding(tx, ty){
   // the owner's id (see placement in js/logic.js). The old full entities
   // scan ran 1-4× per WALL/TOWER/GATE per frame: ~10-60k entity checks a
   // frame for a decent wall ring.
+  // A placement ghost that ISN'T a valid placement must not sprout wall-link
+  // stubs toward nearby walls (a gate/tower merely hovering near a wall looked
+  // connected). Suppress all connection lookups for an invalid ghost; a valid
+  // ghost (a gate snapped onto a wall) still previews its joins.
+  if(window._ghostDraw && !window._ghostValid) return undefined;
   if(ty<0||ty>=MAP||tx<0||tx>=MAP)return undefined;
+  // Placement ghosts (esp. a multi-tile wall drag) overlay their own not-yet-
+  // placed tiles here, so the SAME WALL rendering links them to each other and
+  // to existing walls — without ever touching the sim occupancy grid.
+  if(window._ghostTiles){ let g=window._ghostTiles.get(ty*MAP+tx); if(g) return g; }
   let id=map[ty][tx].occupied;
   if(!id)return undefined;
   let en=entitiesById.get(id);
@@ -591,6 +576,12 @@ function wallMat(bt){
   if (bt === 'SWALL' || bt === 'SGATE') return 'stone';
   return null;
 }
+// Entity-aware material: stone walls owned by a Fortified Wall team render
+// as 'stonef' (crenellated — the tech's visual tell, drawWallLink).
+function wallMatOf(b){
+  let m = wallMat(b.btype);
+  return m === 'stone' && hasUpgrade(b.team, 'fortified_wall') ? 'stonef' : m;
+}
 // mat: restrict to one material family (towers always connect). Omitted =>
 // any wall-like neighbor.
 function isWallLike(b, mat){
@@ -599,6 +590,57 @@ function isWallLike(b, mat){
   let m = wallMat(b.btype);
   if (!m) return false;
   return !mat || m === mat;
+}
+// Wall-like tiles link only S and E to ANY wall-like neighbour, so two runs a
+// tile apart would rung together into a ladder. A link is a "rung" — a cross
+// perpendicular to the run its tiles belong to — when both ends sit on a rail
+// crossing it AND it isn't itself continuing a run along its own axis; drop
+// those to keep side-by-side parallels separate. (A nested-ring corner still
+// meets: a local rule can't unpick a tile boxed in on all four sides, and a
+// joined double-wall corner reads better than a broken ring.) Shared by WALL,
+// TOWER, PTOWER and GATE — every structure that draws these link stubs.
+function _wlLike(tx, ty){ return isWallLike(getConnectedBuilding(tx, ty)); }
+// Whether to draw a piece's link stubs toward its neighbours this pass.
+// In a SELECTION OUTLINE, only a WALL keeps its stubs: they're part of the wall
+// (clicking a stub selects that wall, so the highlight must match what you
+// clicked). A TOWER or GATE is a discrete structure whose stubs belong to the
+// adjoining wall run, not the piece — its outline is just its own body. A GATE
+// placement ghost also drops them (a hovering gate shouldn't sprout wall stubs;
+// the transient neighbour lookup flashed a mismatched-material link). Normal
+// render always draws them.
+function drawsWallStubs(e){
+  if (window._selOutline && !isWallBtype(e.btype)) return false;
+  if (window._ghostDraw && isGateBtype(e.btype)) return false;
+  return true;
+}
+function wallSouthRung(x, y){ // vertical link (x,y) -> (x,y+1)
+  return (_wlLike(x-1,y)   || _wlLike(x+1,y))
+      && (_wlLike(x-1,y+1) || _wlLike(x+1,y+1))
+      && !_wlLike(x,y-1) && !_wlLike(x,y+2);
+}
+function wallEastRung(x, y){ // horizontal link (x,y) -> (x+1,y)
+  return (_wlLike(x,y-1)   || _wlLike(x,y+1))
+      && (_wlLike(x+1,y-1) || _wlLike(x+1,y+1))
+      && !_wlLike(x-1,y) && !_wlLike(x+2,y);
+}
+// Ghost-only reciprocal joins. Links are one-sided (a tile draws only S+E; its
+// N/W joins are drawn BY those neighbours). A placement ghost isn't in the
+// grid, so real walls to its N/W don't redraw toward it and the ghost would
+// look connected only on its S/E sides — differing from the placed result.
+// Preview the N/W joins here, in each neighbour's material with symmetric trims
+// so each is identical to the link that neighbour will actually draw. sx/linkY
+// is the caller's own link anchor. Shared by WALL/TOWER/PTOWER/GATE ghosts.
+function drawGhostBackJoins(x, y, sx, linkY, wallH, tc){
+  if(!window._ghostDraw) return;
+  let join = (nx, ny, dx, dy, isRung) => {
+    if(window._ghostTiles && window._ghostTiles.has(ny*MAP+nx)) return; // a ghost neighbour draws its own S+E
+    let nb = getConnectedBuilding(nx, ny);
+    if(!isWallLike(nb) || isRung) return;
+    let nm = wallMatOf(nb) || 'wood', nlt = (nm!=='wood'?9:7)/2;
+    drawWallLink(sx, linkY, dx, dy, wallH, false, nlt*Math.sqrt(5)/2, nlt*Math.sqrt(5)/2, null, tc, nlt, false, nm);
+  };
+  join(x, y-1,  32, -16, wallSouthRung(x, y-1)); // N neighbour's South link
+  join(x-1, y, -32, -16, wallEastRung(x-1, y));  // W neighbour's East link
 }
 // One merlon block: two wall faces + a two-tone cap. Hard-outlined on
 // sides and tops, but the BOTTOM seam gets the light course-line stroke
@@ -674,8 +716,8 @@ function buildingShadowPath(e){
   let g = 1.06, ox = 3, oy = 1.5;
   if (fw === fh) {
     // square footprint: one diamond over the whole base
-    let iso = toIso(e.x + fw/2, e.y + fh/2);
-    let sx = Math.round(iso.ix - camX + W/2), sy = Math.round(iso.iy - camY + topH + H/2);
+    let p = mapToScreen(e.x + fw/2, e.y + fh/2);
+    let sx = Math.round(p.sx), sy = Math.round(p.sy);
     if (isOffscreen(sx, sy, 100)) return;
     let bw = fw * HALF_TW, bhh = fh * HALF_TH;
     X.moveTo(sx + ox, sy - bhh * g + oy);
@@ -688,8 +730,8 @@ function buildingShadowPath(e){
     // the parallelogram footprint — shadow each tile individually; the
     // union fill merges the overlap seamlessly.
     for (let dy = 0; dy < fh; dy++) for (let dx = 0; dx < fw; dx++) {
-      let iso = toIso(e.x + dx + 0.5, e.y + dy + 0.5);
-      let sx = Math.round(iso.ix - camX + W/2), sy = Math.round(iso.iy - camY + topH + H/2);
+      let p = mapToScreen(e.x + dx + 0.5, e.y + dy + 0.5);
+      let sx = Math.round(p.sx), sy = Math.round(p.sy);
       if (isOffscreen(sx, sy, 100)) continue;
       X.moveTo(sx + ox, sy - HALF_TH * g + oy);
       X.lineTo(sx + HALF_TW * g + ox, sy + oy);
@@ -707,8 +749,8 @@ function drawBuilding(e, part = null){
   let ownerAge = (teamAge && isPlayerTeam(e.team)) ? teamAge[e.team] : 0;
   let aw = AGE_WALLS[ownerAge] || AGE_WALLS[1];
   let cx=e.x+b.w/2,cy=e.y+b.h/2;
-  let iso=toIso(cx,cy);
-  let sx=Math.round(iso.ix-camX+W/2), sy=Math.round(iso.iy-camY+topH+H/2);
+  let p=mapToScreen(cx,cy);
+  let sx=Math.round(p.sx), sy=Math.round(p.sy);
   if(isOffscreen(sx,sy,100))return;
   let bw=b.w*HALF_TW, bhh=b.h*HALF_TH;
   sy-=bhh;
@@ -716,7 +758,10 @@ function drawBuilding(e, part = null){
   let f = window._ghostDraw ? 2 : buildingFogLevel(e);
   let visible = f === 2; // actively in sight — show live animations
   let darken = !window._ghostDraw && f === 1;
-  if(!e.complete && !window._ghostDraw) X.globalAlpha=0.5+e.buildProgress/e.buildTime*0.5;
+  // Foundation scaffold fade — skipped in the occluder-mask pass (_maskDraw):
+  // the behind-building outline needs FULL footprint coverage to clip a crisp
+  // ring, even while the building itself renders translucent under construction.
+  if(!e.complete && !window._ghostDraw && !window._maskDraw) X.globalAlpha=0.5+e.buildProgress/e.buildTime*0.5;
   let tc=teamColor(e.team);
   let tcD=teamColorDark(e.team);
   let bh=10;
@@ -740,6 +785,12 @@ function drawBuilding(e, part = null){
     X.save();
     X.translate(tcCx, tcCy); X.scale(tcS, tcS); X.translate(-tcCx, -tcCy);
     bh = 60 * tcS; // scaled keep height, for overlays drawn after restore()
+
+    // Depth split (see the TC proxy branch in render.js): 'back' = keep tower
+    // + foundation (sorts a tile behind centre), 'front' = posts + annex
+    // roofs + banner (sorts a tile ahead). null draws the whole building
+    // (selection outline, placement ghost, minimap).
+    if(part !== 'front'){
 
     // Draw stone foundation pavement covering the keep footprint in the back quadrant
     X.fillStyle = darken ? darkenColor('#8d8577') : '#b7ad97';
@@ -991,6 +1042,9 @@ function drawBuilding(e, part = null){
       X.closePath(); X.fill(); X.stroke();
     });
 
+    } // end 'back' (keep + foundation + support posts) part
+
+    if(part !== 'back'){
     // 3+4. Annex roofs (open-sided shelter roofs over the left and right
     // courtyard quadrants, in team color) — the two are the identical shape
     // mirored about the keep, so one helper drawn at ±48.
@@ -1008,18 +1062,22 @@ function drawBuilding(e, part = null){
       if (ownerAge >= 2) drawWavingFlag(sx, sy, 66, darken ? darkenColor(tc) : tc, darken ? darkenColor(tcD) : tcD, 22);
       else drawWavingFlag(sx, sy, 29, darken ? darkenColor(tc) : tc, darken ? darkenColor(tcD) : tcD, 42);
     }
+
+    } // end 'front' (annex) part
     X.restore();
+    // The keep part paints first and must not run the shared overlays (HP
+    // bar, garrison flag, progress) — those belong to the front pass / the
+    // whole-building null pass, same as the gate's back post.
+    if(part === 'back'){ X.globalAlpha = 1; return; }
   }
   else if(e.btype==='HOUSE'){
     // Timber-framed cottage under a big yellow hay gable roof.
     // Base spans the full tile diamond (W/hh = HALF_TW/HALF_TH), so all
     // four wall corners land exactly on the tile's edges.
     // Shared gable geometry (walls, gable end, team-colored roof slope,
-    // course lines) via drawGableBlock — the branch used to inline a
-    // line-for-line copy. House-only detailing: half-timber studs and
-    // mid-rails (painted via the afterWalls hook, i.e. between the walls
-    // and the roof, exactly where the old inline order put them), then a
-    // pennant and the chimney below.
+    // course lines) via drawGableBlock. House-only detailing: half-timber
+    // studs and mid-rails (painted via the afterWalls hook, i.e. between
+    // the walls and the roof), then a pennant and the chimney below.
     let W=32, hh=16, wallH=16, roofH=20;
     bh=32;
     let sy0=sy+bhh-hh; // center on tile
@@ -1121,8 +1179,8 @@ function drawBuilding(e, part = null){
       let legC=coat==='#e9e6de'?'#b3ada1':'#6e4520';
       if(darken) legC=darkenColor(legC);
       // over-driven clamped sine: dwells at head-down / head-up
-      let g=(graze&&visible)?Math.min(1,Math.max(0,Math.sin(tick*0.02+e.id)*1.5+0.4)):0;
-      let swish=visible?Math.sin(tick*0.08+e.id)*0.2:0;
+      let g=(graze&&visible)?Math.min(1,Math.max(0,Math.sin(animTick*0.02+e.id)*1.5+0.4)):0;
+      let swish=visible?Math.sin(animTick*0.08+e.id)*0.2:0;
       X.save();X.translate(hx,hy-5.2);X.scale(1.05,1.05);
       X.lineJoin='round';
       // tail (farthest — behind the legs)
@@ -1873,8 +1931,14 @@ function drawBuilding(e, part = null){
       drawWindmillSails(sx, hubY, e.id, 1.75, '#f0ead8', darken?darkenColor(tc):tc);
     }
   }
-  else if(e.btype==='TOWER'){
-    bh=36;
+  else if(isTowerBtype(e.btype)){
+    // TOWER and its dark-age wooden kin PTOWER share one body: PTOWER is a
+    // shorter timber shaft that ALWAYS wears the peaked cap (no stone/merlon
+    // age progression — upgrading swaps btype to TOWER outright, see
+    // execUpgradeWalls). Base block, arrow slits, wall-link stubs and flag are
+    // otherwise identical; only material/height/slit-size/cap/flag differ.
+    let isP = e.btype === 'PTOWER';
+    bh = isP ? 30 : 36;
     let linkY = sy + 16;
     let wallH = 14;
 
@@ -1891,19 +1955,21 @@ function drawBuilding(e, part = null){
     // same stone-wall palette (GATE/WALL pf stone), same merlon cap —
     // so a tower embedded in a wall run reads as kin to the gate posts.
     // Feudal wears a peaked team-color roof; Castle swaps it for merlons.
-    let pfS = ['#cfc8b6', '#aca392', '#b7ad97'];
-    let towerH = 40; // gate posts use pillarH 22
+    let pfS = isP ? [WOOD.L, WOOD.R, WOOD.top] : ['#cfc8b6', '#aca392', '#b7ad97'];
+    let towerH = isP ? 32 : 40; // gate posts use pillarH 22
     // topLight at every age: the crown's front rim edges take the light
     // seam stroke — a hard black diamond outline showed as a dark ring
     // around the base of the Feudal peaked cap (which is 12 wide vs 14).
     drawBuildingBlock(sx, linkY-7, 14, 7, towerH, pfS[0], pfS[1], 'flat', 0, pfS[2], pfS[2], darken, true);
     // arrow slits on BOTH visible faces — arrows can come from either side
+    // (palisade tower's shorter shaft carries slightly smaller slits)
+    let slitY = isP ? sy - 2 : sy - 4, slitH = isP ? 5 : 6, slitLen = isP ? 8 : 10;
     X.fillStyle = '#1c1c1c';
-    X.save(); X.translate(sx-7, sy-4); X.transform(1,0.5,0,1,0,0);
-    X.fillRect(-1.2,-6,2.4,10); X.restore();
-    X.save(); X.translate(sx+7, sy-4); X.transform(1,-0.5,0,1,0,0);
-    X.fillRect(-1.2,-6,2.4,10); X.restore();
-    if (ownerAge >= 2) {
+    X.save(); X.translate(sx-7, slitY); X.transform(1,0.5,0,1,0,0);
+    X.fillRect(-1.2,-slitH,2.4,slitLen); X.restore();
+    X.save(); X.translate(sx+7, slitY); X.transform(1,-0.5,0,1,0,0);
+    X.fillRect(-1.2,-slitH,2.4,slitLen); X.restore();
+    if (!isP && ownerAge >= 2) {
       // +28 (not the gate's +22): seats the side merlons' bases ON the
       // crown's top face — at the gate's height the small float is masked
       // by the door behind, here it read as merlons hovering in air
@@ -1918,57 +1984,26 @@ function drawBuilding(e, part = null){
     // clear each other instead of clipping at the shared vertex.
     // South neighbor (y+1) — towers join runs of EITHER material; the link
     // stub takes the neighbor's material so it reads as that run continuing.
+    if (drawsWallStubs(e)) {
     let sN = getConnectedBuilding(e.x, e.y + 1);
-    if (isWallLike(sN)) {
-      let m2 = wallMat(sN.btype) || 'wood', lt2 = m2==='stone'?4:3.5;
-      drawWallLink(sx, linkY, -32, 16, wallH, darken, 8, m2==='stone'?5:lt2*Math.sqrt(5)/2, null, tc, lt2, false, m2);
+    if (isWallLike(sN) && !wallSouthRung(e.x, e.y)) {
+      let m2 = wallMatOf(sN) || 'wood', lt2 = m2!=='wood'?4:3.5;
+      drawWallLink(sx, linkY, -32, 16, wallH, darken, 8, m2!=='wood'?5:lt2*Math.sqrt(5)/2, null, tc, lt2, false, m2);
     }
 
     // East neighbor (x+1)
     let eN = getConnectedBuilding(e.x + 1, e.y);
-    if (isWallLike(eN)) {
-      let m3 = wallMat(eN.btype) || 'wood', lt3 = m3==='stone'?4:3.5;
-      drawWallLink(sx, linkY, 32, 16, wallH, darken, 8, m3==='stone'?5:lt3*Math.sqrt(5)/2, null, tc, lt3, false, m3);
+    if (isWallLike(eN) && !wallEastRung(e.x, e.y)) {
+      let m3 = wallMatOf(eN) || 'wood', lt3 = m3!=='wood'?4:3.5;
+      drawWallLink(sx, linkY, 32, 16, wallH, darken, 8, m3!=='wood'?5:lt3*Math.sqrt(5)/2, null, tc, lt3, false, m3);
+    }
+    // Ghost-only: preview the N/W joins real neighbours will draw once placed.
+    drawGhostBackJoins(e.x, e.y, sx, linkY, wallH, tc);
     }
 
     // Castle: pole planted on the back merlon's cap (sy-40), matching the
-    // TC. Feudal: pole rises from the peaked cap's apex (sy-42).
-    if (e.complete && visible) drawWavingFlag(sx, sy, ownerAge >= 2 ? 32 : 40, tc, tcD);
-  }
-  else if(e.btype==='PTOWER'){
-    bh=30;
-    let linkY = sy + 16;
-    let wallH = 14;
-
-    // Palisade Watch Tower — the TOWER's dark-age wooden kin: same base
-    // geometry (front-bottom vertex on linkY so wall links meet with no
-    // gap) but a shorter shaft in structural-timber browns, and it always
-    // wears the peaked team-color cap — no stone-merlon age progression,
-    // since upgrading swaps the btype to TOWER outright (execUpgradeWalls).
-    let pfS = [WOOD.L, WOOD.R, WOOD.top];
-    let towerH = 32;
-    drawBuildingBlock(sx, linkY-7, 14, 7, towerH, pfS[0], pfS[1], 'flat', 0, pfS[2], pfS[2], darken, true);
-    // arrow slits on BOTH visible faces — arrows can come from either side
-    X.fillStyle = '#1c1c1c';
-    X.save(); X.translate(sx-7, sy-2); X.transform(1,0.5,0,1,0,0);
-    X.fillRect(-1.2,-5,2.4,8); X.restore();
-    X.save(); X.translate(sx+7, sy-2); X.transform(1,-0.5,0,1,0,0);
-    X.fillRect(-1.2,-5,2.4,8); X.restore();
-    drawBuildingBlock(sx, linkY - towerH - 6, 12, 6, 4, pfS[0], pfS[1], 'peaked', 8, tc, tcD, darken);
-
-    // Wall links: same both-material stubs as TOWER (see its comment).
-    let sN = getConnectedBuilding(e.x, e.y + 1);
-    if (isWallLike(sN)) {
-      let m2 = wallMat(sN.btype) || 'wood', lt2 = m2==='stone'?4:3.5;
-      drawWallLink(sx, linkY, -32, 16, wallH, darken, 8, m2==='stone'?5:lt2*Math.sqrt(5)/2, null, tc, lt2, false, m2);
-    }
-    let eN = getConnectedBuilding(e.x + 1, e.y);
-    if (isWallLike(eN)) {
-      let m3 = wallMat(eN.btype) || 'wood', lt3 = m3==='stone'?4:3.5;
-      drawWallLink(sx, linkY, 32, 16, wallH, darken, 8, m3==='stone'?5:lt3*Math.sqrt(5)/2, null, tc, lt3, false, m3);
-    }
-
-    if (e.complete && visible) drawWavingFlag(sx, sy, 32, tc, tcD);
+    // TC. Feudal / palisade: pole rises from the peaked cap's apex (sy-42).
+    if (e.complete && visible) drawWavingFlag(sx, sy, (!isP && ownerAge < 2) ? 40 : 32, tc, tcD);
   }
   else if(isWallBtype(e.btype)){
     bh=14;
@@ -1979,8 +2014,8 @@ function drawBuilding(e, part = null){
     // wall-like neighbor — each tile draws its own S/E slab in its OWN
     // material, so a mixed run (partially upgraded to stone) reads as one
     // continuous line with wood-meets-stone junctions at the pillars.
-    let mat = wallMat(e.btype);
-    let pf = mat === 'stone' ? ['#cfc8b6', '#aca392', '#b7ad97'] : [WOOD.L, WOOD.R, WOOD.top];
+    let mat = wallMatOf(e);
+    let pf = mat !== 'wood' ? ['#cfc8b6', '#aca392', '#b7ad97'] : [WOOD.L, WOOD.R, WOOD.top];
 
     // 1. Draw central pillar first (centered concentrically at sy+16) —
     // links draw AFTER so the walkway visibly connects between the
@@ -1993,10 +2028,15 @@ function drawBuilding(e, part = null){
     // 9px pillars); the link geometry below scales with it so the
     // edge-coincidence math still holds (thick = pillar half-width/2,
     // d1 = thick*sqrt(5)/2 * 2 = thick/cos, bottom vertex kept at sy+20).
-    let isWood = mat !== 'stone';
+    let isWood = mat === 'wood';
     let pw = isWood ? 7 : 9;
     let lthick = pw / 2;
-    drawBuildingBlock(sx, sy+20-pw, pw, pw/2, pillarH, pf[0], pf[1], 'flat', 0, tc, tc, darken);
+    // part 'body' = pillar only, 'link' = the S/E slabs only — the hit test
+    // (input.js wallGateHitPart) renders each in isolation to tag a click as
+    // pillar vs walkway WITHOUT re-deriving the geometry. null draws both.
+    if (part !== 'link')
+      drawBuildingBlock(sx, sy+20-pw, pw, pw/2, pillarH, pf[0], pf[1], 'flat', 0, tc, tc, darken);
+    if (part === 'body') { X.globalAlpha = 1; return; }
 
     // 2. Draw South and East links second (running towards the front, overlapping the pillar)
     // Slab half-thickness = pillar half-width/... matches the pillar's
@@ -2006,25 +2046,31 @@ function drawBuilding(e, part = null){
     // (linkY - 0.5: the slab's bottom front corner otherwise lands just
     // below the pillar's bottom vertex)
     let d1 = lthick * Math.sqrt(5) / 2;
-    // South neighbor (y+1)
-    if (isWallLike(getConnectedBuilding(e.x, e.y + 1))) {
-      drawWallLink(sx, linkY - 0.5, -32, 16, wallH, darken, d1, d1, null, tc, lthick, false, mat);
-    }
-
-    // East neighbor (x+1)
-    if (isWallLike(getConnectedBuilding(e.x + 1, e.y))) {
-      drawWallLink(sx, linkY - 0.5, 32, 16, wallH, darken, d1, d1, null, tc, lthick, false, mat);
+    // A tile draws only its S and E links (N/W joins come from those
+    // neighbours). Joining ANY wall-like neighbour, two parallel runs one
+    // tile apart would rung together into a ladder — so drop a link that runs
+    // PERPENDICULAR to the run both its tiles belong to: skip it when both
+    // endpoints sit on a rail crossing the link AND the link isn't itself
+    // continuing a run along its own axis. Corners, T-junctions, single runs
+    // and closed rings keep every join; only side-by-side parallels separate.
+    // South link (vertical) and East link (horizontal); skip cross-rungs
+    // between parallel runs (see wallSouthRung/wallEastRung).
+    if (drawsWallStubs(e)) {
+    if (_wlLike(e.x, e.y+1) && !wallSouthRung(e.x, e.y)) drawWallLink(sx, linkY - 0.5, -32, 16, wallH, darken, d1, d1, null, tc, lthick, false, mat);
+    if (_wlLike(e.x+1, e.y) && !wallEastRung(e.x, e.y)) drawWallLink(sx, linkY - 0.5, 32, 16, wallH, darken, d1, d1, null, tc, lthick, false, mat);
+    // Ghost-only: preview the N/W joins real neighbours will draw once placed.
+    drawGhostBackJoins(e.x, e.y, sx, linkY - 0.5, wallH, tc);
     }
   }
 
   else if(isGateBtype(e.btype)){
-    let mat = wallMat(e.btype);
-    let pf = mat === 'stone' ? ['#c8c0ae', '#a89f8d', '#b0b0a4'] : [WOOD.L, WOOD.R, WOOD.top];
+    let mat = wallMatOf(e);
+    let pf = mat !== 'wood' ? ['#c8c0ae', '#a89f8d', '#b0b0a4'] : [WOOD.L, WOOD.R, WOOD.top];
     // Link stubs must match the wall runs they join: the palisade is
     // skinnier (3.5 half-thickness) than stone (4.5), and the far-end
     // trim is the matching pillar-face distance so no gap opens.
-    let lth = mat === 'stone' ? 4 : 3.5;
-    let dEnd = mat === 'stone' ? 5 : lth * Math.sqrt(5) / 2;
+    let lth = mat !== 'wood' ? 4 : 3.5;
+    let dEnd = mat !== 'wood' ? 5 : lth * Math.sqrt(5) / 2;
     let pillarH = 28;
     bh = pillarH;
     let t1sx, t1sy, t2sx, t2sy;
@@ -2048,50 +2094,40 @@ function drawBuilding(e, part = null){
     let gp = visible ? (e.gateProgress || 0) : 0; // frozen closed in shroud
     let slideY = gp * 26;
 
-    if (part === 'back' || part === null) {
+    // part 'body' (hit test, input.js): the posts + door WITHOUT the wall
+    // stubs, which visually belong to the adjoining run — so a click on a stub
+    // doesn't select the gate. Enters both post blocks; stubs are skipped below.
+    if (part === 'back' || part === null || part === 'body') {
       // 1. Draw back post (Tower 1 - larger bastion centered at t1sy-7)
       // Pre-Castle the post top is team-colored like the wall walkways
       // (single flat color); at Castle the merlons take over the cap.
       let postTop = ownerAge >= 2 ? pf[2] : tc;
-      drawBuildingBlock(t1sx, t1sy - 7, 14, 7, pillarH, pf[0], pf[1], 'flat', 0, postTop, postTop, darken, mat === 'stone' && ownerAge >= 2);
+      drawBuildingBlock(t1sx, t1sy - 7, 14, 7, pillarH, pf[0], pf[1], 'flat', 0, postTop, postTop, darken, mat !== 'wood' && ownerAge >= 2);
 
       // Battlements only on the STONE gate — a timber palisade gate has
       // plain post tops; the merlons are part of the Feudal upgrade look.
-      if (mat === 'stone' && ownerAge >= 2) drawBastionMerlons(t1sx, t1sy, '#e0d8c6', '#c4bba6', darken);
+      if (mat !== 'wood' && ownerAge >= 2) drawBastionMerlons(t1sx, t1sy, '#e0d8c6', '#c4bba6', darken);
 
-      if (e.complete) {
-        // Sliding solid wood gate door — same style/placement as a wall
-        // extension (drawWallLink), just wood-brown and sliding up into
-        // the bastion as gateProgress goes from closed (0) to open (1).
-        // Symmetric trims (7,7) center the door between the two posts —
-        // the old (7,0) ran it all the way into the front post's center,
-        // so the raised door hung visibly closer to the front tower.
-        // The slab stays exactly PARALLEL to the wall run (any per-end
-        // twist read as the whole gate being rotated) and is instead
-        // TRANSLATED in the GROUND PLANE. The ground-plane perpendicular
-        // in iso is the run direction mirrored, (ux, -uy) — using a
-        // screen-space perpendicular here made the door dip below the
-        // ground line (it is mostly vertical).
-        {
-          let Lg = Math.hypot(dx, dy), ux = dx / Lg, uy = dy / Lg;
-          const GT = 1; // ground-plane shift away from the viewer, in px
-          drawWallLink(t1sx + ux * GT, t1sy - slideY - uy * GT, dx, dy,
-                       16, darken, 9, 9, '#8b5a2b', '#a5723a', 2, true);
-        }
-      }
-
-      // 1. Draw connection links for Post 1 (back post centered at t1sy)
+      // 1. Draw connection links for Post 1 (back post centered at t1sy).
+      // Skipped for 'body' (hit test), the selection outline, and gate ghosts:
+      // the stubs belong to the adjoining run, not the gate (drawsWallStubs).
       let wallH = 14;
+      if (part !== 'body' && drawsWallStubs(e)) {
       if (wallLineNS) {
         // N-S Gate: Post 1 is at (e.x, e.y). Perpendicular connection goes East (x+1).
-        if (isWallLike(getConnectedBuilding(e.x + 1, e.y))) {
+        if (_wlLike(e.x + 1, e.y) && !wallEastRung(e.x, e.y)) {
           drawWallLink(t1sx, t1sy, 32, 16, wallH, darken, 5, dEnd, null, tc, lth, false, mat);
         }
       } else {
         // E-W Gate: Post 1 is at (e.x, e.y). Perpendicular connection goes South (y+1).
-        if (isWallLike(getConnectedBuilding(e.x, e.y + 1))) {
+        if (_wlLike(e.x, e.y + 1) && !wallSouthRung(e.x, e.y)) {
           drawWallLink(t1sx, t1sy, -32, 16, wallH, darken, 5, dEnd, null, tc, lth, false, mat);
         }
+      }
+      // Ghost-only: the back post's run continuation (W for E-W, N for N-S) is
+      // normally drawn by that neighbour wall — preview it so the ghost gate
+      // reads as joined on both ends, like the placed one.
+      drawGhostBackJoins(e.x, e.y, t1sx, t1sy, wallH, tc);
       }
 
       if (part === 'back') {
@@ -2100,23 +2136,46 @@ function drawBuilding(e, part = null){
       }
     }
 
-    if (part === 'front' || part === null) {
+    // Sliding solid wood gate door — its OWN depth layer (gate_door proxy)
+    // anchored at the archway centre, so a unit on the far side sorts BEHIND
+    // it (occluded/silhouetted) instead of drawing in front of an origin-
+    // anchored slab. Same style/placement as a wall extension (drawWallLink),
+    // wood-brown, sliding up into the bastions as gateProgress 0->1. Stays
+    // exactly PARALLEL to the run (any per-end twist read as the whole gate
+    // rotating) and is TRANSLATED in the GROUND PLANE — the ground-plane
+    // perpendicular in iso is the run mirrored (ux,-uy); a screen-space
+    // perpendicular dipped the door below the ground line. null draws it here
+    // in back->door->front order; 'body' (hit test) includes it.
+    if (part === null || part === 'door' || part === 'body') {
+      if (e.complete) {
+        let Lg = Math.hypot(dx, dy), ux = dx / Lg, uy = dy / Lg;
+        const GT = 1; // ground-plane shift away from the viewer, in px
+        drawWallLink(t1sx + ux * GT, t1sy - slideY - uy * GT, dx, dy,
+                     16, darken, 9, 9, '#8b5a2b', '#a5723a', 2, true);
+      }
+      if (part === 'door') { X.globalAlpha = 1; return; }
+    }
+
+    if (part === 'front' || part === null || part === 'body') {
       // 2. Draw front post (Tower 2 - larger bastion centered at t2sy-7)
       let postTop2 = ownerAge >= 2 ? pf[2] : tc;
-      drawBuildingBlock(t2sx, t2sy - 7, 14, 7, pillarH, pf[0], pf[1], 'flat', 0, postTop2, postTop2, darken, mat === 'stone' && ownerAge >= 2);
+      drawBuildingBlock(t2sx, t2sy - 7, 14, 7, pillarH, pf[0], pf[1], 'flat', 0, postTop2, postTop2, darken, mat !== 'wood' && ownerAge >= 2);
 
       // Battlements only on the STONE gate (see back post above).
-      if (mat === 'stone' && ownerAge >= 2) drawBastionMerlons(t2sx, t2sy, '#e0d8c6', '#c4bba6', darken);
+      if (mat !== 'wood' && ownerAge >= 2) drawBastionMerlons(t2sx, t2sy, '#e0d8c6', '#c4bba6', darken);
 
-      // Draw connection links for Post 2 (front post centered at t2sy)
+      // Draw connection links for Post 2 (front post centered at t2sy).
+      // Skipped for 'body' (hit test), the selection outline, and gate ghosts
+      // (drawsWallStubs) — the stubs belong to the adjoining run, not the gate.
       let wallH = 14;
+      if (part !== 'body' && drawsWallStubs(e)) {
       if (wallLineNS) {
         // N-S Gate: Post 2 is the far post at (e.x, e.y+n-1). Parallel goes
         // South (y+n), Perpendicular goes East (x+1, y+n-1).
         if (isWallLike(getConnectedBuilding(e.x, e.y + n))) {
           drawWallLink(t2sx, t2sy, -32, 16, wallH, darken, 8, dEnd, null, tc, lth, false, mat);
         }
-        if (isWallLike(getConnectedBuilding(e.x + 1, e.y + n - 1))) {
+        if (_wlLike(e.x + 1, e.y + n - 1) && !wallEastRung(e.x, e.y + n - 1)) {
           drawWallLink(t2sx, t2sy, 32, 16, wallH, darken, 8, dEnd, null, tc, lth, false, mat);
         }
       } else {
@@ -2125,10 +2184,11 @@ function drawBuilding(e, part = null){
         if (isWallLike(getConnectedBuilding(e.x + n, e.y))) {
           drawWallLink(t2sx, t2sy, 32, 16, wallH, darken, 8, dEnd, null, tc, lth, false, mat);
         }
-        if (isWallLike(getConnectedBuilding(e.x + n - 1, e.y + 1))) {
+        if (_wlLike(e.x + n - 1, e.y + 1) && !wallSouthRung(e.x + n - 1, e.y)) {
           drawWallLink(t2sx, t2sy, -32, 16, wallH, darken, 8, dEnd, null, tc, lth, false, mat);
         }
       }
+      } // end stubs (skipped for 'body')
       // Locked-gate indicator: a small padlock floating over the sealed door,
       // so a locked gate reads differently from one that's merely swung shut.
       // Only when in view (never leak a lock state through the shroud).
@@ -2153,7 +2213,13 @@ function drawBuilding(e, part = null){
     // the field. part is 'ground' (in-game) or null (gallery/ghost/mask) —
     // both mean "draw everything".
     let tileRes=map[e.y]&&map[e.y][e.x]?map[e.y][e.x].res:0;
-    let growth=tileRes/(e.maxFood||300);
+    // Fraction of food LEFT — drives how much wheat still stands (below). Divide
+    // by the farm's CURRENT capacity (farmFoodFor, incl. horse-collar/heavy-plow
+    // bonuses the tile was seeded with); e.maxFood is only the un-upgraded base,
+    // so an upgraded farm would read >1.0 and sit visually full until its bonus
+    // food is gone. Each gather cycle drops tile.res by 1, so the field thins
+    // sheaf-by-sheaf as it's worked — roughly one per villager carry-trip.
+    let growth=tileRes/(farmFoodFor(e.team)||e.maxFood||300);
     // Ground-level footprint corners and the raised bed (tilled soil sits
     // a few px proud of the grass, with visible dirt sides on the two
     // camera-facing edges — that lift is what makes the field read 3D).
@@ -2201,62 +2267,71 @@ function drawBuilding(e, part = null){
       let u=farmSheafU(ri,i);
       return {x:a.x+(b2.x-a.x)*u, y:a.y+(b2.y-a.y)*u};
     };
-    if(growth>0 && !dead){
-      // Wheat as mini SHEAVES — the same read as the gathering villager's
-      // shoulder sheaf (js/render-units.js foodSrc==='wheat'): a few thick
-      // splayed stalks, each tipped with a fat outlined grain head once
-      // grown. 5 rows × 6 columns so the field feels FULL. Drawn flat in
-      // the ground layer: the crop is short, and units always walk OVER
-      // the field, AoE2-style.
-      let sheafH=2.5+growth*5;
-      let splay=1.6+growth*1.4;
-      let ripe=growth>0.55;
-      let stalkCol = ripe ? '#c9a227' : '#6fa03a';
-      let headCol  = ripe ? '#e8c84a' : '#8fbf55';
-      if(darken){ stalkCol=darkenColor(stalkCol); headCol=darkenColor(headCol); }
-      rows.forEach((t,ri)=>{
-        for(let i=0;i<COLS;i++){
-          let p=tuftAt(t,ri,i);
-          let lean=(((i*7+ri*13)%5)-2)*0.55; // deterministic per-sheaf lean
-          // three splayed stalks from one base
+    // AoE2-style HARVEST-DOWN: a farm is a full RIPE (golden) crop when fresh
+    // and is progressively CUT as its food is eaten — each sheaf stands at full
+    // height with grain heads until the food fraction drops past its own harvest
+    // threshold, then it becomes a stubble stump. Fresh = dense gold, worked =
+    // thinning to stubble, exhausted = all stubble on pale dirt. The crop never
+    // "un-grows" (no green stage): less food simply means less standing crop.
+    // Sheaf read matches the gathering villager's shoulder sheaf (render-units).
+    const NSHEAF=rows.length*COLS;
+    // Per-FARM seed (anchor tile — same scheme as the berry bushes) so adjacent
+    // farms aren't identical clones: it varies each field's sheaf jitter, lean,
+    // height and the ORDER sheaves are cut as the field is worked down.
+    let fseed=e.x*7+e.y*13;
+    let stalkCol = darken ? darkenColor('#c9a227') : '#c9a227';
+    let headCol  = darken ? darkenColor('#e8c84a') : '#e8c84a';
+    let stub     = darken ? darkenColor('#9a7f4a') : '#9a7f4a';
+    rows.forEach((t,ri)=>{
+      for(let i=0;i<COLS;i++){
+        let n=ri*COLS+i;
+        let p=tuftAt(t,ri,i);
+        // Subtle off-grid jitter so sheaves look hand-sown, not stamped — small
+        // enough that the planted-in-rows read holds (the furrows stay straight).
+        p={x:p.x+(((n*5+fseed)%5)-2)*0.5, y:p.y+(((n*11+fseed)%3)-1)*0.5};
+        // Scattered harvest order: a coprime multiplier permutes the sheaves
+        // (gcd(7,NSHEAF)=1); +fseed rotates it per farm so each field thins in
+        // its own patchy pattern rather than every farm alike.
+        let thresh=(((n*7+fseed)%NSHEAF + 0.5)/NSHEAF);
+        if(!dead && growth>thresh){
+          // standing ripe sheaf: three splayed golden stalks, each grain-headed
+          let lean=(((n*13+fseed)%5)-2)*0.55; // deterministic per-sheaf lean
+          let sheafH=6+(((n*3+fseed)%3)-1)*0.7, splay=2.5;
           X.strokeStyle=stalkCol;X.lineWidth=1.4;X.lineCap='round';
           for(let k=-1;k<=1;k++){
             X.beginPath();X.moveTo(p.x,p.y);
             X.lineTo(p.x+k*splay+lean, p.y-sheafH*(k===0?1:0.78));X.stroke();
           }
           X.lineCap='butt';
-          // fat grain head on each stalk tip once the crop has headed out
-          if(growth>0.3){
-            X.fillStyle=headCol;X.strokeStyle='#000';X.lineWidth=0.8;
-            for(let k=-1;k<=1;k++){
-              let hx=p.x+k*splay+lean, hy=p.y-sheafH*(k===0?1:0.78);
-              X.beginPath();X.ellipse(hx,hy-0.8,1.05,1.9,k*0.18+lean*0.1,0,Math.PI*2);X.fill();X.stroke();
-            }
+          X.fillStyle=headCol;X.strokeStyle='#000';X.lineWidth=0.8;
+          for(let k=-1;k<=1;k++){
+            let hx=p.x+k*splay+lean, hy=p.y-sheafH*(k===0?1:0.78);
+            X.beginPath();X.ellipse(hx,hy-0.8,1.05,1.9,k*0.18+lean*0.1,0,Math.PI*2);X.fill();X.stroke();
           }
-        }
-      });
-      X.lineWidth=1.1;
-    } else {
-      // Harvested/exhausted: one stubble stump where each tuft stood plus
-      // a single fallen straw.
-      let stub = darken ? darkenColor('#9a7f4a') : '#9a7f4a';
-      X.strokeStyle=stub;X.lineWidth=1.6;
-      rows.forEach((t,ri)=>{
-        for(let i=0;i<COLS;i++){
-          let p=tuftAt(t,ri,i);
+        } else {
+          // cut stubble stump where the sheaf stood
+          X.strokeStyle=stub;X.lineWidth=1.6;
           X.beginPath();X.moveTo(p.x,p.y);X.lineTo(p.x-0.5,p.y-2.5);X.stroke();
         }
-      });
+      }
+    });
+    // a fallen straw or two once the field has been worked down
+    if(!dead && growth<0.6){
+      X.strokeStyle=stub;X.lineWidth=1.6;
       let s=tuftAt(rows[1],1,0);
       X.beginPath();X.moveTo(s.x+2,s.y+2);X.lineTo(s.x+7.5,s.y+3.5);X.stroke();
     }
+    X.lineWidth=1.1;
     // (No corner fence posts — the raised bed alone frames the field.)
   }
 
   X.globalAlpha=1;
 
-  // Progress bars, HP, selection — only when actively visible (not in fog)
-  if (!window._ghostDraw && (f === 2 || e.team === myTeam)) {
+  // Progress bars, HP, selection — only when actively visible (not in fog).
+  // Skipped in the mask pass (_maskDraw): these float ABOVE the roof and are
+  // UI, not body — a silhouette/occluder clip (and the baked-building cache)
+  // must not include them, and their per-frame values would freeze if baked.
+  if (!window._ghostDraw && !window._maskDraw && (f === 2 || sameSide(e.team, myTeam))) {
   // ONE bar per building: HP grows with construction (AoE2, logic.js), so
   // the HP bar doubles as the progress bar while incomplete — cyan fill to
   // read as "under construction" (the low fill would otherwise look like
@@ -2289,21 +2364,23 @@ function drawBuilding(e, part = null){
     X.textAlign='left';
   }
   // Train / research progress — stacked with the HP bar ABOVE the roof
-  // (they used to hang below the footprint, eating map space under every
-  // producing building). When the HP bar is showing (hp<max), the progress
+  // (below the footprint they'd eat map space under every producing
+  // building). When the HP bar is showing (hp<max), the progress
   // bar tucks in just beneath it; otherwise it takes the HP bar's spot.
   let progY = (e.hp < e.maxHp && bh > 0) ? sy - bh - 4 : sy - bh - 11;
   if(e.queue&&e.queue.length>0){
-    let pct=e.trainTick/(UNITS[e.queue[0]].trainTime);
+    let pct=e.trainTick/trainDurationFor(e.team,e.queue[0]);
     let bww=b.w*24;
     X.fillStyle='#000000';X.fillRect(sx-bww/2-1,progY,bww+2,5); // black border box
     X.fillStyle='#003';X.fillRect(sx-bww/2,progY+1,bww,3);
     X.fillStyle='#0af';X.fillRect(sx-bww/2,progY+1,bww*pct,3);
   }
-  // Age research — same bar, gold fill, updates every frame (smooth,
-  // unlike the throttled panel text).
+  // Research (age-up or tech) — same bar, gold fill, updates every frame
+  // (smooth, unlike the throttled panel text). target is a numeric age index
+  // OR a string tech key (js/commands.js execResearch).
   if(e.research){
-    let pct=e.research.tick/AGES[e.research.target].researchTicks;
+    let rt=researchDurationFor(e.team, e.research.target);
+    let pct=e.research.tick/rt;
     let bww=b.w*24;
     X.fillStyle='#000000';X.fillRect(sx-bww/2-1,progY,bww+2,5);
     X.fillStyle='#330';X.fillRect(sx-bww/2,progY+1,bww,3);

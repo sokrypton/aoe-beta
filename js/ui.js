@@ -8,13 +8,16 @@
 // js/page-shell.js) — naming a new cell there is the only step; this set
 // follows.
 const SPRITE_ICON_KEYS = new Set(Object.keys(window.SPRITE_CELLS));
+// Tech keys that have a full-cell research icon (`up-<key>` in SPRITE_CELLS,
+// rows 8-9). Shown via `sprite-icon icon-up-<key>` inside a .research-tile.
+const SPRITE_UP_KEYS = new Set(Object.keys(window.SPRITE_CELLS).filter(k => k.startsWith('up-')).map(k => k.slice(3)));
 
 // Market trade cell metadata shared by both skins' exchange UIs: tooltip
 // text, affordability cost and the submit handler for one buy/sell cell.
 // Transactions run in execMarketTrade (deterministic, js/commands.js).
 function wireMktCell(cell, dir, res){
-  let price=marketPrices[res];
-  let gold=dir==='buy'?price:Math.floor(price*MARKET_SELL_RATIO/100);
+  let price=marketPricesFor(myTeam)[res];
+  let gold=dir==='buy'?price:Math.floor(price*marketSellRatio(myTeam)/100);
   let resLabel=res.charAt(0).toUpperCase()+res.slice(1);
   cell.dataset.tipType='action';
   cell.dataset.tipLabel=(dir==='buy'?'Buy 100 ':'Sell 100 ')+resLabel;
@@ -89,7 +92,7 @@ function buildMktExchange(){
 // button toggles it back. Pass null to hide (selection changed/game over);
 // the hidden flag resets then so the next Market selection opens fresh.
 function refreshMktPopup(mkt){
-  let pop=document.getElementById('mkt-popup');
+  let pop=byId('mkt-popup');
   if(!mkt){
     window.__mktPopupHidden=false;
     if(pop)pop.style.display='none';
@@ -105,7 +108,45 @@ function refreshMktPopup(mkt){
   pop.innerHTML=`<div id="mkt-popup-head"><span class="sprite-icon icon-MARKET" id="mkt-popup-ico"></span><span>Market</span><button type="button" id="mkt-popup-x">✕</button></div>`;
   pop.querySelector('#mkt-popup-x').onclick=()=>{ window.__mktPopupHidden=true; pop.style.display='none'; };
   pop.appendChild(buildMktExchange());
+  applyMktPopupPos(pop);      // re-apply a dragged position (innerHTML rebuilds every price tick)
+  makeMktPopupDraggable(pop); // (re)wire the freshly-rebuilt header as the drag handle
   refreshActionAffordability();
+}
+
+// Re-apply a previously dragged position (window.__mktPopupPos), clamped to the
+// current viewport (window may have resized). No stored pos → the CSS default
+// (centered above the bottom bar) stands.
+function applyMktPopupPos(pop){
+  let p=window.__mktPopupPos; if(!p) return;
+  let r=pop.getBoundingClientRect();
+  let left=Math.max(0, Math.min(p.left, window.innerWidth - r.width));
+  let top =Math.max(0, Math.min(p.top,  window.innerHeight - r.height));
+  pop.style.left=left+'px'; pop.style.top=top+'px'; pop.style.right='auto'; pop.style.bottom='auto'; pop.style.transform='none';
+}
+
+// Drag the exchange popup by its header. Pointer events (mouse + touch); the ✕
+// and the tappable buy/sell cells are NOT handles, so taps on them are never
+// swallowed. Pointer capture + stopPropagation keep the drag off the canvas
+// (no pan). Position persists in window.__mktPopupPos across rebuilds/reopens.
+function makeMktPopupDraggable(pop){
+  let head=pop.querySelector('#mkt-popup-head'); if(!head) return;
+  head.addEventListener('pointerdown', e=>{
+    if(e.target.closest('#mkt-popup-x')) return; // the close button, not a drag
+    e.preventDefault(); e.stopPropagation();
+    let r=pop.getBoundingClientRect();
+    let startL=r.left, startT=r.top, px=e.clientX, py=e.clientY, w=r.width, h=r.height;
+    pop.style.left=startL+'px'; pop.style.top=startT+'px'; pop.style.right='auto'; pop.style.bottom='auto'; pop.style.transform='none';
+    try{ head.setPointerCapture(e.pointerId); }catch(_){} // synthetic/edge pointers may reject capture
+    let move=ev=>{
+      let nl=Math.max(0, Math.min(startL+(ev.clientX-px), window.innerWidth - w));
+      let nt=Math.max(0, Math.min(startT+(ev.clientY-py), window.innerHeight - h));
+      pop.style.left=nl+'px'; pop.style.top=nt+'px';
+      window.__mktPopupPos={left:nl, top:nt};
+    };
+    let up=()=>{ head.removeEventListener('pointermove',move); head.removeEventListener('pointerup',up); };
+    head.addEventListener('pointermove',move);
+    head.addEventListener('pointerup',up);
+  });
 }
 
 // Re-tapping an already-SELECTED Market reopens a dismissed exchange popup
@@ -132,8 +173,47 @@ function allGuardable(sel){
   return sel.length>0 && sel.every(s=>s.team===myTeam&&guardEligible(s));
 }
 
+// Container-first Garrison "load mode" button (TC/tower/ram). Arming sets the
+// viewer-local window.settingGarrison; subsequent taps (garrisonLoadTap,
+// js/input.js) send units in until Done. Shown for a selected own container
+// with free seats; toggles Garrison<->Done while armed on THIS container.
+function appendGarrisonLoadBtn(act, container){
+  let armed = window.settingGarrison === container.id;
+  let btn=document.createElement('div');
+  // Highlighted while load mode is active; NO "Done" state — stop by pressing
+  // the return arrow (deselectAll clears settingGarrison), not this button.
+  btn.className='act-btn'+(armed?' stance-on':'');
+  btn.dataset.tipType='action';
+  btn.dataset.tipLabel='Garrison';
+  btn.dataset.tipDesc='Tap this, then tap units to send them inside for shelter (archers add arrows). Use Ungarrison to send them back out.';
+  btn.innerHTML=`<div class="btn-emoji sprite-icon icon-garrison-in"></div><div class="btn-label">Garrison</div>`;
+  btn.onclick=()=>{
+    if(gameOver)return;
+    window.settingGarrison = container.id; // arm (idempotent); stop via the return arrow
+    if(typeof showMsg==='function') showMsg('Tap units to garrison — press the return arrow when done');
+    updateUI();
+  };
+  act.appendChild(btn);
+}
+
+// Ungarrison-ALL button: releases everyone inside a container at once (vs the
+// per-unit eject in the garrison grid). Shown for a loaded container.
+function appendGarrisonEjectBtn(act, container){
+  let btn=document.createElement('div');
+  btn.className='act-btn';
+  btn.dataset.tipType='action';
+  btn.dataset.tipLabel='Ungarrison';
+  btn.dataset.tipDesc='Send everyone inside back out.';
+  btn.innerHTML=`<div class="btn-emoji sprite-icon icon-garrison-out"></div><div class="btn-label">Ungarrison</div>`;
+  btn.onclick=()=>{
+    if(gameOver)return;
+    submitCommand({kind:'eject-garrison', bldgId:container.id, all:true});
+  };
+  act.appendChild(btn);
+}
+
 // Villager task -> resource carried, used by the selection card, the tile
-// tooltip and the topbar villager counts alike (was three inline copies).
+// tooltip and the topbar villager counts alike.
 const TASK_RES = { chop: 'wood', mine_gold: 'gold', mine_stone: 'stone', forage: 'food', farm: 'food' };
 
 // THE skin-detection signal — everything in this file keys off this one
@@ -192,9 +272,9 @@ const AGE_ICON_VARIANTS = {
 // there so icons stay big); coarse-pointer devices show the chips instead,
 // because touch has no hover tooltip and costs were simply invisible on
 // mobile. CSS: .cost-chips in styles.css.
-function costChips(cost){
+function costChips(cost, extraCls){
   const CLS = { f:'food', w:'wood', g:'gold', s:'stone' };
-  return '<span class="cost cost-chips">' + Object.entries(cost||{})
+  return '<span class="cost cost-chips' + (extraCls ? ' ' + extraCls : '') + '">' + Object.entries(cost||{})
     .map(([k,v])=>`<span class="cost-chip"><span class="res-mini-icon icon-${CLS[k]||k}"></span>${v}</span>`)
     .join('') + '</span>';
 }
@@ -214,7 +294,7 @@ function myBellActive(){
 // Classic-only HP slot under the portrait (see #sel-hp in page-shell.js).
 // Mobile keeps the HP block inline in #sel-details and never fills this.
 function setSelHp(html){
-  let el=document.getElementById('sel-hp');
+  let el=byId('sel-hp');
   if(el) el.innerHTML=html;
 }
 
@@ -224,8 +304,7 @@ function setPortraitIcon(port, key, fallbackEmoji){
     // The sprite renders on an INNER layer (clipper > img) instead of the
     // tile's own background: skins can then ZOOM the img past the sheet
     // cell's baked-in empty margins (the clipper crops the spill) without
-    // touching the tile's border/box. Mobile leaves it unscaled — pixel-
-    // identical to the old background-image approach.
+    // touching the tile's border/box. Mobile leaves it unscaled.
     port.textContent='';
     let s=document.createElement('div');
     s.className='tile-sprite';
@@ -303,18 +382,24 @@ function updateUI(){
   if (selected.length > 0) {
     let e = selected[0];
     currentSelectionDetails = `${e.id}:${e.hp}:${e.maxHp}:${e.complete ? 1 : 0}:${e.buildProgress || 0}`;
+    // Research state (target only, NOT tick — tick changes every frame), so the
+    // strip rebuilds the instant research starts/ends on the selected building:
+    // train buttons grey out (paused) and the research grid refreshes. Covers any
+    // researching building (TC age-up, Barracks tech), not just the TC's ageKey.
+    if (e.type === 'building') currentSelectionDetails += ':r' + (e.research ? e.research.target : '-');
+    if (e.type === 'building' && e.btype === 'TC') currentSelectionDetails += ':ap' + (teamControllers[myTeam] && teamControllers[myTeam].type === 'ai' ? 1 : 0); // the Town AI button's state
     // Gate lock state, so the Lock/Unlock button label flips the instant the
     // toggle lands (the button is derived from selected gates' .locked).
     if (e.type === 'building' && isGateBtype(e.btype)) currentSelectionDetails += ':gl' + selected.filter(s => s.locked).length;
     // Auto Scout state, so the toggle button label flips the instant it lands.
-    if (e.type === 'unit' && e.utype === 'scout') currentSelectionDetails += ':as' + selected.filter(s => s.autoScout).length;
+    if (e.type === 'unit' && e.utype === 'scout') currentSelectionDetails += ':as' + selected.filter(s => s.order && s.order.kind === 'scout').length;
     // Stance, so the highlighted stance button moves the instant a set-stance
     // command lands. This is the COARSE gate (updateUI early-returns unless
     // stateChanged) — the selKey below then rebuilds the strip. Both need it.
     if (e.type === 'unit') currentSelectionDetails += ':st' + selected.filter(s => s.type === 'unit').map(s => s.stance || '-').join('.');
     // Guard state (posture highlight): whether each unit holds a post, so the
     // Guard tile lights/unlights the instant a guard or stance command lands.
-    if (e.type === 'unit') currentSelectionDetails += ':gd' + selected.filter(s => s.type === 'unit').map(s => s.guardX != null ? 1 : 0).join('');
+    if (e.type === 'unit') currentSelectionDetails += ':gd' + selected.filter(s => s.type === 'unit').map(s => (s.order && GUARD_ORDER_KINDS.has(s.order.kind)) ? 1 : 0).join('');
     if (e.queue) {
       // Structural signature only (queue contents), NOT trainTick: progress
       // changes every tick, and keying on it rebuilt the whole details panel
@@ -327,7 +412,7 @@ function updateUI(){
     // target OR a carried load — otherwise the card wouldn't refresh as a
     // butcher's food count ticks up.
     if (e.task || e.target || e.carrying) {
-      currentSelectionDetails += `:${e.task}:${e.carrying || 0}:${e.target || e.buildTarget || e.followId || 0}`;
+      currentSelectionDetails += `:${e.task}:${e.carrying || 0}:${e.target || e.buildTarget || (e.order && e.order.id) || 0}`;
     }
     let b = BLDGS[e.btype];
     if (b && b.isFarm) {
@@ -336,9 +421,10 @@ function updateUI(){
     }
     // Market exchange prices are global and drift when ANY player trades —
     // fold them into the dirty key so a selected Market's price labels (and
-    // the buy costs feeding affordability) refresh on someone else's trade.
+    // the buy costs feeding affordability) refresh when this team trades.
     if (e.btype === 'MARKET' && e.complete) {
-      currentSelectionDetails += `:mkt${marketPrices.food}_${marketPrices.wood}_${marketPrices.stone}`;
+      let mp = marketPricesFor(myTeam);
+      currentSelectionDetails += `:mkt${mp.food}_${mp.wood}_${mp.stone}`;
     }
     // Prepaid-reseed count: consuming a prepaid reseed moves no resources
     // (they were spent at prepay time), so the Mill's badge and card line
@@ -371,21 +457,22 @@ function updateUI(){
       food: -1, wood: -1, gold: -1, stone: -1,
       popUsed: -1, popCap: -1, idleCount: -1,
       gameOver: null, gameStarted: null, selectedKey: null,
-      selectionDetails: null, placing: null, currentVillagerMenu: null,
+      selectionDetails: null, placing: null, currentVillagerMenu: null, undoAvail: false,
       settingRally: null
     };
   }
 
-  // Age signal for the dirty check: current age index + whether a TC is
-  // researching (and toward what) — so the age crest and the idle-box age
-  // display both refresh on advance/start/cancel, none of which touch the
-  // other tracked fields on their own.
-  let myResearchTC = (teamAge && isPlayerTeam(myTeam))
-    ? entities.find(en => en.team === myTeam && en.btype === 'TC' && en.research) : null;
+  // Age signal for the dirty check: current age index + whether a Town Center
+  // is advancing the age (and toward what) — so the age crest and the idle-box
+  // age display both refresh on advance/start/cancel. Age-up lives at the TC
+  // (numeric research target); tech buildings host UPGRADES only.
+  let myAgeUpBldg = (teamAge && isPlayerTeam(myTeam))
+    ? entities.find(en => en.team === myTeam && en.btype === 'TC' && en.research && typeof en.research.target === 'number') : null;
   let ageKey = (teamAge && isPlayerTeam(myTeam))
-    ? teamAge[myTeam] + ':' + (myResearchTC ? myResearchTC.research.target : '-') : '';
+    ? teamAge[myTeam] + ':' + (myAgeUpBldg ? myAgeUpBldg.research.target : '-') : '';
 
   let lu = window.lastUIState;
+  let undoNow = typeof window.undoAvailable==='function' && window.undoAvailable();
   let stateChanged = (
     currentFood !== lu.food || currentWood !== lu.wood ||
     currentGold !== lu.gold || currentStone !== lu.stone ||
@@ -396,8 +483,15 @@ function updateUI(){
     window.currentVillagerMenu !== lu.currentVillagerMenu ||
     !!window.settingRally !== !!lu.settingRally ||
     !!window.settingGuard !== !!lu.settingGuard ||
+    window.settingGarrison !== lu.settingGarrison ||
     myBellActive() !== !!lu.bellActive ||
-    ageKey !== lu.ageKey
+    ageKey !== lu.ageKey ||
+    // Undo availability is computed BELOW the gate (it feeds selKey), so it
+    // has to be part of the dirty check too — otherwise the Undo arrow only
+    // appears when something ELSE happens to dirty the HUD. A placement's
+    // foundation arrives a few ticks after the click (lockstep delay), so
+    // without this the button never showed for "send a villager to build".
+    undoNow !== !!lu.undoAvail
   );
 
   // Live training-progress patch: runs every frame on the EXISTING DOM (bar
@@ -408,7 +502,7 @@ function updateUI(){
   if (selected.length === 1 && selected[0].queue && selected[0].queue.length > 0) {
     let u = UNITS[selected[0].queue[0]];
     if (u) {
-      let pct = Math.floor(selected[0].trainTick / u.trainTime * 100);
+      let pct = Math.floor(selected[0].trainTick / trainDurationFor(selected[0].team, selected[0].queue[0]) * 100);
       // querySelectorAll: the fill lives on the train button, and (classic
       // skin) the front queue slot's darkness veil drains as it trains.
       document.querySelectorAll('#actions .training-active .btn-progress-fill')
@@ -417,11 +511,15 @@ function updateUI(){
         .forEach(veil => { veil.style.height = (100 - pct) + '%'; });
     }
   }
-  // Same live patch for the Advance button's research fill — smooth every
-  // frame; the button itself only rebuilds on structural changes.
+  // Same live patch for the research fill (age-up Advance button OR
+  // an active tech cell — both carry .research-progress-fill) — smooth every
+  // frame; the buttons themselves only rebuild on structural changes. target
+  // is a numeric age index OR a string tech key.
   if (selected.length === 1 && selected[0].research) {
-    let fill = document.querySelector('#advance-progress-btn .btn-progress-fill');
-    if (fill) fill.style.width = (selected[0].research.tick / AGES[selected[0].research.target].researchTicks * 100).toFixed(1) + '%';
+    let r = selected[0].research;
+    let rt = researchDurationFor(selected[0].team, r.target);
+    let pct = (r.tick / rt * 100).toFixed(1) + '%';
+    document.querySelectorAll('#actions .research-progress-fill').forEach(fill => { fill.style.width = pct; });
   }
 
   if (!stateChanged) return;
@@ -440,18 +538,20 @@ function updateUI(){
   lu.selectionDetails = currentSelectionDetails;
   lu.placing = placing;
   lu.currentVillagerMenu = window.currentVillagerMenu;
+  lu.undoAvail = undoNow;
   lu.settingRally = !!window.settingRally;
   lu.settingGuard = !!window.settingGuard;
+  lu.settingGarrison = window.settingGarrison;
   lu.bellActive = myBellActive();
   lu.ageKey = ageKey;
 
   // Perform actual DOM updates
-  document.getElementById('r-food').textContent=currentFood;
-  document.getElementById('r-wood').textContent=currentWood;
-  document.getElementById('r-gold').textContent=currentGold;
-  document.getElementById('r-stone').textContent=currentStone;
+  byId('r-food').textContent=currentFood;
+  byId('r-wood').textContent=currentWood;
+  byId('r-gold').textContent=currentGold;
+  byId('r-stone').textContent=currentStone;
   for (let k of ['food','wood','gold','stone']) {
-    let el = document.getElementById('rv-'+k);
+    let el = byId('rv-'+k);
     if (!el) continue;
     let n = vilRes[k];
     // Box always reserves its space (CSS toggles visibility, not display), so
@@ -459,22 +559,21 @@ function updateUI(){
     el.classList.toggle('on', n > 0);
     if (n > 0) el.textContent = n;
   }
-  let popEl = document.getElementById('r-pop');
+  let popEl = byId('r-pop');
   if (popEl) popEl.textContent = `${myPopUsed}/${myPopCap}`;
-  let ageEl = document.getElementById('r-age');
+  let ageEl = byId('r-age');
   if (ageEl && teamAge) {
     let crest = ageEl.parentElement.querySelector('.res-icon');
     if (crest) crest.className = 'res-icon sprite-icon icon-age-' + AGES[teamAge[myTeam]].key;
-    let myTC = entities.find(en => en.team === myTeam && en.btype === 'TC' && en.research);
-    ageEl.textContent = myTC
-      ? `→ ${AGES[myTC.research.target].name.replace(' Age','')}…`
+    ageEl.textContent = myAgeUpBldg
+      ? `→ ${AGES[myAgeUpBldg.research.target].name.replace(' Age','')}…`
       : AGES[teamAge[myTeam]].name.replace(' Age','');
-    ageEl.parentElement.title = myTC
-      ? 'Advancing to the ' + AGES[myTC.research.target].name + ' — villager training is paused at the Town Center.'
-      : 'Your current age. Advance from the Town Center to unlock new units and buildings.';
+    ageEl.parentElement.title = myAgeUpBldg
+      ? 'Advancing to the ' + AGES[myAgeUpBldg.research.target].name + ' — researching at the Town Center.'
+      : 'Your current age. Advance at the Town Center to unlock new units and buildings.';
   }
   
-  let bellBtn = document.getElementById('bell-btn');
+  let bellBtn = byId('bell-btn');
   if(bellBtn) {
     if(gameStarted && !gameOver) {
       bellBtn.style.display = 'flex';
@@ -489,7 +588,7 @@ function updateUI(){
     }
   }
 
-  let idleBtn = document.getElementById('idle-btn');
+  let idleBtn = byId('idle-btn');
   if(idleBtn) {
     if(currentIdleCount > 0) {
       idleBtn.style.display = 'flex';
@@ -503,12 +602,18 @@ function updateUI(){
     }
   }
 
-  let act=document.getElementById('actions');
+  let act=byId('actions');
   let selKey=currentSelListKey+':'+placing+':'+(window.currentVillagerMenu||'main')+':'+currentIdleCount+':'+!!window.settingRally+':'+!!window.settingGuard
+    +':u'+(undoNow?1:0)
     +':'+myBellActive()+':'+(selected[0]&&selected[0].garrison?selected[0].garrison.length:0)
+    +':garr'+(window.settingGarrison||0)
     // age + research flip which buttons EXIST (locked ones are hidden, wall/
-    // gate slots upgrade to stone at Feudal) — the panel must rebuild then.
-    +':'+(teamAge?teamAge[myTeam]:0)+':'+!!(selected[0]&&selected[0].research)
+    // gate slots upgrade to stone at Feudal, the tech list changes) —
+    // the panel must rebuild then. Fold the selected building's research TARGET
+    // (not just a bool: tech→tech switches) and the team's researched-tech
+    // bitmask (a tech completing anywhere drops it / reveals its successor).
+    +':'+(teamAge?teamAge[myTeam]:0)+':'+(selected[0]&&selected[0].research?selected[0].research.target:'-')
+    +':tech'+(teamTechs&&isPlayerTeam(myTeam)?teamTechs[myTeam]:0)
     // State the buttons DISPLAY that can change while the selection stays
     // put: the training queue (count badges + which button hosts the
     // progress fill), the Mill's banked-reseed badge, and market prices
@@ -517,24 +622,33 @@ function updateUI(){
     +':'+(selected[0]&&selected[0].queue?selected[0].queue.join('.'):'')
     // Auto Scout state: the button EXISTS only while some selected scout
     // isn't auto-scouting, so the strip must rebuild when the command lands.
-    +':as'+selected.filter(s=>s.type==='unit'&&s.autoScout).length
+    +':as'+selected.filter(s=>s.type==='unit'&&s.order&&s.order.kind==='scout').length
     // Stance: the highlighted stance button must refresh when a set-stance
     // command lands (the button set is fixed, but which one is `stance-on`
     // changes). Fold the selection's stances into the key.
     +':st'+selected.filter(s=>s.type==='unit').map(s=>s.stance||'-').join('.')
     // Guard state: the Guard tile's highlight (and the fact that a stance clears
     // it) must refresh the strip when a guard/stance command lands.
-    +':gd'+selected.filter(s=>s.type==='unit').map(s=>s.guardX!=null?1:0).join('')
+    +':gd'+selected.filter(s=>s.type==='unit').map(s=>(s.order&&GUARD_ORDER_KINDS.has(s.order.kind))?1:0).join('')
     +':'+(selected[0]&&selected[0].btype==='MILL'?(resourceStore(myTeam).prepaidFarms||0):'')
-    +':'+(selected[0]&&selected[0].btype==='MARKET'?marketPrices.food+'.'+marketPrices.wood+'.'+marketPrices.stone:'');
+    +':'+(selected[0]&&selected[0].btype==='MARKET'?(mp=>mp.food+'.'+mp.wood+'.'+mp.stone)(marketPricesFor(myTeam)):'')
+    // Construction state flips the whole strip: an in-progress foundation
+    // shows Cancel Build, a finished one shows its train/research actions. Key
+    // on the FLAGS (complete/exhausted), NOT buildProgress — the latter changes
+    // every tick and would rebuild the strip 30×/s (eating queue-slot clicks).
+    // Without this the strip never refreshed when a building finished while
+    // still selected.
+    +':bld'+selected.filter(s=>s.type==='building').map(s=>(s.complete?'c':'')+(s.exhausted?'e':'')).join('.')
+    // the TC's Town AI button lights while the AI runs the town
+    +':ap'+(selected[0]&&selected[0].btype==='TC'&&teamControllers[myTeam]&&teamControllers[myTeam].type==='ai'?1:0);
   let rebuildActions=selKey!==lastSelKey;
   lastSelKey=selKey;
-  let bottomEl = document.getElementById('bottom');
+  let bottomEl = byId('bottom');
   if (bottomEl) {
     let isSubMenu = window.currentVillagerMenu === 'eco' || window.currentVillagerMenu === 'mil';
     bottomEl.classList.toggle('menu-active', isSubMenu);
   }
-  let minimapWrap = document.getElementById('minimap-wrap');
+  let minimapWrap = byId('minimap-wrap');
   if (minimapWrap) {
     minimapWrap.classList.toggle('build-active', !!(placing || window.isDraggingWall));
   }
@@ -542,7 +656,7 @@ function updateUI(){
     act.innerHTML='';
     // The classic queue lane (#sel-queue, center panel) is rebuilt in the
     // same pass as the action buttons — clear it on the same cadence.
-    let sq=document.getElementById('sel-queue');
+    let sq=byId('sel-queue');
     if(sq) sq.innerHTML='';
     // Selection changed: unless the new selection is an own completed
     // Market, retire the exchange popup (and reset its dismissed flag).
@@ -556,9 +670,11 @@ function updateUI(){
   // button). A RETURN arrow, not an ✖: deselectAll() steps back ONE level
   // per press (cancel placement → cancel rally → leave submenu → deselect),
   // so for a villager the same arrow pressed repeatedly walks back out of
-  // the build submenus and finally exits — the submenus' own separate Back
-  // buttons are gone.
-  if(rebuildActions && selected.length>0 && gameStarted && !gameOver){
+  // the build submenus and finally exits.
+  let undoReady = !placing && !window.settingRally && !window.settingGuard && !window.settingGarrison
+    && !(window.currentVillagerMenu==='eco'||window.currentVillagerMenu==='mil')
+    && undoNow;
+  if(rebuildActions && (selected.length>0 || undoReady) && gameStarted && !gameOver){
     let backBtn=document.createElement('div');
     backBtn.className='act-btn back-btn framed';
     // Inside a villager build SUBMENU the back arrow is the only way back
@@ -567,17 +683,25 @@ function updateUI(){
     // tag it (see .submenu-back in classic-style.css).
     if(window.currentVillagerMenu==='eco'||window.currentVillagerMenu==='mil') backBtn.classList.add('submenu-back');
     backBtn.dataset.tipType='action';
-    backBtn.dataset.tipLabel='Back';
-    backBtn.dataset.tipDesc='Go back one step: cancel placement or targeting, leave a submenu, or deselect.';
-    backBtn.innerHTML=`<div class="btn-emoji sprite-icon icon-back"></div>`;
-    backBtn.onclick=()=>{ if(window.deselectAll)window.deselectAll(); };
+    // Selecting, commanding and placing are all ACTIONS — with no mode armed
+    // the arrow UNDOES the last one (restore the previous selection, walk the
+    // units back, or cancel the foundation) instead of merely deselecting.
+    backBtn.dataset.tipLabel=undoReady?'Undo':'Back';
+    backBtn.dataset.tipDesc=undoReady
+      ? 'Undo the last action: restore the previous selection, send units back where they were, or cancel the foundation just placed.'
+      : 'Go back one step: cancel placement or targeting, leave a submenu, or deselect.';
+    backBtn.innerHTML=`<div class="btn-emoji sprite-icon icon-back"></div>`+(undoReady?`<div class="btn-label">Undo</div>`:``);
+    backBtn.onclick=()=>{
+      if(undoReady && window.undoLastAction) window.undoLastAction();
+      else if(window.deselectAll) window.deselectAll();
+    };
     act.appendChild(backBtn);
 
     // Bulk Cancel Build — when the whole selection is own unfinished
     // foundations (the wall-chain double-tap/double-click produces exactly
     // this), one button refunds them all. The single-foundation Cancel
     // Build lives in the building card below; this is its multi twin.
-    if(selected.length>1 && selected.every(s=>s.type==='building'&&s.team===myTeam&&!s.complete&&!s.exhausted&&!s.upgrading)){
+    if(selected.length>1 && selected.every(s=>s.type==='building'&&s.team===myTeam&&!s.complete&&!s.exhausted)){
       let ids=selected.map(s=>s.id);
       let bulkBtn=document.createElement('div');
       bulkBtn.className='act-btn framed';
@@ -594,33 +718,32 @@ function updateUI(){
       act.appendChild(bulkBtn);
     }
 
-    // Upgrade — when the selection is entirely own COMPLETED upgradeable
-    // wood pieces (walls / palisade gates / palisade watch towers;
-    // double-click/double-tap on a standing wall selects the whole
-    // connected run) and every piece's target is unlocked (Feudal).
-    // Instantly salvages the old piece (HP-scaled refund) and swaps it into
-    // a construction site of the target type that villagers build up — see
-    // execUpgradeWalls (js/commands.js). Once started it just proceeds
-    // (no cancel). The chips show the NET cost after salvage.
-    if(selected.length>0
-       && selected.every(s=>s.type==='building'&&s.team===myTeam&&WALL_STONE_MATCH[s.btype]&&s.complete&&!s.exhausted)
-       && selected.every(s=>isUnlocked(myTeam,WALL_STONE_MATCH[s.btype]))){
-      let ids=selected.map(s=>s.id);
+    // Upgrade — shows when the selection holds ANY own COMPLETED upgradeable wood
+    // piece (wall / palisade gate / palisade watch tower) whose stone target is
+    // unlocked. Double-click a wall to grab the whole connected run — walls, gates
+    // AND towers, wood and stone — and this upgrades every wood piece at once;
+    // already-stone pieces ride along and are skipped (here and in
+    // execUpgradeWalls). Instantly salvages each old piece (HP-scaled refund) and
+    // swaps it into a normal construction site villagers build up. Chips show the
+    // NET cost after salvage.
+    let upg=selected.filter(s=>s.type==='building'&&s.team===myTeam&&WALL_STONE_MATCH[s.btype]&&s.complete&&!s.exhausted&&isUnlocked(myTeam,WALL_STONE_MATCH[s.btype]));
+    if(upg.length>0){
+      let ids=upg.map(s=>s.id);
       let cost={};
-      selected.forEach(s=>{
+      upg.forEach(s=>{
         Object.entries(BLDGS[WALL_STONE_MATCH[s.btype]].cost)
           .forEach(([k,v])=>{cost[k]=(cost[k]||0)+v;});
         Object.entries(upgradeSalvage(s))
           .forEach(([k,v])=>{cost[k]=(cost[k]||0)-v;});
       });
       Object.keys(cost).forEach(k=>{if(cost[k]<=0)delete cost[k];});
-      let allGates=selected.every(s=>s.btype==='GATE');
-      let allTowers=selected.every(s=>s.btype==='PTOWER');
-      let tipLabel=allTowers?'Upgrade to Watch Tower':(allGates?'Upgrade to Stone Gate':'Upgrade to Stone Wall');
+      let allGates=upg.every(s=>s.btype==='GATE');
+      let allTowers=upg.every(s=>s.btype==='PTOWER');
+      let tipLabel=allTowers?'Upgrade to Watch Tower':(allGates?'Upgrade to Stone Gate':'Upgrade to Stone');
       let tipDesc=(allTowers
         ?'Rebuild the selected palisade tower'+(ids.length>1?'s':'')+' as '+(ids.length>1?'stone Watch Towers.':'a stone Watch Tower.')
-        :'Rebuild the selected palisade '+(allGates?'gate':'piece'+(ids.length>1?'s':''))+' in stone.')
-        +' Salvages the old piece (refund scales with remaining HP) and starts construction — send villagers to build it. Cannot be cancelled once started.';
+        :'Rebuild the selected palisade '+(allGates?'gate'+(ids.length>1?'s':''):'piece'+(ids.length>1?'s':''))+' in stone.')
+        +' Salvages the old piece (refund scales with HP); villagers build the new one.';
       let upIcon=allTowers?iconKey('TOWER'):(allGates?'SGATE':'SWALL'); // age-suffixed WT- cell; no bare TOWER icon
       let upBtn=document.createElement('div');
       upBtn.className='act-btn'; // building icon has no baked frame → keep the button's own border
@@ -649,9 +772,13 @@ function updateUI(){
       lockBtn.dataset.tipType='action';
       lockBtn.dataset.tipLabel=wantLock?'Lock Gate':'Unlock Gate';
       lockBtn.dataset.tipDesc=wantLock
-        ?'Seal the gate so nothing passes — including your own villagers and allies. Use it to shut a raider out.'
+        ?'Seal the gate so nothing passes, including allies. Shuts a raider out.'
         :'Reopen the gate so your units and allies pass through again.';
-      lockBtn.innerHTML=`<div class="btn-emoji sprite-icon icon-gate-${wantLock?'lock':'unlock'}"></div><div class="btn-label">${wantLock?'Lock':'Unlock'}${gateIds.length>1?' ×'+gateIds.length:''}</div>`;
+      // Icon shows current STATE (not the action): an OPEN padlock while the
+      // gate is unlocked, a CLOSED padlock while it's locked. The label still
+      // names the action (Lock/Unlock). wantLock is true when a gate is
+      // currently OPEN, so the icon is the opposite of the action.
+      lockBtn.innerHTML=`<div class="btn-emoji sprite-icon icon-gate-${wantLock?'unlock':'lock'}"></div><div class="btn-label">${wantLock?'Lock':'Unlock'}${gateIds.length>1?' ×'+gateIds.length:''}</div>`;
       lockBtn.onclick=()=>{
         submitCommand({kind:'gate-lock',bldgIds:gateIds,locked:wantLock});
       };
@@ -665,169 +792,9 @@ function updateUI(){
   // five identical icons — and only fans out to one-icon-per-type when the
   // selection is mixed. Rebuilt only when the selection or any selected
   // unit's HP changes (see currentSelectionDetails).
-  let selInfo=document.getElementById('sel-info');
-  let selGrid=document.getElementById('sel-grid');
-  let isMulti=selected.length>1;
-  // A selected own building with units inside reuses the multi-select grid to
-  // show its garrison (AoE2-style); clicking an icon releases one of them.
-  let garrisonSel = !isMulti && selected.length===1 && selected[0].type==='building'
-    && selected[0].team===myTeam && selected[0].garrison && selected[0].garrison.length>0
-    ? selected[0] : null;
-  // Mobile skin: SINGLE selections render through the same grid as groups —
-  // one gold tile with an HP strip, no name, no separate portrait card. The
-  // selection panel is one visual language whether 1 or 40 things are
-  // selected. Classic keeps its AoE2 portrait + name + stats readout.
-  // !gameOver everywhere below: the end-of-match branch writes VICTORY!/
-  // DEFEAT! into #sel-name/#sel-details, and a selection surviving into
-  // game over (the normal DEFEAT case) must not leave those hidden behind
-  // the grid classes.
-  let singleGrid = !isClassicUI && !isMulti && !garrisonSel && selected.length===1 && !gameOver;
-  // NULL selection is a tile too: the age crest renders through the same
-  // grid as any single selection — same style, same spacing, one language
-  // for the panel in every state. (Classic keeps its title/portrait box.)
-  let idleCrest = !isClassicUI && selected.length===0 && gameStarted && !gameOver
-    && typeof teamAge !== 'undefined' && teamAge && isPlayerTeam(myTeam);
-  // Game over on mobile renders the outcome (🏆/💀) as the SAME single tile as
-  // every other selection state, so the panel keeps one width and position and
-  // never shifts ("slides") into the legacy portrait+stats card. Classic keeps
-  // its worded card.
-  let gameOverTile = !isClassicUI && gameOver;
-  let iWonOutcome = gameOver ? (typeof didIWin==='function' && didIWin()) : false;
-  // (No separate 'has-selection' class: in the mobile skin EVERY selection
-  // state — single, group, garrison, idle crest — goes through the grid,
-  // and .multi-select already hides the whole #sel-stats card; classic
-  // never had a rule for it. One class, one meaning.)
-  if(selInfo) selInfo.classList.toggle('multi-select', ((isMulti||!!garrisonSel||singleGrid||idleCrest) && !gameOver) || gameOverTile);
-  // The grid gets its OWN dirty key: only what it actually renders (selection
-  // membership, per-unit HP, garrison members). Keying it on the full
-  // currentSelectionDetails rebuilt every icon ~30×/s while watching a
-  // construction or a gathering villager — per-tick fields (buildProgress,
-  // farm res, carried amount, cam flag) the grid doesn't even display.
-  let gridKey = currentSelListKey;
-  if (isMulti || singleGrid) gridKey += ':' + selected.map(s => s.id + '_' + s.hp).join(',')
-    + ':cam' + (window.cameraFollowId || 0);
-  if (idleCrest) {
-    // myResearchTC was already computed for the age dirty-key at the top of
-    // this function — no second full-entities scan.
-    gridKey += ':idleage' + (myResearchTC ? 'adv' + myResearchTC.research.target : teamAge[myTeam]);
-  }
-  if (gameOverTile) gridKey += ':over' + (iWonOutcome ? 1 : 0);
-  if (garrisonSel) gridKey += ':gar' + garrisonSel.garrison.map(id => {
-    let u = entitiesById.get(id);
-    return u ? id + '_' + u.hp : id;
-  }).join(',');
-  if(selGrid && gridKey!==(window.lastSelGridDetails||'')){
-    window.lastSelGridDetails=gridKey;
-    selGrid.innerHTML='';
-    // Buckets a flat unit/building list into same-type groups, preserving
-    // first-seen order so the grid doesn't reshuffle every refresh.
-    let groupByType=(list)=>{
-      let order=[], groups=new Map();
-      list.forEach(s=>{
-        let key=s.type==='building'?s.btype:s.utype;
-        if(!groups.has(key)){ groups.set(key,[]); order.push(key); }
-        groups.get(key).push(s);
-      });
-      return order.map(key=>{
-        let members=groups.get(key);
-        let data=members[0].type==='building'?BLDGS[key]:UNITS[key];
-        return {key,data,members};
-      });
-    };
-    let renderGroup=(g, {title, onClick, onRemove})=>{
-      let icon=document.createElement('div');
-      icon.className='sel-unit-icon';
-      setPortraitIcon(icon, iconKey(g.key, g.members[0].team), g.data&&g.data.icon);
-      // Rich hover tooltip (desktop): the classic skin's full readout —
-      // live HP, combat stats, a villager's job — resolved from these ids
-      // at hover time (descriptorForSelTile). dataset, not title: a native
-      // title would double up with the custom #tooltip.
-      icon.dataset.tileIds=g.members.map(m=>m.id).join(',');
-      icon.dataset.tipName=(g.data&&g.data.name||g.key)+(g.members.length>1?' ×'+g.members.length:'');
-      let avgHpPct=Math.max(0,Math.min(100,Math.round(
-        g.members.reduce((sum,u)=>sum+u.hp/u.maxHp,0)/g.members.length*100)));
-      let hpColor='#2b8a3e';
-      if(avgHpPct<20) hpColor='#cc3333';
-      else if(avgHpPct<50) hpColor='#d9a711';
-      let bar=document.createElement('div');bar.className='sel-unit-hp';
-      let fill=document.createElement('div');fill.className='sel-unit-hp-fill';
-      fill.style.width=avgHpPct+'%';
-      fill.style.background=hpColor;
-      bar.appendChild(fill);
-      icon.appendChild(bar);
-      if(g.members.length>1){
-        let badge=document.createElement('div');
-        badge.className='sel-unit-count';
-        badge.textContent=g.members.length;
-        icon.appendChild(badge);
-      }
-      icon.dataset.tipDesc=title(g);
-      icon.onclick=(ev)=>onClick(g,ev);
-      if(onRemove) icon.oncontextmenu=(ev)=>{ ev.preventDefault(); onRemove(g,ev); };
-      // Single-unit tile inherits the old portrait's double-click/tap
-      // camera-follow toggle (and its green lock glow).
-      if(g.members.length===1 && g.members[0].type==='unit'){
-        icon.ondblclick=()=>{ if(window.toggleCameraFollow) toggleCameraFollow(); };
-        icon.classList.toggle('cam-locked', window.cameraFollowId===g.members[0].id);
-      }
-      selGrid.appendChild(icon);
-    };
-    if(garrisonSel){
-      let members=garrisonSel.garrison.map(id=>entitiesById.get(id)).filter(Boolean);
-      groupByType(members).forEach(g=>{
-        renderGroup(g, {
-          title: ()=>`Click to release one from garrison.`,
-          onClick: (g)=>{
-            if(gameOver)return;
-            let victim=g.members[0];
-            submitCommand({ kind: 'eject-garrison', bldgId: garrisonSel.id, unitId: victim.id });
-          }
-        });
-      });
-    } else if(isMulti || singleGrid){
-      groupByType(selected).forEach(g=>{
-        renderGroup(g, {
-          title: g=>g.members.length===1
-            ? '' // no hint text on a single tile — stats speak for themselves
-            : `Click: select only this group. Shift-click: remove it from the selection.`,
-          onClick: (g,ev)=>{
-            if(ev.shiftKey) selected=selected.filter(u=>!g.members.includes(u));
-            else {
-              selected=g.members.slice();
-              if(g.members.length===1) maybeReopenMktPopup(g.members[0]);
-            }
-            updateUI();
-          },
-          onRemove: (g)=>{
-            selected=selected.filter(u=>!g.members.includes(u));
-            updateUI();
-          }
-        });
-      });
-    } else if(idleCrest){
-      // NULL SELECTION tile: the current age's crest (or the TARGET age's
-      // while advancing) drawn as the exact same tile as a single selection.
-      let advTC = myResearchTC; // computed once at the top of updateUI
-      let crestIdx = advTC ? advTC.research.target : teamAge[myTeam];
-      let icon = document.createElement('div');
-      icon.className = 'sel-unit-icon';
-      setPortraitIcon(icon, 'age-' + AGES[crestIdx].key, '🏛️');
-      icon.dataset.tipName = advTC ? ('Advancing to ' + AGES[crestIdx].name + '…') : AGES[crestIdx].name;
-      if (advTC) icon.dataset.tipDesc = 'Villager training is paused at the Town Center while advancing.';
-      selGrid.appendChild(icon);
-    } else if(gameOverTile){
-      // OUTCOME tile: the trophy/skull drawn as the exact same single tile as
-      // any selection — icon only, no text — so the panel keeps its shape and
-      // doesn't slide into the old portrait+stats card at game over.
-      let icon = document.createElement('div');
-      icon.className = 'sel-unit-icon outcome-tile';
-      setPortraitIcon(icon, null, iWonOutcome ? '🏆' : '💀');
-      icon.dataset.tipName = iWonOutcome ? 'Victory' : 'Defeat';
-      selGrid.appendChild(icon);
-    }
-  }
+  renderSelectionGrid(currentSelListKey, myAgeUpBldg);
 
-  let port = document.getElementById('sel-portrait');
+  let port = byId('sel-portrait');
   if(gameOver){
     if(!isClassicUI) refreshMktPopup(null); // no trading over the end screen
     let iWon = didIWin();
@@ -836,15 +803,15 @@ function updateUI(){
     // Mobile (index.html): the trophy/skull icon alone carries the outcome —
     // no text rows next to it. Classic keeps the AoE2-style worded card.
     let modern = !isClassicUI;
-    document.getElementById('sel-name').textContent = modern ? '' : (iWon?'VICTORY!':'DEFEAT!');
-    document.getElementById('sel-details').textContent = modern ? '' : (iWon?'You destroyed the enemy Town Center!':'Your Town Center was destroyed!');
+    byId('sel-name').textContent = modern ? '' : (iWon?'VICTORY!':'DEFEAT!');
+    byId('sel-details').textContent = modern ? '' : (iWon?'You destroyed the enemy Town Center!':'Your Town Center was destroyed!');
     return;
   }
   if(!gameStarted){
     if (port) { setPortraitIcon(port, 'logo', '⚔️'); port.classList.remove('cam-locked'); }
     setSelHp('');
-    document.getElementById('sel-name').textContent='Choose Difficulty';
-    document.getElementById('sel-details').textContent='Select Easy, Medium, or Hard to begin';
+    byId('sel-name').textContent='Choose Difficulty';
+    byId('sel-details').textContent='Select Easy, Medium, or Hard to begin';
     return;
   }
 
@@ -852,31 +819,31 @@ function updateUI(){
     setSelHp('');
     // Nothing selected: the modern skin (index.html) surfaces the current
     // AGE here — its top-bar age chip is hidden on mobile (cramped), so
-    // this idle box is where age lives. More useful than the old game-name
-    // placeholder, and harmless on desktop. Classic keeps the title.
+    // this idle box is where age lives. Classic keeps the title.
     let modern = !isClassicUI;
     if (modern && teamAge && isPlayerTeam(myTeam)) {
-      let myTC = entities.find(en => en.team === myTeam && en.btype === 'TC' && en.research);
       let ageIdx = teamAge[myTeam];
       // Crest ONLY — no age name text. While advancing, show the TARGET
-      // age's crest instead (the research progress itself lives on the TC's
-      // Advance button).
-      let crestIdx = myTC ? myTC.research.target : ageIdx;
+      // age's crest instead (the research progress itself lives on the
+      // TC's Advance button).
+      let crestIdx = myAgeUpBldg ? myAgeUpBldg.research.target : ageIdx;
       if (port) { setPortraitIcon(port, 'age-' + AGES[crestIdx].key, '🏛️'); port.classList.remove('cam-locked'); }
-      document.getElementById('sel-name').textContent = '';
-      document.getElementById('sel-details').textContent = '';
+      // Desktop card reveals these beside the crest (single-sel); narrow widths
+      // keep the crest alone (#sel-stats hidden). Age name + advancing status.
+      byId('sel-name').textContent = AGES[crestIdx].name;
+      byId('sel-details').textContent = myAgeUpBldg ? 'Advancing…' : '';
       return;
     }
     if (port) { setPortraitIcon(port, 'logo', '⚔️'); port.classList.remove('cam-locked'); }
-    document.getElementById('sel-name').textContent='Age of Epochs II';
-    document.getElementById('sel-details').textContent='Select a unit or building';
+    byId('sel-name').textContent='Age of Epochs';
+    byId('sel-details').textContent='Select a unit or building';
     return;
   }
   let e=selected[0];
   if(e.type==='building'){
     let b=BLDGS[e.btype];
     if (port) { setPortraitIcon(port, iconKey(e.btype, e.team), b.icon); port.classList.remove('cam-locked'); }
-    document.getElementById('sel-name').textContent=b.name;
+    byId('sel-name').textContent=b.name;
     let hpPct = Math.max(0, Math.min(100, Math.floor(e.hp / e.maxHp * 100)));
     // Cyan while under construction — the same one-bar consolidation as the
     // in-world bar (render-buildings.js): HP grows with construction, so
@@ -886,10 +853,9 @@ function updateUI(){
     if (!e.complete) hpColor = '#00e5ff';
     else if (hpPct < 20) hpColor = '#cc3333';
     else if (hpPct < 50) hpColor = '#d9a711';
-    // The training queue used to DISPLACE this card (bar + tiny slots where
-    // the HP readout goes) — queue state now lives on the train buttons
-    // themselves (count badge + progress fill, see the b.builds block
-    // below), so the card always shows the normal HP/garrison/dropoff info.
+    // Queue state lives on the train buttons themselves (count badge +
+    // progress fill, see the b.builds block below), so the card always
+    // shows the normal HP/garrison/dropoff info.
     let det;
     {
       // Classic: AoE2's read — the bar sits directly under the portrait at
@@ -911,7 +877,7 @@ function updateUI(){
       }
       // The TC card skips the garrison line — its count already shows on the
       // building itself (the number by the flag) and in the garrison grid.
-      if(e.complete && garrisonCap(e) > 0 && e.btype !== 'TC') {
+      if((e.type!=='building'||e.complete) && garrisonCap(e) > 0 && e.btype !== 'TC') {
         det += `<div class="det-row">Garrison: ${garrisonCount(e)}/${garrisonCap(e)}${garrisonCount(e)>0?' (+'+Math.min(garrisonCount(e),5)+' arrows)':''}</div>`;
       }
       // (No "Building: X%" row while under construction — the cyan HP bar
@@ -937,24 +903,29 @@ function updateUI(){
         }
       }
     }
-    document.getElementById('sel-details').innerHTML=det;
+    byId('sel-details').innerHTML=det;
     if(rebuildActions&&e.team===myTeam){
+      // Garrison (load mode) for BUILDINGS (TC/tower) — HIDDEN for now, kept
+      // fully wired so it's a one-line flip to bring back. The ram keeps its own
+      // Garrison button (block near the posture row). Would show for a complete
+      // container with free seats; reverse is the garrison grid's per-unit eject.
+      const GARRISON_LOADMODE_BUILDINGS = false;
+      if(GARRISON_LOADMODE_BUILDINGS && e.complete && garrisonCap(e)>0 && ramSeatsFree(e)>0 && selected.length===1)
+        appendGarrisonLoadBtn(act, e);
       // Cancel Construction — a full-size action button so touch players
       // can abort a mis-placed foundation (desktop always had the
       // Delete/Backspace path to deleteOwnedEntity; there is no key on a
       // phone). Full refund, same rule as the key (js/logic.js's
       // deleteOwnedEntity). Only for a genuine in-progress foundation —
-      // an exhausted farm mid-reseed is not a cancellable purchase, and a
-      // committed upgrade (e.upgrading) just proceeds, no cancel.
-      if(!e.complete && !e.exhausted && !e.upgrading && selected.length===1){
+      // an exhausted farm mid-reseed is not a cancellable purchase.
+      if(!e.complete && !e.exhausted && selected.length===1){
         let cancelBuildBtn=document.createElement('div');
         cancelBuildBtn.className='act-btn framed';
         cancelBuildBtn.dataset.tipType='action';
         cancelBuildBtn.dataset.tipLabel='Cancel Construction';
         cancelBuildBtn.dataset.tipDesc='Stop building this and refund its full cost.';
         // Same anatomy as every other action button: sprite icon (the
-        // icon-cancel red X, freed up when the deselect button became the
-        // back arrow) + label + cost line.
+        // icon-cancel red X) + label + cost line.
         cancelBuildBtn.innerHTML=`<div class="btn-emoji sprite-icon icon-cancel"></div><div class="btn-label">Cancel Build</div><span class="cost">full refund</span>`;
         cancelBuildBtn.onclick=()=>{
           requestDeleteOwned([e.id]);
@@ -978,70 +949,45 @@ function updateUI(){
         // the unit just queued was a nasty surprise — clicks pass through
         // to the button, so double-tap = queue two. Cancelling lives in the
         // classic skin's queue slots below.
+        // A building researching (age-up at the TC, a tech at the Barracks…)
+        // PAUSES its training (updateBuildingResearch, js/logic.js) — grey the
+        // train buttons out and swallow their clicks so you can't queue units
+        // that won't move. selKey folds in research state, so this rebuilds when
+        // research starts/ends.
+        let bldgResearching = !!e.research;
         b.builds.filter(ut=>isUnlocked(myTeam,ut)).forEach(ut=>{
           let u=UNITS[ut];
-          let btn=document.createElement('div');btn.className='act-btn';
+          let btn=document.createElement('div');btn.className='act-btn'+(bldgResearching?' upg-busy':'');
           btn.dataset.tipType='unit';
           btn.dataset.tipKey=ut;
-          btn.dataset.cost=JSON.stringify(u.cost);
+          // Show the RESCUE villager as "Free" (unitTrainCost, js/logic.js) so a
+          // broke player at 0 villagers sees it's a free way back in, not a
+          // 50-food cost they can't meet — cost chip AND hover tooltip.
+          let effCost = ut==='villager' ? unitTrainCost(myTeam, ut, e.queue||[]) : u.cost;
+          let isFree = ut==='villager' && !Object.keys(effCost).length;
+          btn.dataset.cost=JSON.stringify(effCost);
+          if(isFree) btn.dataset.free='1';
           // Units without a sprites.png cell (ram) fall back to their emoji
           // glyph, same rule as setPortraitIcon.
           let trainIcon=SPRITE_ICON_KEYS.has(iconKey(ut))
             ?`<div class="btn-emoji sprite-icon icon-${iconKey(ut)}"></div>`
             :`<div class="btn-emoji">${u.icon||''}</div>`;
-          btn.innerHTML=`${trainIcon}<div class="btn-label">${u.name}</div>${costChips(u.cost)}`;
+          // "Free" reuses the SAME cost-chip box (border/background) as a normal
+          // cost, just with text instead of a resource icon+number.
+          btn.innerHTML=`${trainIcon}<div class="btn-label">${u.name}</div>${isFree?'<span class="cost cost-chips"><span class="cost-chip cost-free">Free</span></span>':costChips(effCost)}`;
           let queued=e.queue?e.queue.filter(q=>q===ut).length:0;
           if(queued>0){
             btn.innerHTML+=`<div class="queue-count" title="${queued} queued">${queued}</div>`;
           }
           if(e.queue&&e.queue.length>0&&e.queue[0]===ut){
-            let pct=Math.floor(e.trainTick/u.trainTime*100);
+            let pct=Math.floor(e.trainTick/trainDurationFor(e.team,ut)*100);
             btn.classList.add('training-active');
             btn.innerHTML+=`<div class="btn-progress-fill" style="position:absolute;left:0;bottom:0;height:3px;background:#fc0;width:${pct}%;"></div>`;
           }
-          btn.onclick=()=>trainUnit(e,ut);
+          if(!bldgResearching) btn.onclick=()=>trainUnit(e,ut);
           act.appendChild(btn);
         });
 
-
-        // ---- Advance Age (TC only) ----
-        if(e.btype==='TC'&&teamAge&&teamAge[myTeam]<AGES.length-1){
-          let next=AGES[teamAge[myTeam]+1];
-          let btn=document.createElement('div');btn.className='act-btn';
-          btn.dataset.tipType='action';
-          if(e.research){
-            btn.dataset.tipLabel='Researching '+AGES[e.research.target].name;
-            btn.id='advance-progress-btn';
-            // Keeps the age-crest icon (not a generic research glyph) so
-            // WHAT is being bought stays readable — the fill (+ classic's
-            // Cancel line) already say it's in progress.
-            btn.innerHTML=`<div class="btn-emoji sprite-icon icon-age-${AGES[e.research.target].key}"></div><div class="btn-label">${AGES[e.research.target].name}</div>`
-              +(isClassicUI?`<span class="cost">Cancel</span>`:'')
-              +`<div class="btn-progress-fill" style="position:absolute;left:0;bottom:0;height:3px;background:#fc0;width:0%;"></div>`;
-            btn.style.position='relative';
-            if(isClassicUI){
-              // Classic keeps AoE2's cancel-by-clicking-again. The tap-model
-              // skin deliberately does NOT: on touch, a stray tap on the TC
-              // card silently refunded a whole age advance.
-              btn.dataset.tipDesc='The Town Center cannot train villagers while advancing. Click to cancel and refund the full cost.';
-              btn.onclick=()=>{ submitCommand({kind:'cancel-research',bldgId:e.id}); };
-            } else {
-              btn.dataset.tipDesc='The Town Center cannot train villagers while advancing.';
-            }
-          } else {
-            btn.dataset.cost=JSON.stringify(next.cost);
-            btn.dataset.tipLabel='Advance to '+next.name;
-            // tipCost renders the same icon cost rows as building/unit tips.
-            btn.dataset.tipCost=JSON.stringify(next.cost);
-            btn.dataset.tipDesc=(teamAge[myTeam]===0
-              ? 'Unlocks spearmen, archers, scouts, watch towers, and stone walls. Military gains +1 attack and +1 armor.'
-              : 'Unlocks the knight. Military gains a further +1 attack and +1 armor.')
-              +' The Town Center pauses villager training while researching.';
-            btn.innerHTML=`<div class="btn-emoji sprite-icon icon-age-${next.key}"></div><div class="btn-label">Advance to ${next.name}</div>${costChips(next.cost)}`;
-            btn.onclick=()=>{ submitCommand({kind:'research-age',bldgId:e.id}); };
-          }
-          act.appendChild(btn);
-        }
 
         // Rally Point button — lets mobile players set rally without right-click
         if (e.complete) {
@@ -1062,7 +1008,7 @@ function updateUI(){
             rallyBtn.id='rally-set-btn';
             rallyBtn.dataset.tipType='action';
             rallyBtn.dataset.tipLabel='Set Rally Point';
-            rallyBtn.dataset.tipDesc='Newly trained units will automatically walk to the rally point after spawning.';
+            rallyBtn.dataset.tipDesc='New units walk to the rally point after training.';
             rallyBtn.innerHTML=`<div class="btn-emoji sprite-icon icon-rally"></div><div class="btn-label">Set Rally</div>`;
             rallyBtn.onclick=()=>{
               if(gameOver)return;
@@ -1072,6 +1018,18 @@ function updateUI(){
             };
             act.appendChild(rallyBtn);
           }
+        }
+        // Town AI: hand the town to the AI and back (the 'autopilot' command) — lit while it runs.
+        if (e.btype === 'TC' && e.team === myTeam && e.complete && !gameOver) {
+          const on = !!(teamControllers[myTeam] && teamControllers[myTeam].type === 'ai');
+          let aiBtn=document.createElement('div');
+          aiBtn.className='act-btn'+(on?' stance-on':'');
+          aiBtn.dataset.tipType='action';
+          aiBtn.dataset.tipLabel='Town AI';
+          aiBtn.dataset.tipDesc=on?'The AI is running your town. Click to take it back.':'Let the AI run your town (economy, building, army) while you play a character.';
+          aiBtn.innerHTML=`<div class="btn-emoji ai-emoji">🤖</div><div class="btn-label">Town AI<br>${on?'on':'off'}</div>`;
+          aiBtn.onclick=()=>{ if(!gameOver) submitCommand({ kind: 'autopilot', on: !on }); };
+          act.appendChild(aiBtn);
         }
         // CLASSIC skin: the queue as its own STRIP of small slot buttons in
         // the CENTER panel's #sel-queue lane (real AoE2 shows the training
@@ -1099,13 +1057,90 @@ function updateUI(){
             // trains (live-patched with the fills every frame).
             slot.innerHTML = icon + `<div class="queue-x">✕</div>`
               + (idx === 0
-                ? `<div class="train-veil" style="height:${100 - Math.floor(e.trainTick / UNITS[e.queue[0]].trainTime * 100)}%;"></div>`
+                ? `<div class="train-veil" style="height:${100 - Math.floor(e.trainTick / trainDurationFor(e.team, e.queue[0]) * 100)}%;"></div>`
                 : '');
             slot.onclick = () => cancelQueue(e.id, idx);
             strip.appendChild(slot);
           });
-          let lane = document.getElementById('sel-queue');
+          let lane = byId('sel-queue');
           (lane || act).appendChild(strip);
+        }
+      }
+
+      // ---- Research: everything you can research at this building sits together
+      // INSIDE one PARCHMENT box, styled as an unrolled SCROLL (rolled ends,
+      // spanning the panel) — visually distinct from the wooden unit-train
+      // buttons so ACTIONS read apart from UNITS. It holds the TC's Advance-Age
+      // tile (aging is a research action) plus the building's tech tiles
+      // (BLDGS.researches). canResearch hides owned/age-locked/prereq-missing (the
+      // "which replaces which" slots). A building researches ONE thing at a time —
+      // the in-progress tile shows a fill, the rest go busy.
+      if(e.complete && b.researches){
+        let r=e.research;
+        let techs=b.researches.filter(k=>canResearch(myTeam,k)||(r&&r.target===k));
+        let canAge=e.btype==='TC'&&teamAge&&teamAge[myTeam]<AGES.length-1;
+        if(canAge||techs.length){
+          let box=document.createElement('div');box.className='research-box';
+          // ONE builder for BOTH age-up and every tech, so their layout/states can't
+          // drift apart. Each entry = a .research-item COLUMN: an icon button
+          // (.research-tile, holds .research-icon = sprite + progress fill) with the
+          // price a SIBLING below it — so hover/click land on the icon only.
+          // state: 'progress' | 'busy' | 'ready'.
+          // The fill rides in a TRACK: a bare 3px bar reading 0% at kickoff was
+          // indistinguishable from no bar at all, so the sunk track (outlined,
+          // full width) is what says "this one is running".
+          const PROG='<div class="research-progress-track"><div class="btn-progress-fill research-progress-fill" style="width:0%;"></div></div>';
+          const addItem = (o) => {
+            let item=document.createElement('div');item.className='research-item';
+            let btn=document.createElement('div');btn.className='act-btn research-tile';
+            if(o.id) btn.id=o.id;
+            btn.dataset.tipType='action'; btn.dataset.tipLabel=o.tipLabel;
+            if(o.tipDesc) btn.dataset.tipDesc=o.tipDesc;
+            if(o.cost) btn.dataset.tipCost=JSON.stringify(o.cost);
+            btn.innerHTML=`<div class="research-icon">${o.icon}${o.state==='progress'?PROG:''}</div>`;
+            if(o.state==='progress'){
+              btn.classList.add('training-active');
+              if(isClassicUI) btn.onclick=()=>{ submitCommand({kind:'cancel-research',bldgId:e.id}); };
+            } else if(o.state==='busy'){
+              item.classList.add('upg-busy'); // building busy on another research
+            } else { // ready
+              if(o.cost) btn.dataset.cost=JSON.stringify(o.cost); // affordability greying
+              btn.onclick=()=>{ submitCommand({kind:'research',bldgId:e.id,target:o.target}); };
+            }
+            item.appendChild(btn);
+            // price BELOW the icon (mobile shows it, classic hides it). The in-progress
+            // tile keeps its price in the layout but INVISIBLE (.cost-reserved): the
+            // chips are what set an item's width, so dropping them mid-research
+            // narrowed the tile and slid the rest of the band sideways on click.
+            if(o.cost) item.insertAdjacentHTML('beforeend', costChips(o.cost, o.state==='progress' ? 'cost-reserved' : ''));
+            box.appendChild(item);
+          };
+          // Advance-Age (TC only) first; numeric research target = in progress.
+          if(canAge){
+            let next=AGES[teamAge[myTeam]+1];
+            if(r&&typeof r.target==='number'){
+              addItem({ id:'advance-progress-btn', state:'progress', cost:AGES[r.target].cost,
+                icon:`<div class="btn-emoji sprite-icon icon-age-${AGES[r.target].key}"></div>`,
+                tipLabel:'Researching '+AGES[r.target].name,
+                tipDesc:'Advancing to the next Age — villager training paused.'+(isClassicUI?' Click to cancel and refund.':'') });
+            } else {
+              addItem({ state:r?'busy':'ready', target:'age', cost:next.cost,
+                icon:`<div class="btn-emoji sprite-icon icon-age-${next.key}"></div>`,
+                tipLabel:'Advance to '+next.name,
+                tipDesc:(teamAge[myTeam]===0
+                  ? 'Unlocks spearmen, archers, scouts, watch towers, and stone walls.'
+                  : 'Unlocks the knight and Castle-age technologies.')
+                  +' The Town Center pauses villager training while researching.' });
+            }
+          }
+          techs.forEach(k=>{
+            let c=UPGRADES[k];
+            addItem({
+              state: (r&&r.target===k)?'progress':(r?'busy':'ready'), target:k, cost:c.cost,
+              icon: SPRITE_UP_KEYS.has(k)?`<div class="btn-emoji sprite-icon icon-up-${k}"></div>`:`<div class="btn-emoji">🔬</div>`,
+              tipLabel:c.name, tipDesc:c.desc });
+          });
+          act.appendChild(box);
         }
       }
 
@@ -1116,7 +1151,7 @@ function updateUI(){
         let btn=document.createElement('div');btn.className='act-btn';
         btn.dataset.tipType='action';
         btn.dataset.tipLabel='Prepay Farm Reseed';
-        btn.dataset.tipDesc='Pre-pays 60 Wood to automatically reseed an exhausted farm. Queued reseeds are used before spending resources again.';
+        btn.dataset.tipDesc='Pre-pays 60 Wood to auto-reseed an exhausted farm. Queued reseeds are used first.';
         btn.dataset.tipCost=JSON.stringify({w:60});
         btn.dataset.cost=JSON.stringify({w:60});
         btn.innerHTML=`<div class="btn-emoji sprite-icon icon-reseed"></div><div class="btn-label">Prepay Reseed</div>${costChips({w:60})}`;
@@ -1140,7 +1175,7 @@ function updateUI(){
             slot.onclick=()=>cancelReseed();
             strip.appendChild(slot);
           }
-          let lane=document.getElementById('sel-queue');
+          let lane=byId('sel-queue');
           (lane||act).appendChild(strip);
         }
       }
@@ -1200,7 +1235,7 @@ function updateUI(){
         unitName = selected.every(s => s.utype !== 'villager' && s.utype !== 'sheep' && s.utype !== 'sheep_carcass') ? 'Army' : 'Mixed Group';
       }
     }
-    document.getElementById('sel-name').textContent = unitName + (selected.length > 1 ? ` (${selected.length})` : '');
+    byId('sel-name').textContent = unitName + (selected.length > 1 ? ` (${selected.length})` : '');
     let hpPct = Math.max(0, Math.min(100, Math.floor(e.hp / e.maxHp * 100)));
     let hpColor = '#2b8a3e';
     if (hpPct < 20) hpColor = '#cc3333';
@@ -1247,7 +1282,7 @@ function updateUI(){
       det += `<div class="det-stats">${stats.join('')}</div>`;
     }
 
-    document.getElementById('sel-details').innerHTML=det;
+    byId('sel-details').innerHTML=det;
 
     // The build menu requires EVERY selected unit to be a buildable-capable
     // villager, not just selected[0] — AoE2 only offers an action when all
@@ -1271,6 +1306,15 @@ function updateUI(){
     let allSoldiers = selected.length>0 && selected.every(s=>s.type==='unit'&&s.team===myTeam&&isSoldierUnit(s));
     let allScouts   = selected.length>0 && selected.every(s=>s.type==='unit'&&s.utype==='scout'&&s.team===myTeam);
     let guardRow    = allGuardable(selected);
+    // A selected own ram: Garrison-IN (load mode, while it has free seats) and
+    // Ungarrison (release everyone, while it holds riders). Both can show for a
+    // partially-loaded ram.
+    if(rebuildActions && selected.length===1 && selected[0].type==='unit'
+       && selected[0].utype==='ram' && selected[0].team===myTeam){
+      let ram=selected[0];
+      if(ramSeatsFree(ram)>0) appendGarrisonLoadBtn(act, ram);
+      if(ram.garrison && ram.garrison.length>0) appendGarrisonEjectBtn(act, ram);
+    }
     if(rebuildActions && (allSoldiers || guardRow)){
       let ids = selected.map(s=>s.id);
       // Guard tile is HIDDEN for soldiers for now — the four stances already
@@ -1286,7 +1330,7 @@ function updateUI(){
       // (null if mixed) — drives which single tile is highlighted. When the
       // Guard tile isn't shown, a guarding unit falls back to its stance so it
       // still lights SOMETHING (rather than pointing at an absent Guard tile).
-      let posture = s => s.autoScout ? 'auto' : ((showGuard && s.guardX!=null) ? 'guard' : (s.stance||'aggressive'));
+      let posture = s => (s.order&&s.order.kind==='scout') ? 'auto' : ((showGuard && s.order && GUARD_ORDER_KINDS.has(s.order.kind)) ? 'guard' : (s.stance||'aggressive'));
       let common = selected.every(s=>posture(s)===posture(selected[0])) ? posture(selected[0]) : null;
 
       // Stances (soldiers only — rams carry no stance).
@@ -1324,7 +1368,7 @@ function updateUI(){
           let btn=document.createElement('div');btn.className='act-btn'+(common==='guard'?' stance-on':'');
           btn.dataset.tipType='action';
           btn.dataset.tipLabel='Guard';
-          btn.dataset.tipDesc='Tap ground to hold that spot, a building to stand watch there, or one of your units to escort it. Guards chase enemies only a short way and return to their post; a plain move relocates the post, and picking another stance ends the guard.';
+          btn.dataset.tipDesc='Tap ground, a building, or a unit to guard it. Guards chase briefly, then return. Move relocates the post; another stance ends it.';
           btn.innerHTML=`<div class="btn-emoji sprite-icon icon-rally"></div><div class="btn-label">Guard</div>`;
           btn.onclick=()=>{ if(gameOver)return; window.settingGuard=true; showMsg('Tap the map to set guard position'); updateUI(); };
           act.appendChild(btn);
@@ -1338,7 +1382,7 @@ function updateUI(){
         let btn=document.createElement('div');btn.className='act-btn'+(common==='auto'?' stance-on':'');
         btn.dataset.tipType='action';
         btn.dataset.tipLabel='Auto Scout';
-        btn.dataset.tipDesc='The scout automatically explores unmapped areas and avoids fights. To stop it, pick another stance or order it somewhere.';
+        btn.dataset.tipDesc='The scout explores unmapped areas and avoids fights. Pick another stance or give an order to stop.';
         btn.innerHTML=`<div class="btn-emoji sprite-icon icon-compass"></div><div class="btn-label">Auto Scout</div>`;
         // Auto Scout is a dispatch task, not an adjust-in-place toggle: like a
         // build/gather order it DESELECTS the scout so the player can get on
@@ -1466,12 +1510,192 @@ function updateUI(){
   // arrow is corner-docked, not a strip occupant — this class lifts the cap
   // and the card may take the whole bar.
   {
-    let actEl = document.getElementById('actions');
-    let barEl = document.getElementById('bottom');
+    let actEl = byId('actions');
+    let barEl = byId('bottom');
     if (actEl && barEl) barEl.classList.toggle('no-actions', !actEl.querySelector(':scope > *:not(.back-btn)'));
   }
 
   refreshActionAffordability();
+}
+
+// The selection GRID (the multi-select tile strip and its garrison row).
+// Keyed rebuilds off currentSelListKey; myAgeUpBldg feeds the age tile.
+function renderSelectionGrid(currentSelListKey, myAgeUpBldg){
+  let selInfo=byId('sel-info');
+  let selGrid=byId('sel-grid');
+  let isMulti=selected.length>1;
+  // A selected own building — or a ram carrying riders (AoE2 garrison-rams) —
+  // with units inside reuses the multi-select grid to show its garrison
+  // (AoE2-style); clicking an icon releases one of them.
+  let garrisonSel = !isMulti && selected.length===1
+    && (selected[0].type==='building' || selected[0].utype==='ram')
+    && selected[0].team===myTeam && selected[0].garrison && selected[0].garrison.length>0
+    ? selected[0] : null;
+  // Mobile skin: SINGLE selections render through the same grid as groups —
+  // one gold tile with an HP strip, no name, no separate portrait card. The
+  // selection panel is one visual language whether 1 or 40 things are
+  // selected. Classic keeps its AoE2 portrait + name + stats readout.
+  // !gameOver everywhere below: the end-of-match branch writes VICTORY!/
+  // DEFEAT! into #sel-name/#sel-details, and a selection surviving into
+  // game over (the normal DEFEAT case) must not leave those hidden behind
+  // the grid classes.
+  let singleGrid = !isClassicUI && !isMulti && !garrisonSel && selected.length===1 && !gameOver;
+  // NULL selection is a tile too: the age crest renders through the same
+  // grid as any single selection — same style, same spacing, one language
+  // for the panel in every state. (Classic keeps its title/portrait box.)
+  let idleCrest = !isClassicUI && selected.length===0 && gameStarted && !gameOver
+    && typeof teamAge !== 'undefined' && teamAge && isPlayerTeam(myTeam);
+  // Game over on mobile renders the outcome (🏆/💀) as the SAME single tile as
+  // every other selection state, so the panel keeps one width and position and
+  // never shifts ("slides") into the portrait+stats card. Classic keeps its
+  // worded card.
+  let gameOverTile = !isClassicUI && gameOver;
+  let iWonOutcome = gameOver ? (typeof didIWin==='function' && didIWin()) : false;
+  // (No separate 'has-selection' class: in the mobile skin EVERY selection
+  // state — single, group, garrison, idle crest — goes through the grid,
+  // and .multi-select already hides the whole #sel-stats card; classic
+  // never had a rule for it. One class, one meaning.)
+  if(selInfo) selInfo.classList.toggle('multi-select', ((isMulti||!!garrisonSel||singleGrid||idleCrest) && !gameOver) || gameOverTile);
+  // Single unit/building or the age crest: desktop CSS reveals the #sel-stats
+  // readout beside the tile. Multi-select/garrison stay tiles-only.
+  if(selInfo) selInfo.classList.toggle('single-sel', singleGrid || idleCrest);
+  // The grid gets its OWN dirty key: only what it actually renders (selection
+  // membership, per-unit HP, garrison members). Keying it on the full
+  // currentSelectionDetails rebuilt every icon ~30×/s while watching a
+  // construction or a gathering villager — per-tick fields (buildProgress,
+  // farm res, carried amount, cam flag) the grid doesn't even display.
+  let gridKey = currentSelListKey;
+  if (isMulti || singleGrid) gridKey += ':' + selected.map(s => s.id + '_' + s.hp).join(',')
+    + ':cam' + (window.cameraFollowId || 0)
+    // Grid tiles draw age-variant icons (iconKey: TC/Tower/walls change with
+    // age). The selection membership + hp don't change on an age advance, so
+    // without folding the age in, a building kept selected through Advance
+    // rendered its stale (previous-age) tile until the selection changed.
+    + ':gage' + (teamAge && isPlayerTeam(myTeam) ? teamAge[myTeam] : '');
+  if (idleCrest) {
+    // myAgeUpBldg was already computed for the age dirty-key at the top of
+    // this function — no second full-entities scan.
+    gridKey += ':idleage' + (myAgeUpBldg ? 'adv' + myAgeUpBldg.research.target : teamAge[myTeam]);
+  }
+  if (gameOverTile) gridKey += ':over' + (iWonOutcome ? 1 : 0);
+  if (garrisonSel) gridKey += ':gar' + garrisonSel.garrison.map(id => {
+    let u = entitiesById.get(id);
+    return u ? id + '_' + u.hp : id;
+  }).join(',');
+  if(selGrid && gridKey!==(window.lastSelGridDetails||'')){
+    window.lastSelGridDetails=gridKey;
+    selGrid.innerHTML='';
+    // Buckets a flat unit/building list into same-type groups, preserving
+    // first-seen order so the grid doesn't reshuffle every refresh.
+    let groupByType=(list)=>{
+      let order=[], groups=new Map();
+      list.forEach(s=>{
+        let key=s.type==='building'?s.btype:s.utype;
+        if(!groups.has(key)){ groups.set(key,[]); order.push(key); }
+        groups.get(key).push(s);
+      });
+      return order.map(key=>{
+        let members=groups.get(key);
+        let data=members[0].type==='building'?BLDGS[key]:UNITS[key];
+        return {key,data,members};
+      });
+    };
+    let renderGroup=(g, {title, onClick, onRemove})=>{
+      let icon=document.createElement('div');
+      icon.className='sel-unit-icon';
+      setPortraitIcon(icon, iconKey(g.key, g.members[0].team), g.data&&g.data.icon);
+      // Rich hover tooltip (desktop): the classic skin's full readout —
+      // live HP, combat stats, a villager's job — resolved from these ids
+      // at hover time (descriptorForSelTile). dataset, not title: a native
+      // title would double up with the custom #tooltip.
+      // A single selection shows the #sel-stats readout beside the tile, so
+      // skip its tooltip (it would duplicate that).
+      if(!singleGrid){
+        icon.dataset.tileIds=g.members.map(m=>m.id).join(',');
+        icon.dataset.tipName=(g.data&&g.data.name||g.key)+(g.members.length>1?' ×'+g.members.length:'');
+      }
+      let avgHpPct=Math.max(0,Math.min(100,Math.round(
+        g.members.reduce((sum,u)=>sum+u.hp/u.maxHp,0)/g.members.length*100)));
+      let hpColor='#2b8a3e';
+      if(avgHpPct<20) hpColor='#cc3333';
+      else if(avgHpPct<50) hpColor='#d9a711';
+      let bar=document.createElement('div');bar.className='sel-unit-hp';
+      let fill=document.createElement('div');fill.className='sel-unit-hp-fill';
+      fill.style.width=avgHpPct+'%';
+      fill.style.background=hpColor;
+      bar.appendChild(fill);
+      icon.appendChild(bar);
+      if(g.members.length>1){
+        let badge=document.createElement('div');
+        badge.className='sel-unit-count';
+        badge.textContent=g.members.length;
+        icon.appendChild(badge);
+      }
+      if(!singleGrid) icon.dataset.tipDesc=title(g);
+      icon.onclick=(ev)=>onClick(g,ev);
+      if(onRemove) icon.oncontextmenu=(ev)=>{ ev.preventDefault(); onRemove(g,ev); };
+      // Single-unit tile: double-click/tap toggles camera follow (with the
+      // green lock glow).
+      if(g.members.length===1 && g.members[0].type==='unit'){
+        icon.ondblclick=()=>{ if(window.toggleCameraFollow) toggleCameraFollow(); };
+        icon.classList.toggle('cam-locked', window.cameraFollowId===g.members[0].id);
+      }
+      selGrid.appendChild(icon);
+    };
+    if(garrisonSel){
+      let members=garrisonSel.garrison.map(id=>entitiesById.get(id)).filter(Boolean);
+      groupByType(members).forEach(g=>{
+        renderGroup(g, {
+          title: ()=>`Click to release one from garrison.`,
+          onClick: (g)=>{
+            if(gameOver)return;
+            let victim=g.members[0];
+            submitCommand({ kind: 'eject-garrison', bldgId: garrisonSel.id, unitId: victim.id });
+          }
+        });
+      });
+    } else if(isMulti || singleGrid){
+      groupByType(selected).forEach(g=>{
+        renderGroup(g, {
+          title: g=>g.members.length===1
+            ? '' // no hint text on a single tile — stats speak for themselves
+            : `Click: select only this group. Shift-click: remove it from the selection.`,
+          onClick: (g,ev)=>{
+            if(ev.shiftKey) selected=selected.filter(u=>!g.members.includes(u));
+            else {
+              selected=g.members.slice();
+              if(g.members.length===1) maybeReopenMktPopup(g.members[0]);
+            }
+            updateUI();
+          },
+          onRemove: (g)=>{
+            selected=selected.filter(u=>!g.members.includes(u));
+            updateUI();
+          }
+        });
+      });
+    } else if(idleCrest){
+      // NULL SELECTION tile: the current age's crest (or the TARGET age's
+      // while advancing) drawn as the exact same tile as a single selection.
+      let advU = myAgeUpBldg; // computed once at the top of updateUI
+      let crestIdx = advU ? advU.research.target : teamAge[myTeam];
+      let icon = document.createElement('div');
+      icon.className = 'sel-unit-icon';
+      setPortraitIcon(icon, 'age-' + AGES[crestIdx].key, '🏛️');
+      // No tooltip: the expanded card (desktop) shows the age name beside the
+      // crest; narrow widths keep the crest alone.
+      selGrid.appendChild(icon);
+    } else if(gameOverTile){
+      // OUTCOME tile: the trophy/skull drawn as the exact same single tile as
+      // any selection — icon only, no text — so the panel keeps its shape at
+      // game over.
+      let icon = document.createElement('div');
+      icon.className = 'sel-unit-icon outcome-tile';
+      setPortraitIcon(icon, null, iWonOutcome ? '🏆' : '💀');
+      icon.dataset.tipName = iWonOutcome ? 'Victory' : 'Defeat';
+      selGrid.appendChild(icon);
+    }
+  }
 }
 
 // Grey out action buttons whose cost can't currently be paid. Runs on every
@@ -1486,7 +1710,7 @@ function refreshActionAffordability(){
 
 }
 // Swallow clicks on disabled buttons before their own onclick fires.
-document.getElementById('actions').addEventListener('click', function(e){
+byId('actions').addEventListener('click', function(e){
   let btn = e.target.closest && e.target.closest('.act-btn.disabled, .mkt-cell.disabled');
   if(btn){
     e.stopPropagation();
@@ -1501,7 +1725,7 @@ document.getElementById('actions').addEventListener('click', function(e){
 // threshold suppresses the click that would otherwise fire on the button
 // under the cursor when the mouse is released.
 (function(){
-  let bar=document.getElementById('actions');
+  let bar=byId('actions');
   if(!bar||!bar.addEventListener)return;
   let dragging=false,dragMoved=false,startX=0,startScroll=0;
   bar.addEventListener('mousedown',e=>{
@@ -1541,9 +1765,9 @@ function cancelQueue(bldgId,idx){
 
 function showMsg(txt){
   if (window.__resim) return; // rollback resim replays past ticks silently (js/lockstep.js)
-  let el=document.getElementById('msg');el.textContent=txt;el.style.opacity='1';
+  let el=byId('msg');el.textContent=txt;el.style.opacity='1';
   // The help hint shares the same screen spot — yield to the message
-  let hint=document.getElementById('help-hint');
+  let hint=byId('help-hint');
   if(hint)hint.style.opacity='0';
   // Cancel the previous message's hide timer, or a message shown ~1.9s
   // after another gets hidden almost immediately by the stale timer.
@@ -1575,6 +1799,8 @@ window.deselectAll = function() {
     window.settingRally = false;
   } else if (window.settingGuard) {
     window.settingGuard = false;
+  } else if (window.settingGarrison) {
+    window.settingGarrison = null;
   } else if (window.currentVillagerMenu === 'eco' || window.currentVillagerMenu === 'mil') {
     window.currentVillagerMenu = 'main';
   } else {
@@ -1658,7 +1884,7 @@ window.updateBottomHeight = function() {
   H = window.innerHeight - bottomH;
   W = w;
   
-  let C = document.getElementById('game');
+  let C = byId('game');
   if (C) {
     let X = C.getContext('2d');
     // Use the GLOBAL dpr (js/core.js) — it caps at 2x on mobile for render
@@ -1728,7 +1954,7 @@ window.cancelReseed = cancelReseed;
 // ==============================
 
 (function() {
-  const TIP = document.getElementById('tooltip');
+  const TIP = byId('tooltip');
   if (!TIP) return;
 
   // Resource key → human-readable label
@@ -1753,8 +1979,10 @@ window.cancelReseed = cancelReseed;
       html += `<div style="font-size:10px;color:#d1c499;">HP: ${d.hp}/${d.maxHp}</div>`;
     }
 
-    // Cost breakdown with resource icons
-    if (d.cost) {
+    // Cost breakdown with resource icons ("Free" for the rescue villager).
+    if (d.free) {
+      html += '<div class="tip-cost"><div class="tip-cost-row">Free</div></div>';
+    } else if (d.cost) {
       const entries = Object.entries(d.cost);
       if (entries.length) {
         html += '<div class="tip-cost">';
@@ -1779,12 +2007,9 @@ window.cancelReseed = cancelReseed;
     return html;
   }
 
-  // Position the tooltip against the hovered BUTTON's rect — never over it.
-  // The old version chased the cursor with a fixed offset and flipped over
-  // it near the viewport edges, which is exactly where the buttons live —
-  // so the flipped tooltip landed on top of the very button being hovered.
-  // Anchored placement: centered above the button, flipping below when
-  // there's no room above, clamped inside the viewport horizontally.
+  // Position the tooltip against the hovered BUTTON's rect — never over it
+  // (cursor-chasing placement flipped onto the button at viewport edges).
+  // Centered above, flips below when there's no room, clamped horizontally.
   function positionTip(el) {
     const GAP = 8;
     const r = el.getBoundingClientRect();
@@ -1834,7 +2059,11 @@ window.cancelReseed = cancelReseed;
       const u = UNITS[tipKey];
       if (!u) return null;
       const stats = [`❤️ ${u.hp}`, ...unitStatChips(u)];
-      d = { name: u.name, desc: u.desc || null, stats, cost: u.cost };
+      // Prefer the button's EFFECTIVE cost (dataset.cost) so a free rescue
+      // villager reads "Free" here too, not its normal 50-food price.
+      let cost = u.cost;
+      if (el.dataset.cost) { try { cost = JSON.parse(el.dataset.cost); } catch(_){} }
+      d = { name: u.name, desc: u.desc || null, stats, cost, free: el.dataset.free === '1' };
     } else if (tipType === 'building') {
       const b = BLDGS[tipKey];
       if (!b) return null;
@@ -1883,13 +2112,13 @@ window.cancelReseed = cancelReseed;
       const arrows = buildingArrowStats(e.btype);
       if (arrows) d.stats.push(`⚔️ ${arrows.atk}`, `🏹 ${arrows.range}`);
       if (b && b.armor && (b.armor.m > 0 || b.armor.p > 0)) d.stats.push(`🛡️ ${b.armor.m}/${b.armor.p}`);
-      if (e.complete && garrisonCap(e) > 0) d.stats.push(`Garrison ${garrisonCount(e)}/${garrisonCap(e)}`);
+      if ((e.type!=='building'||e.complete) && garrisonCap(e) > 0) d.stats.push(`Garrison ${garrisonCount(e)}/${garrisonCap(e)}`);
       if (!e.complete && !e.exhausted) d.stats.push(`Building ${Math.floor(e.buildProgress / e.buildTime * 100)}%`);
     }
     return d;
   }
 
-  document.getElementById('bottom').addEventListener('mouseover', function(e) {
+  byId('bottom').addEventListener('mouseover', function(e) {
     if (typeof recentTouch === 'function' && recentTouch()) { hideTip(); return; }
 
     // Dispatch on the DATA, not on a class list: any element that carries
@@ -1906,7 +2135,7 @@ window.cancelReseed = cancelReseed;
     else hideTip();
   });
 
-  document.getElementById('bottom').addEventListener('mouseout', function(e) {
+  byId('bottom').addEventListener('mouseout', function(e) {
     // Only hide when leaving #bottom entirely (not just moving between children)
     if (!this.contains(e.relatedTarget)) hideTip();
   });
@@ -1931,9 +2160,9 @@ window.cancelReseed = cancelReseed;
       if (!this.contains(e.relatedTarget)) hideTip();
     });
   }
-  attachSimpleTips(document.getElementById('pop-wrap'));
-  attachSimpleTips(document.getElementById('menu-btn'));
-  attachSimpleTips(document.getElementById('fs-btn'));
-  attachSimpleTips(document.getElementById('chat-btn'));
+  attachSimpleTips(byId('pop-wrap'));
+  attachSimpleTips(byId('menu-btn'));
+  attachSimpleTips(byId('fs-btn'));
+  attachSimpleTips(byId('chat-btn'));
 
 })();

@@ -55,27 +55,48 @@ function detEntityHash(e){
   h = detMix(h, e.target == null ? -1 : e.target);
   h = detMix(h, e.buildTarget == null ? -1 : e.buildTarget);
   h = detMix(h, e.garrisonTarget == null ? -1 : e.garrisonTarget);
-  h = detMix(h, e.followId == null ? -1 : e.followId);
   h = detMix(h, e.path ? e.path.length : -1);
   h = detMixFloat(h, e.moveT || 0);
   h = detMixFloat(h, e.progress || 0);
   h = detMixFloat(h, e.carrying || 0);
   h = detMixStr(h, e.carryType);
-  h = detMix(h, e.cooldown || 0);
+  // Per-tick action clocks — decremented every tick and read to gate the NEXT
+  // attack / gather (logic.js updateUnit/updateBuilding). Unhashed, a diverged
+  // reload/gather cadence is invisible until it moves hp or a resource count.
+  h = detMix(h, e.atkCooldown || 0);
+  h = detMix(h, e.gatherCooldown || 0);
   h = detMix(h, e.garrisonedIn == null ? -1 : e.garrisonedIn);
   h = detMix(h, e.complete ? 1 : 0);
-  // Age research rides the TC entity — hash it so a divergent research
-  // clock trips the checksum before it silently lands a mistimed age-up.
+  // Research rides the building entity — hash it so a divergent
+  // research clock trips the checksum before it silently lands a mistimed
+  // age-up or tech. target is a numeric age index OR a string tech key; fold
+  // both slots so either divergence is caught.
   h = detMix(h, e.research ? e.research.tick : -1);
-  h = detMix(h, e.research ? e.research.target : -1);
+  h = detMix(h, e.research && typeof e.research.target === 'number' ? e.research.target : -1);
+  h = detMixStr(h, e.research && typeof e.research.target === 'string' ? e.research.target : null);
   h = detMix(h, e.leashCooling ? 1 : 0); // bear leash hysteresis (sim-read)
+  h = detMix(h, e.awake ? 1 : 0); h = detMix(h, e.spent ? 1 : 0); if (e.faceAng !== undefined) h = detMixFloat(h, e.faceAng); h = detMix(h, e.calmSince === undefined ? -1 : e.calmSince); // the dragon's sleep (sim-read)
   // Fields the sim reads on later ticks that previously went unhashed — a
   // divergence here only tripped the checksum once it eventually moved
   // hp/x/y, often far outside the resync window.
   h = detMixFloat(h, e.atk || 0);                 // age-up sweep mutates this
+  // Sibling upgrade-mutated stats (UPGRADES, js/core.js), read on later ticks
+  // like atk: range (fletching), speed+carryMax (wheelbarrow), maxHp (masonry/
+  // fortified_wall). A diverged upgrade sweep is invisible until it moves a
+  // position (speed), a resource return (carryMax), or an hp cap (maxHp).
+  h = detMix(h, e.range || 0);
+  h = detMixFloat(h, e.speed || 0);
+  h = detMix(h, e.carryMax || 0);
+  h = detMix(h, e.maxHp || 0);
   h = detMix(h, e.exhausted ? 1 : 0);             // farm lifecycle
   h = detMix(h, e.trainTick || 0);                // training clock
   h = detMixFloat(h, e.buildProgress || 0);       // construction clock
+  // Multi-builder census (countSiteWorker, js/logic.js): lastWorkers sets the
+  // shared build/repair rate NEXT tick; curWorkers/workTick roll into it.
+  h = detMix(h, e.workTick || 0);
+  h = detMix(h, e.curWorkers || 0);
+  h = detMix(h, e.lastWorkers || 0);
+  h = detMixFloat(h, e.repairAccum || 0);         // fractional repair-hp accrual
   h = detMix(h, e.rallyX == null ? -1 : e.rallyX);
   h = detMix(h, e.rallyY == null ? -1 : e.rallyY);
   h = detMix(h, e.rallyTargetId == null ? -1 : e.rallyTargetId);
@@ -91,11 +112,9 @@ function detEntityHash(e){
   h = detMix(h, e.gatherX == null ? -2 : e.gatherX); // villager tile claims steer OTHER villagers
   h = detMix(h, e.gatherY == null ? -2 : e.gatherY);
   h = detMix(h, e.explicitAttack ? 1 : 0);
+  h = detMix(h, e.explicitReseed ? 1 : 0);
   h = detMixFloat(h, e.defendX || 0);
   h = detMixFloat(h, e.defendY || 0);
-  h = detMixFloat(h, e.guardX == null ? -1 : e.guardX); // guard flag pins the anchor
-  h = detMixFloat(h, e.guardY == null ? -1 : e.guardY);
-  h = detMix(h, e.guardTargetId == null ? -1 : e.guardTargetId); // escort target
   h = detMix(h, e.savedTask ? 1 : 0);
   h = detMix(h, e.buildBackoffUntil || 0); // AI assigners read this on later ticks
   // Retry/throttle/avoid umbrellas (js/logic.js retryFail/avoidAdd): they
@@ -109,10 +128,21 @@ function detEntityHash(e){
     h = detMixStr(h, k); const a = e.avoid[k];
     h = detMix(h, a.length); for (let i = 0; i < a.length; i++) h = detMix(h, a[i]);
   }
-  h = detMixFloat(h, e.moveGoalX == null ? -1 : e.moveGoalX); // multi-leg move goal
-  h = detMixFloat(h, e.moveGoalY == null ? -1 : e.moveGoalY);
+  // THE exclusive standing order (issueOrder, js/commands.js) — explicit
+  // per-field mix, never key iteration (JSON round-trips reorder keys).
+  if (e.order) {
+    h = detMixStr(h, e.order.kind);
+    h = detMix(h, e.order.id == null ? -1 : e.order.id);
+    h = detMixFloat(h, e.order.x == null ? -1 : e.order.x);
+    h = detMixFloat(h, e.order.y == null ? -1 : e.order.y);
+    // Convoy destination (follow → move conversion on leader death/arrival,
+    // updateFollowOrder) — read on later ticks, so it IS sim state.
+    h = detMix(h, e.order.gx == null ? -1 : e.order.gx);
+    h = detMix(h, e.order.gy == null ? -1 : e.order.gy);
+  } else {
+    h = detMix(h, 0x51a17);
+  }
   h = detMixStr(h, e.prevTask);
-  h = detMix(h, e.siegeSpot ? e.siegeSpot.x * 4096 + e.siegeSpot.y : -1); // cross-unit melee-ring claims
   // Stuck-watchdog watch entry (it force-clears tasks, so WHEN it fires is
   // sim state — see updateStuckWatchdog, js/logic.js).
   h = detMix(h, e.fledBearId == null ? -1 : e.fledBearId); // bear-hunt trigger (js/ai.js reads it)
@@ -125,15 +155,71 @@ function detEntityHash(e){
   h = detMix(h, e.chaseProg ? e.chaseProg.since : -1);
   h = detMix(h, e.chaseProg ? e.chaseProg.id : -2);
   h = detMix(h, e.lastAtkTick == null ? -1 : e.lastAtkTick); // gates stuck-watchdog (js/logic.js)
+  // Proven-unreachable stamp (stall resolver, js/logic.js): gates whether
+  // retaliation and auto-acquire may re-lock that attacker — unhashed, a
+  // diverged stamp changes future targeting invisibly.
+  h = detMix(h, e.unreachUntil || 0);
+  h = detMix(h, e.unreachId == null ? -1 : e.unreachId);
   // Trade cart route (updateTradeCart, js/logic.js): which Markets it shuttles
   // between and which leg it's on decide its pathing and gold delivery on later
   // ticks — unhashed, a diverged route is invisible until it moves gold/position.
   h = detMix(h, e.tradeHomeId == null ? -1 : e.tradeHomeId);
   h = detMix(h, e.tradeDestId == null ? -1 : e.tradeDestId);
   h = detMixStr(h, e.tradePhase);
-  h = detMix(h, e.autoScout ? 1 : 0); // player Auto Scout mode (re-paths each tick, js/logic.js)
   h = detMixStr(h, e.stance);         // combat stance — now mid-game-settable via the HUD (set-stance cmd)
+  h = detMix(h, e.retreatUntil || 0); // AI tactical retreat: gates retaliation/auto-acquire/retasking (js/ai.js, js/logic.js)
+  h = detMix(h, e.lastEnemyHitTick == null ? -1 : e.lastEnemyHitTick); // retreat trigger (enemy-player hits only)
+  h = detMix(h, e.lastMeleeHitTick == null ? -1 : e.lastMeleeHitTick); // ram rider-disembark trigger (melee only)
+  h = detMix(h, e.waveId == null ? -1 : e.waveId); // AI wave membership (casualty-retreat counts it)
+  if (e.possessed) h = detMix(h, 0x9055); // player-steered (the AI skips it); folded only when set
+  h = detMix(h, e.lastDodgeTick || 0); // step-aside pacing (makeWayFor, js/loop.js): gates the next dodge
+  h = detMix(h, e.dodgeCount || 0);   // …and the anti-dance stubbornness (isStubborn)
   return h >>> 0;
+}
+
+// ---- detEntityHash coverage guard (dev/test only — never the hot path) ----
+// detEntityHash's field coverage is maintained BY HAND: a new sim-read entity
+// field nobody folds in here desyncs invisibly (silent until it eventually
+// moves x/y). detEntityCoverageGaps walks live entities and flags any key that
+// is neither hashed nor on the viewer/derived allow-list, so a forgotten field
+// fails a test (tools/behavior-tests.js) instead of a mystery MP desync. When it
+// flags a key: fold it into detEntityHash AND list it in DET_HASHED_KEYS if the
+// sim reads it on a later tick; otherwise add it to DET_UNHASHED_KEYS.
+const DET_HASHED_KEYS = new Set([
+  'id','type','btype','utype','team','x','y','hp','task','target','buildTarget',
+  'garrisonTarget','path','moveT','progress','carrying','carryType','atkCooldown',
+  'gatherCooldown','garrisonedIn','complete','research','leashCooling','atk','range',
+  'speed','carryMax','maxHp','exhausted','trainTick','buildProgress','workTick',
+  'curWorkers','lastWorkers','repairAccum','rallyX','rallyY','rallyTargetId','queue',
+  'garrison','buildQueue','locked','rallyResourceType','gatherX','gatherY',
+  'explicitAttack','explicitReseed','defendX','defendY','savedTask','buildBackoffUntil','retry','avoid',
+  'order','prevTask','fledBearId','stepWait','groupSpeed','stuck','chaseProg',
+  'lastAtkTick','unreachUntil','unreachId','tradeHomeId','tradeDestId','tradePhase','lastDodgeTick','dodgeCount',
+  'stance','retreatUntil','lastEnemyHitTick','lastMeleeHitTick','waveId','possessed','awake','calmSince','spent','faceAng',
+]);
+// Viewer-only, cosmetic, constant-from-type, or derivable from already-hashed
+// state — legitimately NOT hashed:
+const DET_UNHASHED_KEYS = new Set([
+  'fromX','fromY',        // render interpolation anchor (derived from x/path/moveT)
+  'tx','ty',              // creation copy of x/y, not sim-mutated
+  'dir','facing','facingNorth','pendingDir','pendingDirT', // sprite facing (render-only)
+  'female','pressWalk','foodSrc','lastX','lastY','smoothX','smoothY', // cosmetic/render signals
+  'buildTime',            // = BLDGS[btype].buildTime (derived from hashed btype)
+  'food','maxFood',       // huntable/farm food capacity (constant, not sim-mutated)
+  'w','h',                // footprint dims (constant from type)
+  'homeX','homeY',        // animal wander anchor (set once to spawn pos, deterministic)
+  'breathTick','breathX','breathY', // the dragon's flame for the renderers (the sim never reads them)
+]);
+// Entity keys present on live entities that are neither hashed nor allow-listed.
+// Empty array === full coverage. Call from tests, never inside the tick.
+function detEntityCoverageGaps(){
+  const gaps = new Set();
+  for (const e of entities) {
+    for (const k in e) {
+      if (!DET_HASHED_KEYS.has(k) && !DET_UNHASHED_KEYS.has(k)) gaps.add(k);
+    }
+  }
+  return Array.from(gaps).sort();
 }
 
 // Full sim-state checksum for the current tick. Order-sensitive over the
@@ -148,17 +234,16 @@ function simChecksum(){
     h = detMixFloat(h, r.gold); h = detMixFloat(h, r.stone);
     h = detMix(h, r.prepaidFarms || 0);
   }
-  // Global commodity exchange prices (marketPrices, js/core.js) — shared sim
-  // state mutated by execMarketTrade; a diverged price desyncs every future
-  // buy/sell. Guarded for older states without a market.
-  if (typeof marketPrices !== 'undefined' && marketPrices) {
-    h = detMix(h, marketPrices.food); h = detMix(h, marketPrices.wood); h = detMix(h, marketPrices.stone);
-  }
+  // GLOBAL commodity exchange prices (marketPrices, js/core.js) — one shared
+  // table (AoE2), sim state mutated by execMarketTrade; a diverged price
+  // desyncs every future buy/sell.
+  h = detMix(h, marketPrices.food); h = detMix(h, marketPrices.wood); h = detMix(h, marketPrices.stone);
   for (let i = 0; i < projectiles.length; i++) {
     let p = projectiles[i];
     h = detMix(h, p.id);
     h = detMixFloat(h, p.x); h = detMixFloat(h, p.y);
     h = detMixFloat(h, p.tx); h = detMixFloat(h, p.ty);
+    h = detMix(h, p.aimId == null ? -1 : p.aimId); // gaia stray-arrow gate reads it at impact (js/loop.js)
   }
   // Map tiles: terrain + remaining resources are sim state (gather
   // depletion, farm exhaust/reseed rewrite them) — unhashed, a divergent
@@ -173,12 +258,22 @@ function simChecksum(){
   h = detMix(h, nextId);
   h = detMix(h, nextProjectileId);
   // Per-team explored/visible grids (teamExploredGrid, js/core.js): sim state
-  // — tileHiddenForTeam gates villager auto-gather and feeds AI intel, so a
-  // divergent grid steers tasking before it ever moves a position. Fold only
+  // — tileHiddenForTeam gates placement/gather-tasking for EVERY team and
+  // teamVisGrid feeds all spotting (entityVisibleToTeam: acquire/retention
+  // and the AI's whole intel pipeline — information parity), so a divergent
+  // grid steers decisions before it ever moves a position. Fold only
   // the set cells (position- and value-sensitive); the unexplored majority is
   // skipped, so it's cheap early and grows with the front, like the map-res
   // hash above. Tolerate absence for older states.
-  if (typeof teamExploredGrid !== 'undefined' && teamExploredGrid) {
+  // The fog setting is hashed WHEN SET (not as an unconditional 0/1): fog-on
+  // checksums stay byte-comparable across versions (the cross-version
+  // equivalence promise on end.checksum), while a peer disagreement still
+  // trips loudly — the fog-off peer mixes this extra value AND skips the grid
+  // fold the fog-on peer performs.
+  if (window.fogDisabled) h = detMix(h, 0x0F06);
+  // Skipped under All-Visible: the grids are unmaintained (updateTeamVision
+  // early-returns) and every read short-circuits, so they're dead state.
+  if (!window.fogDisabled && typeof teamExploredGrid !== 'undefined' && teamExploredGrid) {
     for (let t = 0; t < teamExploredGrid.length; t++) {
       let g = teamExploredGrid[t];
       if (!g) continue;
@@ -207,12 +302,41 @@ function simChecksum(){
       h = detMix(h, ai.gateBuilt ? 1 : 0);
       h = detMix(h, ai.lastWaveTick == null ? -1 : ai.lastWaveTick);
       h = detMix(h, ai.lastWaveGlobalTick == null ? -1 : ai.lastWaveGlobalTick);
+      h = detMix(h, ai.lastWaveSize || 0);                                  // wave-casualty retreat reads it
+      h = detMix(h, ai.militiaUntil == null ? -1 : ai.militiaUntil);        // civilian-militia window (bell suppression)
       h = detMix(h, ai.savingForAge ? 1 : 0);
       h = detMix(h, ai.lastAgeUpTick == null ? -1 : ai.lastAgeUpTick);
       h = detMix(h, ai.resignScore || 0);
+      // War-state memory: the bell reads lastBaseHitTick EVERY tick and the
+      // under-attack doctrine (walls/eco/garrison-recall) gates on it —
+      // both were unhashed sim state (pre-existing gap; seenWarTick is its
+      // classifier cursor).
+      h = detMix(h, ai.lastBaseHitTick == null ? -1 : ai.lastBaseHitTick);
+      h = detMix(h, ai.seenWarTick == null ? -1 : ai.seenWarTick);
+      // Attacker siege camp: read every decision tick (hold/assault/recall).
+      h = detMix(h, ai.campX == null ? -1 : ai.campX);
+      h = detMix(h, ai.campY == null ? -1 : ai.campY);
+      h = detMix(h, ai.campSince == null ? -1 : ai.campSince);
+      h = detMix(h, ai.campTeam == null ? -1 : ai.campTeam);
+      h = detMix(h, ai.campAssault ? 1 : 0);
+      // Scout bookkeeping steers controlAIScouts/ensureAIScout on later ticks.
+      h = detMix(h, ai.baseSurveyed ? 1 : 0);
+      h = detMix(h, ai.surveyIdx || 0);
+      h = detMix(h, ai.lastScoutTrainTick == null ? -1 : ai.lastScoutTrainTick);
       if (ai.intel) {
+        // Intel MEMORY (information parity): remembered TC coords, contact
+        // memory and the decaying strength table are all read on later
+        // ticks (waves march on them) — every carried field folds in.
+        // unitCounts stays out BY DESIGN: rebuilt before every read within
+        // one updateAI call (derived, never carried — see freshAIIntel).
         h = detMix(h, ai.intel.strength || 0);
         h = detMix(h, ai.intel.tcSeen ? 1 : 0);
+        h = detMix(h, ai.intel.tcX || 0);
+        h = detMix(h, ai.intel.tcY || 0);
+        h = detMix(h, ai.intel.tcTeam == null ? -1 : ai.intel.tcTeam);
+        h = detMix(h, ai.intel.contactX == null ? -1 : ai.intel.contactX);
+        h = detMix(h, ai.intel.contactY == null ? -1 : ai.intel.contactY);
+        h = detMix(h, ai.intel.contactTick == null ? -1 : ai.intel.contactTick);
         for (let u = 0; u < NUM_TEAMS; u++) h = detMix(h, (ai.intel.strengthByTeam && ai.intel.strengthByTeam[u]) || 0);
       }
       if (ai.wallPlan) h = detMix(h, ai.wallPlan.reduce((s, p) => s + (p.done ? 1 : 0), 0));
@@ -223,6 +347,7 @@ function simChecksum(){
     h = detMix(h, allianceOf(t));
     h = detMix(h, defeatedTeams && defeatedTeams[t] ? 1 : 0);
     h = detMix(h, teamAge && teamAge[t] || 0);
+    h = detMix(h, teamTechs && teamTechs[t] || 0);
   }
   return h >>> 0;
 }
@@ -250,6 +375,8 @@ function detStartLog(seed, settings){
 function detRecordCommand(execTick, team, seq, cmd){
   if (DET.log) DET.log.commands.push({ execTick: execTick, team: team, seq: seq, cmd: cmd });
 }
+// Console entry point (no in-code callers by design): paste `detDumpLog()`
+// in devtools to export the seed+command journal for replay/diffing.
 function detDumpLog(){
   return JSON.stringify(DET.log);
 }
@@ -257,24 +384,30 @@ function detDumpLog(){
 // ---- Non-deterministic-math tripwires ----
 // While the sim tick runs in strict mode, any un-migrated call to an engine-
 // defined math function throws immediately with a stack pointing at the
-// offender. Math.random is non-deterministic; Math.hypot is spec'd as an
-// "implementation-dependent approximation" (unlike correctly-rounded
-// Math.sqrt), so it can differ in the last bits across engines and desync —
-// use simHypot() instead. Cosmetic code running outside update() is unaffected.
-const _detRealRandom = Math.random;
-const _detRealHypot = Math.hypot;
+// offender. Math.random is non-deterministic; Math.hypot and the trig
+// functions (sin/cos/tan/atan2) are spec'd as "implementation-dependent
+// approximations" (unlike correctly-rounded Math.sqrt), so they can differ in
+// the last bits across engines and desync — use the sim* replacements instead.
+// Cosmetic code running outside update() is unaffected.
+const _detTrapped = {}; // fn name -> original, captured lazily on first trap install
+const DET_TRAP_FNS = {
+  random: 'simRandom()',
+  hypot:  'simHypot()',
+  sin:    'simSin()',
+  cos:    'simCos()',
+  tan:    'simSin()/simCos()',
+  atan2:  'simAtan2()',
+};
 function detEnterSim(){
   if (!DET.strict) return;
-  Math.random = function(){
-    detExitSim(); // restore before throwing so cosmetic code keeps working after the trap fires
-    throw new Error('DET: Math.random called inside sim tick — migrate this call site to simRandom()');
-  };
-  Math.hypot = function(){
-    detExitSim();
-    throw new Error('DET: Math.hypot called inside sim tick — migrate this call site to simHypot()');
-  };
+  for (let name in DET_TRAP_FNS){
+    if (!(name in _detTrapped)) _detTrapped[name] = Math[name];
+    Math[name] = function(){
+      detExitSim(); // restore before throwing so cosmetic code keeps working after the trap fires
+      throw new Error('DET: Math.' + name + ' called inside sim tick — migrate this call site to ' + DET_TRAP_FNS[name]);
+    };
+  }
 }
 function detExitSim(){
-  Math.random = _detRealRandom;
-  Math.hypot = _detRealHypot;
+  for (let name in _detTrapped) Math[name] = _detTrapped[name];
 }

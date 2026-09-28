@@ -7,7 +7,31 @@ const _treePool = new Map();      // tile key (y*MAP+x) -> tree record
 const _gateProxyPool = new Map(); // gate entity id -> {back, front} proxies
 const _marketProxyPool = new Map(); // market entity id -> per-part proxies (walkable plaza)
 const _farmProxyPool = new Map();   // farm entity id -> flat ground-layer proxy (bed + crops)
+const _tcProxyPool = new Map();     // TC entity id -> {back:keep, front:annex} depth proxies (see below)
+// Behind-building outline candidates, collected AT the dispatch draw call
+// sites so "candidate = exactly what was drawn this frame" (fog/scouted rules
+// inherited for free). Consumed by drawBehindBuildingOutlines().
+const _silUnitScratch = [];
+const _silOccScratch = [];
 let _poolMapSize = -1;
+
+// ---- Building depth PROXIES: THE vocabulary ----
+// Gates/markets/farms/TCs each split into several drawables so units can sort
+// BETWEEN their parts (see the proxy pools above). A proxy carries `entity`
+// (the real building) and, for the multi-part kinds, its own `part`. These
+// three helpers are the only place the proxy type list is spelled — adding a
+// proxy kind means touching PROXY_PARTS and nothing else. A `null` value means
+// "the proxy names its own part"; `undefined` (absent) means "not a proxy".
+const PROXY_PARTS = {
+  gate_back: 'back', gate_door: 'door', gate_front: 'front',
+  tc_back: 'back', tc_front: 'front',
+  market_part: null, farm_part: null,
+};
+function isBuildingProxy(e){ return !!e && PROXY_PARTS[e.type] !== undefined; }
+// The real building behind a drawable — itself, when it isn't a proxy.
+function proxyEntity(e){ return isBuildingProxy(e) ? e.entity : e; }
+// Which part drawBuilding should paint for this drawable (null = the whole building).
+function proxyPart(e){ return isBuildingProxy(e) ? (PROXY_PARTS[e.type] || e.part || null) : null; }
 
 // ---- Flag/post visuals: ONE vocabulary shared by rally points, guard
 // posts and the placement ghost (a rally IS the building's guard flag).
@@ -15,11 +39,14 @@ let _poolMapSize = -1;
 // scratch pools above. All inputs are globals (X, camX/camY, W/H, topH). ----
 const _drawnFlagsScratch = new Set(); // per-frame flag-cluster dedup
 function flagScreen(wx, wy){
-  let p = toIso(wx, wy);
-  return { x: p.ix - camX + W/2, y: p.iy - camY + H/2 + topH };
+  let p = mapToScreen(wx, wy);
+  return { x: p.sx, y: p.sy };
 }
+// White, not gold: these are myTeam's own order flags and gold blended with
+// the yellow team (same reason the selection ring went white).
+const FLAG_COLOR = '#ffffff';
 function drawFlagLine(x1, y1, x2, y2, alpha){
-  X.strokeStyle = '#ffd700';
+  X.strokeStyle = FLAG_COLOR;
   X.globalAlpha = alpha;
   X.lineWidth = 1.5;
   X.setLineDash([4, 4]);
@@ -30,7 +57,7 @@ function drawFlagLine(x1, y1, x2, y2, alpha){
 function drawFlagMarker(x, y, tall){
   let h = tall ? 16 : 12, w = tall ? 10 : 8;
   X.globalAlpha = tall ? 0.9 : 1;
-  X.fillStyle = '#ffd700';
+  X.fillStyle = FLAG_COLOR;
   X.fillRect(x - 1, y - h, 2, h); // pole
   X.beginPath();
   X.moveTo(x + 1, y - h);
@@ -48,7 +75,7 @@ function drawBuildingFootprintOutline(b, alpha){
   let w = b.w || bd.w, h = b.h || bd.h;
   let c = [flagScreen(b.x, b.y), flagScreen(b.x + w, b.y),
            flagScreen(b.x + w, b.y + h), flagScreen(b.x, b.y + h)];
-  X.strokeStyle = '#ffd700';
+  X.strokeStyle = FLAG_COLOR;
   X.globalAlpha = alpha;
   X.lineWidth = 1.5;
   X.setLineDash([4, 4]);
@@ -69,7 +96,7 @@ function buildingCenterScreen(b){
 function render(){
   // Tree-pool keys encode MAP — a different map size would silently alias
   // old records onto wrong tiles, so reset the pools on any size change.
-  if (MAP !== _poolMapSize) { _treePool.clear(); _gateProxyPool.clear(); _marketProxyPool.clear(); _farmProxyPool.clear(); _poolMapSize = MAP; }
+  if (MAP !== _poolMapSize) { _treePool.clear(); _gateProxyPool.clear(); _marketProxyPool.clear(); _farmProxyPool.clear(); _tcProxyPool.clear(); _poolMapSize = MAP; }
   // Black background so unexplored fog (drawTile() skips drawing when
   // fog===0) and the area beyond the map edge both read as true black,
   // matching AoE2 rather than showing a dark-green "explored" tint.
@@ -82,6 +109,8 @@ function render(){
   // tile-drawing loop below indexes map[y][x] assuming a fully populated
   // MAP x MAP grid, so bail out before that rather than crash.
   if (map.length === 0) return;
+  // The 3D view is the world view (js/pov3d.js): the 2D map isn't drawn under it; the minimap still is.
+  if (window.world3D) { drawMinimap(); return; }
 
   // Viewport culling: calculate visible map tile range
   let p1 = screenToMap(0, 0);
@@ -95,10 +124,12 @@ function render(){
   let maxY = Math.min(MAP - 1, Math.ceil(Math.max(p1.y, p2.y, p3.y, p4.y)) + 2);
   
   X.save();
-  // Center zoom scale around viewport camera center
-  X.translate(Math.round(W/2), Math.round(H/2 + topH));
+  // Zoom scale about THE shared anchor (zoomAnchor, js/iso.js — same one
+  // screenToMap inverts and setZoomAroundPoint solves against)
+  {const {ax, ay} = zoomAnchor();
+  X.translate(ax, ay);
   X.scale(ZOOM, ZOOM);
-  X.translate(-Math.round(W/2), -Math.round(H/2 + topH));
+  X.translate(-ax, -ay);}
 
   // Draw ground tiles (only visible ones)
   for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++)drawTile(x,y);
@@ -146,10 +177,12 @@ function render(){
       let prox = _gateProxyPool.get(en.id);
       if(!prox){
         prox = { back: {type:'gate_back', entity:en, x:0, y:0, sortVal:0},
+                 door: {type:'gate_door', entity:en, x:0, y:0, sortVal:0},
                  front:{type:'gate_front', entity:en, x:0, y:0, sortVal:0} };
         _gateProxyPool.set(en.id, prox);
       }
-      prox.back.entity = en; prox.front.entity = en;
+      let gn = Math.max(en.w, en.h);
+      prox.back.entity = en; prox.door.entity = en; prox.front.entity = en;
       prox.back.x = en.x; prox.back.y = en.y;
       prox.back.sortVal = en.y + en.x + 0.1;
       prox.front.x = wallLineNS ? en.x : en.x + 1;
@@ -159,7 +192,18 @@ function render(){
       // must draw over it (it's closer to the viewer). Units a full tile
       // nearer still sort higher and correctly draw over the gate.
       prox.front.sortVal = (wallLineNS ? en.y + 1 : en.y) + (wallLineNS ? en.x : en.x + 1) + 0.3;
+      // The CLOSED door spans the archway, so it sorts at the run's CENTRE
+      // (not the origin like the back post) — otherwise a unit on the far
+      // side sorted ABOVE the origin-anchored door and drew in front of it.
+      // +0.2 seats it between the two posts (behind the near/front post).
+      // As it OPENS it slides up out of the way, so its depth eases back to
+      // the origin band (behind passing units) — otherwise the raised slab
+      // ghosted the head of a unit walking through the open archway.
+      prox.door.x = en.x; prox.door.y = en.y;
+      let gp = en.gateProgress || 0;
+      prox.door.sortVal = en.y + en.x + (1 - gp) * ((gn - 1) / 2 + 0.2) + gp * 0.15;
       allDrawable.push(prox.back);
+      allDrawable.push(prox.door);
       allDrawable.push(prox.front);
     } else if (en.type === 'building' && en.btype === 'MARKET' && en.complete) {
       // Walkable plaza: one proxy per part so units sort BETWEEN the stalls.
@@ -201,10 +245,37 @@ function render(){
       prox.ground.x = en.x; prox.ground.y = en.y;
       prox.ground.sortVal = en.y + en.x + 0.05 - 1000;
       allDrawable.push(prox.ground);
+    } else if (en.type === 'building' && en.btype === 'TC') {
+      // The keep tower rises from the footprint's BACK while its annex-roof
+      // eaves reach toward the viewer — a single depth anchor can't put a
+      // unit "under the tent yet in front of the keep block". Two proxies:
+      // BASE (foundation + keep tower + support posts) anchored a tile BACK
+      // of centre so a unit on the near half of the footprint draws over it;
+      // the ROOFS (both tent canopies + banner) anchored well FORWARD — past
+      // the tents' own front eaves — so the whole canopy reads as ABOVE any
+      // unit sheltering under it, not partially behind. null (outline/ghost/
+      // minimap) still draws the whole building.
+      let prox = _tcProxyPool.get(en.id);
+      if(!prox){
+        prox = { back: {type:'tc_back', entity:en, x:0, y:0, sortVal:0},
+                 front:{type:'tc_front', entity:en, x:0, y:0, sortVal:0} };
+        _tcProxyPool.set(en.id, prox);
+      }
+      let cSum = en.y + (en.h||1)/2 + en.x + (en.w||1)/2; // footprint-centre anchor
+      prox.back.entity = en;  prox.back.x = en.x; prox.back.y = en.y;
+      prox.back.sortVal = cSum - 1;
+      prox.front.entity = en; prox.front.x = en.x; prox.front.y = en.y;
+      prox.front.sortVal = cSum + 2.5; // past the tent front eaves (~+1.4 tiles)
+      allDrawable.push(prox.back);
+      allDrawable.push(prox.front);
     } else {
       let sortVal;
       if (en.type === 'building') {
-        sortVal = en.y + (en.h || 1) / 2 + en.x + (en.w || 1) / 2;
+        // True footprint-CENTER tile (origin + (w-1)/2, (h-1)/2). The naive
+        // corner+(w+h)/2 overshoots forward by a full tile, so units hugging a
+        // small building's front-side edge sorted BEHIND it (drawn under the
+        // roof, then wrongly outlined) instead of in front.
+        sortVal = en.y + en.x + ((en.h || 1) + (en.w || 1)) / 2 - 1;
       } else {
         if (en.utype === 'sheep_carcass') sortVal = en.y + en.x + 0.05;
         else sortVal = en.y + en.x + 0.25;
@@ -240,22 +311,23 @@ function render(){
   X.fillStyle = 'rgba(0,0,0,0.16)';
   X.beginPath();
   allDrawable.forEach(e => {
-    if (e.type !== 'building' && e.type !== 'gate_back') return;
-    let be = e.type === 'gate_back' ? e.entity : e;
+    if (e.type !== 'building' && e.type !== 'gate_back' && e.type !== 'tc_back') return;
+    let be = proxyEntity(e);
     let f = buildingFogLevel(be);
     if (f === 0) return;
-    if (f === 1 && be.team !== myTeam && !scoutedByMe.has(be.id)) return;
+    if (f === 1 && !sameSide(be.team, myTeam) && !scoutedByMe.has(be.id)) return;
     buildingShadowPath(be);
   });
   X.fill();
 
+  _silUnitScratch.length = 0; _silOccScratch.length = 0;
   allDrawable.forEach(e=>{
     // Fog of War checks for entities
     let ex = Math.round(e.x), ey = Math.round(e.y);
     let f;
     if (e.type === 'building') {
       f = buildingFogLevel(e);
-    } else if (e.type === 'gate_back' || e.type === 'gate_front' || e.type === 'market_part' || e.type === 'farm_part') {
+    } else if (isBuildingProxy(e)) {
       f = buildingFogLevel(e.entity);
     } else {
       f = (fog[ey] && fog[ey][ex] !== undefined) ? fog[ey][ex] : 0;
@@ -266,13 +338,13 @@ function render(){
     // scoutedByMe. Cosmetic/local (fog is per-viewer); corpses are excluded
     // from the sim checksum, so this never affects lockstep.
     if (e.type === 'corpse' && f === 2) e.seen = true;
-    // Resolve the actual entity and team for gate proxy objects
-    let realEntity = (e.type === 'gate_back' || e.type === 'gate_front' || e.type === 'market_part' || e.type === 'farm_part') ? e.entity : e;
+    // Resolve the actual entity and team behind a depth proxy
+    let realEntity = proxyEntity(e);
     let eTeam = realEntity ? realEntity.team : e.team;
     // scoutedByMe (js/core.js) is maintained by markScoutedBuildings() on
     // both host (js/loop.js) and guest (js/net-sync.js) — render only READS
     // it; it must not write to saved state.
-    if (f === 1 && eTeam !== myTeam) {
+    if (f === 1 && !sameSide(eTeam, myTeam)) {
       // explored but not visible: live enemy units are never shown, and
       // buildings only if previously scouted. A corpse shows if we WITNESSED it
       // (seen) so it finishes decaying on the map after we leave — but one that
@@ -282,15 +354,36 @@ function render(){
       if (realEntity && realEntity.type === 'building' && !scoutedByMe.has(realEntity.id)) return;
     }
 
-    if(e.type==='building') drawBuilding(e);
-    else if(e.type==='gate_back') drawBuilding(e.entity, 'back');
-    else if(e.type==='gate_front') drawBuilding(e.entity, 'front');
-    else if(e.type==='market_part') drawBuilding(e.entity, e.part);
-    else if(e.type==='farm_part') drawBuilding(e.entity, e.part);
+    if(e.type==='building'){
+      drawBuilding(e);
+      _silOccScratch.push(e); // foundations occlude too — a near-built (opaque) building hides units; outline them
+    }
+    else if(e.type==='gate_back'){ drawBuilding(e.entity, 'back'); _silOccScratch.push(e); }
+    else if(e.type==='gate_door'){ drawBuilding(e.entity, 'door'); _silOccScratch.push(e); }
+    else if(e.type==='gate_front'){ drawBuilding(e.entity, 'front'); _silOccScratch.push(e); }
+    else if(e.type==='tc_back'){ drawBuilding(e.entity, 'back'); _silOccScratch.push(e); }
+    // Both parts cast silhouettes: a unit walking under the tent canopy is
+    // genuinely hidden by it, so it should ghost through. The intersection is
+    // exact (only roof-covered pixels), and the foreground punch-out keeps a
+    // unit that poked out below the eave (drawn in front) from being tinted.
+    else if(e.type==='tc_front'){ drawBuilding(e.entity, 'front'); _silOccScratch.push(e); }
+    else if(e.type==='market_part'){
+      drawBuilding(e.entity, e.part);
+      if(e.part!=='ground') _silOccScratch.push(e); // plaza ground sits in the -1000 band, never occludes
+    }
+    else if(e.type==='farm_part') drawBuilding(e.entity, e.part); // flat — never occludes
     else if(e.type==='corpse') drawCorpse(e);
-    else if(e.type==='tree') drawTreeEntity(e.x, e.y);
-    else drawUnit(e);
+    else if(e.type==='tree'){ drawTreeEntity(e.x, e.y); _silOccScratch.push(e); } // trees occlude units too (AoE2)
+    else {
+      drawUnit(e);
+      if(!e.garrisonedIn && e.utype!=='sheep_carcass') _silUnitScratch.push(e);
+    }
   });
+
+  // Behind-building team-color outlines, before drawOutlines so the selection
+  // ring paints on top. Same active-ZOOM-transform requirement. Cached:
+  // recomputed on alternate frames, delta-blitted between (see the wrapper).
+  drawBehindBuildingOutlinesCached(_silUnitScratch, _silOccScratch);
 
   // Selection outlines (units + buildings), in their own pass after every
   // entity has painted for the frame — see drawOutlines() for why this
@@ -303,6 +396,22 @@ function render(){
   drawParticles();   // Draw fire/dust/blood particles
   drawGhost();
 
+  drawOrderOverlays();
+
+  X.restore();
+
+  drawSelection();
+
+
+  drawMinimap();
+}
+
+// Order overlays: rally and guard flags with their lines, the flag-placement
+// ghost, garrison boarding lines, right-click command markers. Drawn into X via
+// mapToScreen — the 2D map calls it inside its zoom transform; the 3D view
+// (js/pov3d.js) calls it on its overlay canvas with mapToScreen projecting
+// through the 3D camera, so both views show the same overlays from one code path.
+function drawOrderOverlays(){
   // Just-clicked flag PREVIEWS (issuer-side, cosmetic): rally/guard
   // commands execute INPUT_DELAY_TICKS after the click, and the planted
   // flag would render at the STALE spot for those frames — a flicker-and-
@@ -330,9 +439,7 @@ function render(){
     }
   }
 
-  // Selected units' GUARD posts — EXPLICIT flags only (guardFlagged):
-  // implicit posts from plain moves and rally spawns behave the same but
-  // stay invisible; a move order must not look like it planted a flag.
+  // Selected units' GUARD-family ORDERS (every guard order is explicit).
   // One faint line per guarding unit; flags dedupe into 2-tile clusters so
   // a formation reads as a shared post instead of a picket fence. Hidden
   // while RE-placing (settingGuard): old flags deactivate, only the cursor
@@ -353,14 +460,15 @@ function render(){
         if (!drawnFlags.has(key)) { drawnFlags.add(key); drawFlagMarker(to.x, to.y, false); }
         return;
       }
-      if (u.guardX == null || !u.guardFlagged) return;
+      let uo = u.order;
+      if (!uo || !(uo.kind === 'guard' || uo.kind === 'guardBuilding' || uo.kind === 'escort')) return;
       let from = flagScreen(u.x, u.y);
       // Guarding a BUILDING: outline the whole footprint and draw the line to
       // its center, instead of a flag at the single perimeter post tile — the
       // post IS the building (see the footprint leash in js/logic.js). Ground
-      // posts and escorts (guardTargetId is a unit, or none) keep the flag.
-      let gb = u.guardTargetId != null ? entitiesById.get(u.guardTargetId) : null;
-      if (gb && gb.type === 'building') {
+      // posts and escorts keep the flag.
+      let gb = (uo.kind === 'guardBuilding' || uo.kind === 'escort') ? entitiesById.get(uo.id) : null;
+      if (uo.kind === 'guardBuilding' && gb && gb.type === 'building') {
         let key = 'b' + gb.id;
         if (!drawnFlags.has(key)) drawBuildingFootprintOutline(gb, 0.7); // once per building
         drawnFlags.add(key);
@@ -368,7 +476,7 @@ function render(){
         drawFlagLine(from.x, from.y, to.x, to.y, 0.55);
         return;
       }
-      if (gb && gb.type === 'unit') {
+      if (uo.kind === 'escort' && gb && gb.type === 'unit') {
         // ESCORT: track the guarded unit's LIVE position (same source as its
         // sprite) so the flag follows it smoothly. Reading guardX/guardY here
         // instead lagged it — that field only re-syncs on sim ticks (and is
@@ -380,14 +488,29 @@ function render(){
         if (!drawnFlags.has(key)) { drawnFlags.add(key); drawFlagMarker(to.x, to.y, false); }
         return;
       }
-      let to = flagScreen(u.guardX + 0.5, u.guardY + 0.5);
+      if (uo.x == null) return; // escort whose escortee vanished mid-frame
+      let to = flagScreen(uo.x + 0.5, uo.y + 0.5);
       drawFlagLine(from.x, from.y, to.x, to.y, 0.55);
-      let key = Math.round(u.guardX / 2) + '_' + Math.round(u.guardY / 2);
+      let key = Math.round(uo.x / 2) + '_' + Math.round(uo.y / 2);
       if (!drawnFlags.has(key)) {
         drawnFlags.add(key);
         drawFlagMarker(to.x, to.y, false);
       }
     });
+  }
+
+  // Garrison-boarding lines: an own unit walking INTO a ram (AoE2 garrison-rams)
+  // traces a white dashed line to it, so you see who's boarding + their route as
+  // it loads. Ram-only for now — TC/tower garrison is hidden (see js/ui.js); to
+  // bring it back, widen this to `garrisonCap(c)<=0` and aim at buildingCenterScreen
+  // for buildings.
+  for (let i = 0; i < entities.length; i++) {
+    let u = entities[i];
+    if (u.type !== 'unit' || u.team !== myTeam || u.task !== 'garrison' || u.garrisonedIn) continue;
+    let c = u.garrisonTarget != null ? entitiesById.get(u.garrisonTarget) : null;
+    if (!c || c.utype !== 'ram') continue;
+    let from = flagScreen(u.x, u.y), to = flagScreen(c.x, c.y);
+    drawFlagLine(from.x, from.y, to.x, to.y, 0.55);
   }
 
   // Flag placement GHOST — armed by EITHER the Guard button (units) or the
@@ -422,11 +545,10 @@ function render(){
   }
 
   // Draw command markers (AoE2-style right-click feedback)
-  cmdMarkers=cmdMarkers.filter(m=>tick-m.time<30);
+  cmdMarkers=cmdMarkers.filter(m=>tick-m.time<TPS);
   cmdMarkers.forEach(m=>{
-    let iso=toIso(m.x+0.5,m.y+0.5);
-    let sx=iso.ix-camX+W/2, sy=iso.iy-camY+topH+H/2;
-    let age=(tick-m.time)/30;
+    let {sx, sy} = mapToScreen(m.x+0.5, m.y+0.5);
+    let age=(tick-m.time)/TPS; // marker fades over 1 game-second
     X.globalAlpha=1-age;
     X.strokeStyle=m.color;X.lineWidth=2;
     // Cross marker
@@ -437,11 +559,4 @@ function render(){
     X.beginPath();X.arc(sx,sy,sz+4,0,Math.PI*2);X.stroke();
     X.globalAlpha=1;
   });
-
-  X.restore();
-
-  drawSelection();
-
-
-  drawMinimap();
 }

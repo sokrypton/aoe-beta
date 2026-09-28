@@ -18,8 +18,8 @@ function isOffscreen(sx, sy, margin){
 //   1 = some explored but none currently visible (draw with shadow)
 //   2 = at least one tile actively visible (draw normally)
 // Memoized per building until the fog actually changes (updateFog in
-// js/core.js calls invalidateBuildingFogMemo) — the w×h tile scan used to
-// re-run 2-3× per building per FRAME (render collect + draw loops, outline
+// js/core.js calls invalidateBuildingFogMemo) — otherwise the w×h tile scan
+// re-runs 2-3× per building per FRAME (render collect + draw loops, outline
 // extent, minimap), pure waste since fog only mutates once per tick.
 let _bflMemo = new Map();
 function invalidateBuildingFogMemo(){ _bflMemo.clear(); }
@@ -40,24 +40,9 @@ function buildingFogLevel(e) {
   return maxF;
 }
 
-function drawTile(x,y){
-  let f = fog[y] && fog[y][x];
-  if (f === 0) return; // unexplored (completely black)
-
-  let iso=toIso(x,y);
-  let sx=Math.round(iso.ix-camX+W/2), sy=Math.round(iso.iy-camY+topH+H/2);
-  if(isOffscreen(sx,sy,TW*2))return;
-  let t=map[y][x];
-  let cols=TCOL[t.t]||TCOL[0];
-  let col=cols[(x*7+y*13)%cols.length];
-
-  X.fillStyle=col;
-  X.beginPath();
-  X.moveTo(sx,sy);X.lineTo(sx+HALF_TW,sy+HALF_TH);
-  X.lineTo(sx,sy+TH);X.lineTo(sx-HALF_TW,sy+HALF_TH);
-  X.closePath();X.fill();
-  let cy=sy+HALF_TH;
-
+// The gold / stone / berry art standing on a tile, ground point (sx, cy).
+// Shared by the map (drawTile) and the 3D eye view's billboards (js/pov3d.js).
+function drawTileResource(t, x, y, sx, cy){
   // Faceted 3D boulder — a low-poly rock spire with a bright top facet, a
   // lit left face, and a shadowed right face, instead of a flat painted
   // dome. The apex sits well above the ground-contact point so, like the
@@ -127,7 +112,7 @@ function drawTile(x,y){
   if(t.t===TERRAIN.STONE){
     // Same discrete quarrying states as the gold vein above.
     let pct=Math.min(t.res/350,1);
-    let gy=cy-8; // centered on the tile, matching gold — was bottom-heavy
+    let gy=cy-8; // centered on the tile, matching gold
     // Granite cluster: two flanking boulders, one tall central spire
     if(pct>0.66) boulder(sx-9, gy+5, 6, '#b0b0b0', '#8c8c8c', '#686868');
     else rubble(sx-9, gy+7, '#9d9d9d', '#767678');
@@ -190,6 +175,27 @@ function drawTile(x,y){
       X.fillStyle='#ff99a8';X.beginPath();X.arc(bx-0.7,by-0.7,0.85,0,Math.PI*2);X.fill(); // shiny glint
     }
   }
+}
+
+function drawTile(x,y){
+  let f = fog[y] && fog[y][x];
+  if (f === 0) return; // unexplored (completely black)
+
+  let p=mapToScreen(x,y);
+  let sx=Math.round(p.sx), sy=Math.round(p.sy);
+  if(isOffscreen(sx,sy,TW*2))return;
+  let t=map[y][x];
+  let cols=TCOL[t.t]||TCOL[0];
+  let col=cols[(x*7+y*13)%cols.length];
+
+  X.fillStyle=col;
+  X.beginPath();
+  X.moveTo(sx,sy);X.lineTo(sx+HALF_TW,sy+HALF_TH);
+  X.lineTo(sx,sy+TH);X.lineTo(sx-HALF_TW,sy+HALF_TH);
+  X.closePath();X.fill();
+  let cy=sy+HALF_TH;
+
+  drawTileResource(t, x, y, sx, cy);
 
   // Draw fog of war overlay to darken the tile and its static resources
   if (f === 1) {
@@ -288,12 +294,38 @@ function drawFullTreeBody(sx, cy, s, darken = false) {
   });
 }
 
+// Tree-body art cache: re-running drawFullTreeBody (22 fills) per tree per frame
+// was the top render cost (a forest = hundreds of trees, redrawn again into the
+// behind-occluder clip mask). The body is static per (size-variant, darken), so
+// render it ONCE into an offscreen canvas and blit it — sway/fall stay a cheap
+// rotate around the blit. Cached at ceil(ZOOM*dpr) resolution (dpr is baked into
+// the main ctx, core.js) so the raster has ≥1 texel per on-screen pixel (crisp at
+// any zoom); only ~5 size × 2 darken × a couple zoom buckets ever exist, so no
+// eviction. Anchor (ax,ay) is where the tree's (sx,cy) lands in the canvas.
+// Render-only — no determinism impact.
+const _treeArtCache = new Map();
+function _treeArt(idx, s, darken, scale){
+  const key = idx + ':' + (darken?1:0) + ':' + scale;
+  let a = _treeArtCache.get(key);
+  if(a) return a;
+  const halfW = 18*s + 4, above = 38*s + 4, below = 2*s + 4; // drawFullTreeBody extent about (sx,cy)
+  const wL = 2*halfW, hL = above + below;
+  const cv = document.createElement('canvas');
+  cv.width = Math.ceil(wL*scale); cv.height = Math.ceil(hL*scale);
+  const cx = cv.getContext('2d');
+  cx.scale(scale, scale);
+  const sv = X; X = cx;
+  try { drawFullTreeBody(halfW, above, s, darken); } finally { X = sv; }
+  a = { canvas: cv, ax: halfW, ay: above, wL, hL };
+  _treeArtCache.set(key, a);
+  return a;
+}
 function drawTreeEntity(x,y){
   let f = fog[y] && fog[y][x];
   if (f === 0) return; // unexplored (black)
 
-  let iso=toIso(x,y);
-  let sx=Math.round(iso.ix-camX+W/2), sy=Math.round(iso.iy-camY+topH+H/2);
+  let p=mapToScreen(x,y);
+  let sx=Math.round(p.sx), sy=Math.round(p.sy);
   let cy=sy+HALF_TH;
   let t=map[y][x];
   if(!t || t.res<=0) return;
@@ -305,9 +337,9 @@ function drawTreeEntity(x,y){
   // 2. Dynamic Wind Sway — frozen in shroud (static snapshot when out of sight)
   let totalSway = 0;
   if (f === 2) {
-    let windPhase = tick * 0.015 + x * 0.45 + y * 0.35;
+    let windPhase = animTick * 0.015 + x * 0.45 + y * 0.35;
     let sway = Math.sin(windPhase) * 0.035;
-    let gust = Math.max(0, Math.sin(tick * 0.004 - (x + y) * 0.07) - 0.4) * 0.16;
+    let gust = Math.max(0, Math.sin(animTick * 0.004 - (x + y) * 0.07) - 0.4) * 0.16;
     totalSway = sway + gust;
   }
 
@@ -324,9 +356,9 @@ function drawTreeEntity(x,y){
   let fellTick = treeFellTicks.get(fellKey);
   if(f === 2 && fellTick !== undefined && fellTick > 0){
     let dt = tick - fellTick;
-    if(dt < 40){
+    if(dt < T30(40)){
       isFalling = true;
-      let progress = dt / 40;
+      let progress = dt / T30(40);
       fallAngle = progress * (Math.PI / 2.15); // Fall sideways
     }
   }
@@ -334,12 +366,14 @@ function drawTreeEntity(x,y){
   let darken = (f === 1);
 
   if(t.res > 60 || isFalling){
-    // Stage 1: Standing or falling full tree
+    // Stage 1: Standing or falling full tree — blit the cached body, sway/fall
+    // as a rotate about (sx,cy). Cache at ceil(ZOOM*dpr) so it stays crisp.
+    let idx = (x * 17 + y * 23) % 5;
+    let art = _treeArt(idx, s, darken, Math.max(1, Math.ceil(ZOOM*dpr))); // dpr: match the main ctx scale (core.js) for crisp edges
     X.save();
     X.translate(sx, cy);
     X.rotate(totalSway + fallAngle);
-    X.translate(-sx, -cy);
-    drawFullTreeBody(sx, cy, s, darken);
+    X.drawImage(art.canvas, -art.ax, -art.ay, art.wL, art.hL);
     X.restore();
   } else if(t.res > 20){
     // Stage 2: Standing stump AND fallen tree lying on the ground
@@ -381,7 +415,10 @@ function drawWallLink(sx, sy, dx, dy, wallH, darken=false, d1=5, d2=5, colorL=nu
 
   // Default palette by material: palisade wood (Dark age WALL/GATE) or the
   // stone greys (Feudal SWALL/SGATE — the original Stone Wall palette).
-  let pal = mat === 'stone'
+  // 'stonef' = FORTIFIED stone (the Fortified Wall tech tell): same
+  // masonry plus crenellation merlons on the walkway below.
+  let stone = mat === 'stone' || mat === 'stonef';
+  let pal = stone
     ? { a: '#aca392', b: '#cfc8b6', top: '#b7ad97' }
     : { a: WOOD.R, b: WOOD.L, top: WOOD.top }; // shared timber palette (render-buildings.js)
   let fillL = colorL || (isAlongIsoY ? pal.a : pal.b);
@@ -416,7 +453,7 @@ function drawWallLink(sx, sy, dx, dy, wallH, darken=false, d1=5, d2=5, colorL=nu
   // Stone masonry texture: horizontal course lines with staggered vertical
   // joints (light strokes per the seam-weight convention — hard black is
   // reserved for silhouettes)
-  if (mat === 'stone' && !colorL) {
+  if (stone && !colorL) {
     X.save();
     X.strokeStyle='rgba(0,0,0,0.13)';X.lineWidth=1;
     let courses = 3;
@@ -457,6 +494,30 @@ function drawWallLink(sx, sy, dx, dy, wallH, darken=false, d1=5, d2=5, colorL=nu
   X.lineTo(nex + px, ney + py - wallH);
   X.lineTo(nex - px, ney - py - wallH);
   X.closePath(); X.fill(); X.stroke();
+
+  // Fortified crenellation: two mini merlons riding the walkway, built
+  // from the link's own face math (side at +px/+py, cap full thickness)
+  // so they read as the wall's masonry continuing upward. Caps keep the
+  // walkway's team color (ownership read).
+  if (mat === 'stonef') {
+    const mh = 4, w = 3.2;
+    for (let t of [0.3, 0.7]) {
+      let cxm = nsx + (nex - nsx) * t, cym = nsy + (ney - nsy) * t;
+      let ax2 = ux * w, ay2 = uy * w;
+      X.fillStyle = fillL; X.beginPath();
+      X.moveTo(cxm - ax2 + px, cym - ay2 + py - wallH);
+      X.lineTo(cxm + ax2 + px, cym + ay2 + py - wallH);
+      X.lineTo(cxm + ax2 + px, cym + ay2 + py - wallH - mh);
+      X.lineTo(cxm - ax2 + px, cym - ay2 + py - wallH - mh);
+      X.closePath(); X.fill(); X.stroke();
+      X.fillStyle = fillTop; X.beginPath();
+      X.moveTo(cxm - ax2 - px, cym - ay2 - py - wallH - mh);
+      X.lineTo(cxm - ax2 + px, cym - ay2 + py - wallH - mh);
+      X.lineTo(cxm + ax2 + px, cym + ay2 + py - wallH - mh);
+      X.lineTo(cxm + ax2 - px, cym + ay2 - py - wallH - mh);
+      X.closePath(); X.fill(); X.stroke();
+    }
+  }
 
   // 3. End cap face — closes the cut end exposed when d1/d2 trims the
   // link back from its endpoint (e.g. the gate door not reaching its post).

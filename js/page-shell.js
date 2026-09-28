@@ -1,4 +1,12 @@
 // Shared page markup for BOTH index.html (mobile skin) and classic.html.
+
+// ---- Tiny DOM helpers (page-shell loads first, so every file can use them) ----
+// THE show/hide idiom: null-safe, '' restores the stylesheet's display.
+function byId(id){ return document.getElementById(id); }
+function show(idOrEl, visible, mode){
+  let el = typeof idOrEl === 'string' ? byId(idOrEl) : idOrEl;
+  if (el) el.style.display = visible ? (mode || '') : 'none';
+}
 // The two pages used to be near-identical 292-line copies and had already
 // drifted; now each is a thin shell that sets window.UI_VARIANT and loads
 // this file, which injects the one true copy of the HUD/menus/overlays.
@@ -28,6 +36,9 @@ window.SPRITE_CELLS = {
   // Row 1: cavalry / siege / trade / gaia.
   scout:[0,1], 'scout-castle':[1,1], knight:[2,1], ram:[3,1], tradecart:[4,1],
   sheep:[5,1], bear:[6,1], pop:[7,1],
+  // A sheep carcass is a pile of food, so its HUD icon reuses the food (raw
+  // meat) resource cell [3,4] rather than getting its own drawn cell.
+  sheep_carcass:[3,4],
   // ---- row 2: town / economy buildings (TC age progression first).
   'TC-dark':[0,2], 'TC-feudal':[1,2], 'TC-castle':[2,2], HOUSE:[3,2], MILL:[4,2],
   FARM:[5,2], LCAMP:[6,2], MCAMP:[7,2],
@@ -52,18 +63,48 @@ window.SPRITE_CELLS = {
   // CSS + shared sprite-icon class cover both skins.
   'stance-aggressive':[3,7], 'stance-defensive':[4,7],
   'stance-standground':[5,7], 'stance-passive':[6,7],
-  // ---- free slots for future icons.
-  spare1:[7,4], spare9:[7,7],
+  // ---- garrison in/out glyphs (gate + directional arrow): load into / release
+  // from a container (ram Garrison / Ungarrison buttons, js/ui.js).
+  'garrison-in':[7,4], 'garrison-out':[7,7],
+  // ---- rows 8-10 (sheet grown 8x8 -> 8x10 -> 8x11): the research/tech icons as
+  // FULL cells (`up-<techkey>`), grouped by host building (keep in sync with
+  // expand-sprites.py + BLDGS.researches). Shown as .research-tile icons — on the
+  // parchment scroll (mobile) or plain command buttons (classic). Row 9 cols 6-7
+  // hold the scroll roll caps (scroll-roll, scroll-roll-h); rows 8-9 filled up, so
+  // Bodkin Arrow opens row 10 (cols 3-7 spare — draw there before growing again).
+  'up-forging':[0,8], 'up-iron_casting':[1,8], 'up-scale_armor':[2,8], 'up-chain_mail':[3,8],
+  'up-fletching':[4,8], 'up-masonry':[5,8], 'up-fortified_wall':[6,8], 'up-horse_collar':[7,8],
+  'up-heavy_plow':[0,9], 'up-double_bit_axe':[1,9], 'up-bow_saw':[2,9], 'up-gold_mining':[3,9],
+  'up-guilds':[4,9], 'up-wheelbarrow':[5,9], 'up-bodkin_arrow':[0,10], 'up-ballistics':[1,10],
+  // the map's dragon (gaia): its 2D art rendered into the cell (drawDragonBody)
+  dragon:[2,10],
+  // research SCROLL roll caps (baked from scroll-ui.png): a vertical-cylinder roll
+  // for the horizontal bottom-bar band (L/R caps, right one mirrored), and the
+  // same roll rotated 90° for the vertical rail band (top/bottom caps). The paper
+  // between them is a plain CSS gradient (matches the sprite's rgb 240,223,197),
+  // so no paper cell is needed. Replaces the standalone scroll PNGs.
+  'scroll-roll':[6,9], 'scroll-roll-h':[7,9],
 };
+// Sheet grid: 8 columns x 11 rows of 256px cells. background-size scales the
+// sheet so one cell fills the element, so position is a fraction col/(COLS-1),
+// row/(ROWS-1) — i.e. EVERY cell's position shifts when a row is added.
+// Growing the sheet must therefore change nothing but these two numbers, so the
+// derived values are published as custom properties: --sprite-bg-size plus one
+// --cell-<key> per cell. CSS that can't carry an .icon-<key> class (::before /
+// ::after, e.g. the research scroll's roll caps) uses var(--cell-<key>) and
+// never a literal percentage.
+const SHEET_COLS = 8, SHEET_ROWS = 11;
 (function(){
-  let css = '';
+  let vars = `--sprite-bg-size:${SHEET_COLS * 100}% ${SHEET_ROWS * 100}%;`, rules = '';
   for (const k in SPRITE_CELLS) {
     const cell = SPRITE_CELLS[k];
-    css += `.icon-${k}{background-position:${(cell[0]/7*100).toFixed(4)}% ${(cell[1]/7*100).toFixed(4)}%;}\n`;
+    const pos = `${(cell[0]/(SHEET_COLS-1)*100).toFixed(4)}% ${(cell[1]/(SHEET_ROWS-1)*100).toFixed(4)}%`;
+    vars += `--cell-${k}:${pos};`;
+    rules += `.icon-${k}{background-position:${pos};}\n`;
   }
   const st = document.createElement('style');
   st.id = 'sprite-cells';
-  st.textContent = css;
+  st.textContent = `:root{${vars}}\n${rules}`;
   document.head.appendChild(st);
 })();
 
@@ -71,6 +112,11 @@ window.SPRITE_CELLS = {
 const variant = window.UI_VARIANT || 'mobile';
 
 const SWITCH_LABEL = variant === 'classic' ? '📱 Switch to Mobile UI' : '🏰 Switch to Classic UI';
+
+// Legal + provenance line shown under the main menu (the dark backdrop).
+const DISCLAIMER_HTML = `A free, open-source fan game — not affiliated with Microsoft, Xbox Game
+  Studios, Ensemble Studios, or the Age of Empires franchise. Feedback welcome via
+  <a href="https://github.com/sokrypton/aoe" target="_blank" rel="noopener">GitHub</a>.`;
 
 // Desktop controls differ per skin: classic keeps the AoE2 left-select /
 // right-command contract; the mobile skin uses the TAP model on desktop
@@ -114,7 +160,7 @@ document.body.insertAdjacentHTML('afterbegin', `
        placement). Mobile keeps HP inline in #sel-details and hides this. -->
   <div id="sel-hp"></div>
   <div id="sel-stats">
-    <div id="sel-name">Age of Epochs II</div>
+    <div id="sel-name">Age of Epochs</div>
     <div id="sel-details">Tap to select, then tap map to command</div>
   </div>
   <div id="sel-grid"></div>
@@ -127,6 +173,7 @@ document.body.insertAdjacentHTML('afterbegin', `
 <div id="minimap-wrap"><canvas id="minimap"></canvas></div>
 <div id="menu-btn" onclick="toggleMenu()" data-tip-label="Menu" data-tip-desc="Pause the game and open settings."><span class="btn-emoji">☰</span></div>
 <div id="fs-btn" onclick="toggleFullscreen()" data-tip-label="Fullscreen" data-tip-desc="Enter or exit fullscreen mode."><span class="btn-emoji">⛶</span></div>
+<div id="view-btn" onclick="window.toggleView3D && toggleView3D()" data-tip-label="2D / 3D" data-tip-desc="Switch the map between the 2D view and the 3D world view."><span class="btn-emoji">3D</span></div>
 <div id="msg"></div>
 <div id="chat-log"></div>
 <div id="chat-input-wrap" style="display:none;">
@@ -144,6 +191,13 @@ document.body.insertAdjacentHTML('afterbegin', `
     <div id="mp-disconnect-spinner"></div>
     <button type="button" id="mp-disconnect-save" class="menu-action-btn" style="display:none;" onclick="saveGameToFile()">💾 Save Game</button>
     <button type="button" id="mp-disconnect-kick" class="menu-action-btn" style="display:none;" onclick="kickDisconnectedPlayers()">🤖 Continue without them (AI takes over)</button>
+  </div>
+</div>
+<div id="mp-seat-picker" style="display:none;position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.72);align-items:center;justify-content:center;">
+  <div id="mp-seat-picker-box" style="background:#2b2b2b;border:2px solid #555;border-radius:8px;padding:22px 26px;max-width:90vw;text-align:center;color:#eee;">
+    <div id="mp-seat-picker-title" style="font-size:20px;font-weight:bold;margin-bottom:6px;">Rejoin the match</div>
+    <div id="mp-seat-picker-text" style="opacity:0.8;margin-bottom:14px;">Pick your player to reconnect:</div>
+    <div id="mp-seat-picker-list" style="display:flex;flex-direction:column;gap:8px;"></div>
   </div>
 </div>
 <div id="help-hint"></div>
@@ -176,11 +230,23 @@ document.body.insertAdjacentHTML('afterbegin', `
     </div>
 
     <div class="help-section">
+      <h4>⏳ Advance Through the Ages</h4>
+      <p>You start in the <b>Dark Age</b>. From your <b>Town Center 🏰</b>, advance to the <b>Feudal Age</b> (costs food) then the <b>Castle Age</b> (food &amp; gold). Each age unlocks stronger units and buildings — archers, scouts, towers and the Market in Feudal; knights and rams in Castle — and automatically upgrades the economy and army you already have. Getting ahead in ages is a real edge.</p>
+    </div>
+
+    <div class="help-section">
+      <h4>🛒 Market &amp; Trade</h4>
+      <p>Running low on a resource? Build a <b>Market 🛒</b> to buy and sell — prices shift with demand — or send <b>Trade Carts</b> to another player's Market to bring back a steady stream of <b>gold</b>.</p>
+    </div>
+
+    <div class="help-section">
       <h4>🛡️ Army &amp; Counters</h4>
-      <div class="help-row"><span class="help-ico">🔱</span> Spearman <b>beats</b> 🏇 Scout (big bonus damage)</div>
+      <div class="help-row"><span class="help-ico">🔱</span> Spearman <b>beats</b> 🏇 Scout &amp; 🐎 Knight — cavalry (big bonus damage)</div>
       <div class="help-row"><span class="help-ico">🏇</span> Scout <b>beats</b> 🏹 Archer (armor shrugs off arrows)</div>
       <div class="help-row"><span class="help-ico">🏹</span> Archer <b>beats</b> 🔱 Spearman (and all slow infantry)</div>
+      <div class="help-row"><span class="help-ico">🐎</span> Knight &mdash; strong, fast cavalry (Castle Age) &mdash; watch for spearmen</div>
       <div class="help-row"><span class="help-ico">🛡️</span> Militia &mdash; solid all-rounder, good vs buildings</div>
+      <div class="help-row"><span class="help-ico">🐏</span> Ram &mdash; siege: smashes buildings &amp; walls (Castle Age), but useless vs soldiers — bring an escort</div>
       <p>Mix your army! One unit type alone gets countered.</p>
     </div>
 
@@ -206,11 +272,14 @@ document.body.insertAdjacentHTML('afterbegin', `
       </div>
     </div>
 
-    <div class="help-disclaimer">
-      &ldquo;Age of Epochs II&rdquo; is a free, fan-made game inspired by classic
-      real-time strategy titles. It is not an official product and is not affiliated
-      with, endorsed by, or connected to Microsoft, Xbox Game Studios, Ensemble
-      Studios, or the Age of Empires franchise.
+    <div class="help-section">
+      <h4>👥 Play with Friends</h4>
+      <p>From the main menu, <b>Host</b> a game and share the link (or QR code) &mdash; up to <b>4 players</b>, in any mix of humans and AI. Drop out and reconnect any time; the match pauses and you rejoin your spot.</p>
+    </div>
+
+    <div class="help-section">
+      <h4>🙏 Thanks</h4>
+      <p>Beta testers who shaped the game with their feedback: <b>Jeremy Ilagan</b>, <b>Orr Ashenberg</b>, <b>Jordan Hoff</b>, and <b>Qing Feng</b>.</p>
     </div>
   </div>
 </div>
@@ -222,7 +291,7 @@ document.body.insertAdjacentHTML('afterbegin', `
 <div class="menu-shell">
   <div class="menu-hero">
     <div class="title-pane">
-      <img id="title-logo" src="logo.png" alt="Age of Epochs II">
+      <img id="title-logo" src="logo.png" alt="Age of Epochs">
     </div>
   </div>
 
@@ -257,6 +326,13 @@ document.body.insertAdjacentHTML('afterbegin', `
             <label class="segment"><input type="radio" name="mapsize" value="small"><span title="Small">S</span></label>
             <label class="segment"><input type="radio" name="mapsize" value="medium" checked><span title="Medium">M</span></label>
             <label class="segment"><input type="radio" name="mapsize" value="large"><span title="Large">L</span></label>
+          </div>
+        </div>
+        <div class="setup-col">
+          <h3>Map</h3>
+          <div class="segmented">
+            <label class="segment"><input type="radio" name="fogmode" value="fog" checked><span title="Fog of War">Fog</span></label>
+            <label class="segment"><input type="radio" name="fogmode" value="open"><span title="All Visible — the whole map is revealed for everyone (the AI included)">Open</span></label>
           </div>
         </div>
       </div>
@@ -386,6 +462,13 @@ document.body.insertAdjacentHTML('afterbegin', `
               <label class="segment"><input type="radio" name="lobbyspeed" value="4"><span>4</span></label>
             </div>
           </div>
+          <div class="setup-col">
+            <h3>Map</h3>
+            <div class="segmented" id="lobby-fog-seg">
+              <label class="segment"><input type="radio" name="lobbyfog" value="fog" checked><span title="Fog of War">Fog</span></label>
+              <label class="segment"><input type="radio" name="lobbyfog" value="open"><span title="All Visible — whole map revealed for every player and AI">Open</span></label>
+            </div>
+          </div>
         </div>
       </div>
       <div id="lobby-chat-log"></div>
@@ -403,6 +486,7 @@ document.body.insertAdjacentHTML('afterbegin', `
 </div>
 </div>
 <div id="ui-switch-row"><a id="ui-switch-link" href="#">${SWITCH_LABEL}</a></div>
+<div id="menu-disclaimer">${DISCLAIMER_HTML}</div>
 </div>
 </div>
 `);

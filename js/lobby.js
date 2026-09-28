@@ -39,7 +39,7 @@
 
 // Available color choices = every entry in the shared palette (js/core.js).
 function lobbyPaletteSize(){ return PLAYER_TEAM_COLORS.length; }
-const LOBBY_NAME_MAX = 24;
+const LOBBY_NAME_MAX = 40; // generous so long/funny names fit; the lobby name field flexes and doesn't ellipsis-clip
 const LOBBY_MAX_PLAYERS = 4;   // one per map corner, any human/AI mix
 
 // Every player starts with a random funny name (host, guests without a
@@ -65,7 +65,6 @@ function lobbyRandomName(){
 let lobbyShareLink = null;
 
 // ---- Seat helpers ----
-function lobbyAiCount(seats){ return seats.filter(s => s.type === 'ai').length; }
 function lobbyFirstFreeColor(seats){
   let used = new Set(seats.map(s => s.colorIdx));
   for (let i = 0; i < lobbyPaletteSize(); i++) if (!used.has(i)) return i;
@@ -105,6 +104,7 @@ function seedHostLobby(){
     aiDifficulty: (typeof aiDifficulty !== 'undefined' && aiDifficulty) ? aiDifficulty : 'standard',
     mapSize: lobbyReadMapSizeRadio(),
     speed: GAME_SPEED,
+    fog: false, // false = Fog of War (default), true = All Visible
     numTeams: 1,
   };
   if (!lobbyState.seats[0].name) lobbyState.seats[0].name = lobbyRandomName();
@@ -136,9 +136,8 @@ function hostEnterLobby(seat){
   window.__mpSession.inLobby = true;
   if (!lobbyState) seedHostLobby();
   hostEnsureLobbySeat(seat);
-  let status = document.getElementById('mp-status-panel');
-  if (status) status.style.display = 'none';
-  let menu = document.getElementById('tutorial');
+  show('mp-status-panel', false);
+  let menu = byId('tutorial');
   if (menu) menu.style.display = 'flex';
   showMenuPanel('lobby');
   lobbySendState(seat);
@@ -184,8 +183,7 @@ function onGuestLeftLobby(seat){
   if (typeof showMpStatus === 'function') {
     showMpStatus('Waiting for opponent to join…', lobbyShareLink || undefined);
   }
-  let cancelBtn = document.getElementById('mp-cancel-btn');
-  if (cancelBtn) cancelBtn.style.display = '';
+  show('mp-cancel-btn', true);
   if (typeof showMsg === 'function') showMsg('Opponent left — waiting for a new opponent');
 }
 
@@ -250,6 +248,7 @@ function lobbyPayload(){
     aiDifficulty: lobbyState.aiDifficulty,
     mapSize: lobbyState.mapSize,
     speed: lobbyState.speed,
+    fog: !!lobbyState.fog,
     numTeams: lobbyState.numTeams,
   };
 }
@@ -270,13 +269,12 @@ function lobbyBroadcast(){ lobbySendState(null); }
 // ---- Guest: apply the host's authoritative state ----
 function applyLobbyState(msg, isOpen){
   lobbyState = { seats: msg.seats || [], aiDifficulty: msg.aiDifficulty || 'standard',
-    mapSize: msg.mapSize, speed: msg.speed, numTeams: msg.numTeams || 2 };
+    mapSize: msg.mapSize, speed: msg.speed, fog: !!msg.fog, numTeams: msg.numTeams || 2 };
   if (msg.yourSeat != null) window.__mpSession.mySeat = msg.yourSeat;
   window.__mpSession.inLobby = true;
   if (isOpen) {
-    let status = document.getElementById('mp-status-panel');
-    if (status) status.style.display = 'none';
-    let menu = document.getElementById('tutorial');
+    show('mp-status-panel', false);
+    let menu = byId('tutorial');
     if (menu) menu.style.display = 'flex';
     showMenuPanel('lobby');
   }
@@ -295,7 +293,7 @@ function renderLobby(){
   // The guest's enterGuestJoinMode (js/init.js) broad-hides EVERY
   // .menu-button-container / .setup-grid / .menu-divider in the menu at boot —
   // re-show the lobby panel's own structural children.
-  let panel = document.getElementById('menu-panel-lobby');
+  let panel = byId('menu-panel-lobby');
   if (panel) panel.querySelectorAll('.menu-button-container, .setup-grid, .menu-divider')
     .forEach(el => { el.style.display = ''; });
 
@@ -305,20 +303,20 @@ function renderLobby(){
   lobbySetRadio('lobbyaidiff', lobbyState.aiDifficulty || 'standard');
   lobbySetRadio('lobbymapsize', lobbyState.mapSize);
   lobbySetRadio('lobbyspeed', String(lobbyState.speed));
+  lobbySetRadio('lobbyfog', lobbyState.fog ? 'open' : 'fog');
   // AI difficulty always sits next to the Add AI button (applies to AI added now
   // or later).
   lobbySetSettingsEnabled(netRole === 'host');
 
   // Add-AI button (host only, when there's room).
-  let addRow = document.getElementById('lobby-addai-row');
-  if (addRow) addRow.style.display = (netRole === 'host') ? '' : 'none';
-  let addBtn = document.getElementById('lobby-addai-btn');
+  show('lobby-addai-row', (netRole === 'host'));
+  let addBtn = byId('lobby-addai-btn');
   if (addBtn) addBtn.disabled = lobbyState.seats.length >= LOBBY_MAX_PLAYERS;
 
   // Buttons.
-  let readyBtn = document.getElementById('lobby-ready-btn');
-  let startBtn = document.getElementById('lobby-start-btn');
-  let leaveBtn = document.getElementById('lobby-leave-btn');
+  let readyBtn = byId('lobby-ready-btn');
+  let startBtn = byId('lobby-start-btn');
+  let leaveBtn = byId('lobby-leave-btn');
   if (leaveBtn) leaveBtn.style.display = netRole === 'guest' ? 'none' : '';
   if (netRole === 'guest') {
     if (readyBtn) {
@@ -336,7 +334,7 @@ function renderLobby(){
     }
   }
   // Why-can't-I-start hint (host only).
-  let hint = document.getElementById('lobby-hint');
+  let hint = byId('lobby-hint');
   if (hint) {
     let msg = '';
     if (netRole === 'host' && !lobbyCanStart()) {
@@ -348,11 +346,11 @@ function renderLobby(){
   }
   // The invite link stays visible inside the lobby while seats remain —
   // more friends can join until Start.
-  let inviteRow = document.getElementById('lobby-invite-row');
+  let inviteRow = byId('lobby-invite-row');
   if (inviteRow) {
     let show = netRole === 'host' && lobbyShareLink && lobbyState.seats.length < LOBBY_MAX_PLAYERS;
     inviteRow.style.display = show ? '' : 'none';
-    let linkEl = document.getElementById('lobby-invite-link');
+    let linkEl = byId('lobby-invite-link');
     if (linkEl && show && linkEl.value !== lobbyShareLink) linkEl.value = lobbyShareLink;
   }
   if (typeof scaleMenuToFit === 'function') scaleMenuToFit();
@@ -361,7 +359,7 @@ function renderLobby(){
 // Flat roster, one row per seat — alliances are the per-row Team pick
 // (AoE2-style), not a grouped layout.
 function renderLobbyRoster(){
-  let roster = document.getElementById('lobby-roster');
+  let roster = byId('lobby-roster');
   if (!roster) return;
   // Preserve the caret if a name input is focused (all peers re-render on sync).
   let active = document.activeElement;
@@ -388,21 +386,26 @@ function buildSeatRow(seat, t){
   row.dataset.seat = String(t);
   let mine = t === lobbyMySeatIndex();
 
-  // Color swatches: full palette for MY seat, single read-only swatch otherwise.
+  // Color: MY seat is a single click-to-cycle swatch (each click advances to
+  // the next colour no other human has), so the row stays one line; other seats
+  // show a read-only swatch.
   let swatches = document.createElement('div');
   swatches.className = 'lobby-seat-swatches';
   if (mine && seat.present) {
     let taken = lobbyTakenColors(t);
-    for (let i = 0; i < lobbyPaletteSize(); i++) {
-      let b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'lobby-swatch' + (i === seat.colorIdx ? ' lobby-swatch-sel' : '');
-      b.style.background = PLAYER_TEAM_COLORS[i];
-      if (taken.has(i) && i !== seat.colorIdx) b.disabled = true;
-      let idx = i;
-      b.onclick = () => lobbyPickColor(idx);
-      swatches.appendChild(b);
-    }
+    let b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'lobby-swatch lobby-swatch-sel';
+    b.style.background = PLAYER_TEAM_COLORS[seat.colorIdx];
+    b.title = 'Click to change colour';
+    b.onclick = () => {
+      let n = lobbyPaletteSize();
+      for (let step = 1; step <= n; step++) {
+        let next = (seat.colorIdx + step) % n;
+        if (!taken.has(next)) { lobbyPickColor(next); break; }
+      }
+    };
+    swatches.appendChild(b);
   } else {
     let sw = document.createElement('div');
     sw.className = 'lobby-swatch';
@@ -448,23 +451,22 @@ function buildSeatRow(seat, t){
   teamSel.onchange = () => lobbySetTeam(t, teamSel.value === '' ? null : parseInt(teamSel.value, 10));
   row.appendChild(teamSel);
 
-  // Status badge. (AI difficulty is the shared global control below the roster,
-  // not shown per-seat.)
-  let badge = document.createElement('span');
-  badge.className = 'lobby-seat-badge';
-  if (seat.type === 'ai') {
-    badge.textContent = 'AI';
-  } else if (t === 0) {
-    badge.textContent = 'Host';
-  } else if (!seat.present) {
-    badge.textContent = 'Waiting…';
-  } else if (seat.ready) {
-    badge.textContent = 'Ready';
-    badge.classList.add('lobby-ready');
+  // Status. AI/Host get a short text label; a guest's readiness is a compact
+  // colour dot (green = ready, amber = not ready, hollow = waiting) so a long
+  // name plus a "Not ready" label never wraps the row onto two lines. The label
+  // rides the dot's title for hover/screen-reader clarity.
+  if (seat.type === 'ai' || t === 0) {
+    let badge = document.createElement('span');
+    badge.className = 'lobby-seat-badge';
+    badge.textContent = seat.type === 'ai' ? 'AI' : 'Host';
+    row.appendChild(badge);
   } else {
-    badge.textContent = 'Not ready';
+    let dot = document.createElement('span');
+    let state = !seat.present ? 'waiting' : seat.ready ? 'ready' : 'notready';
+    dot.className = 'lobby-seat-status status-' + state;
+    dot.title = state === 'ready' ? 'Ready' : state === 'notready' ? 'Not ready' : 'Waiting for player';
+    row.appendChild(dot);
   }
-  row.appendChild(badge);
 
   // Host-only: remove an AI seat / kick a human guest (✕).
   if (netRole === 'host' && t !== 0) {
@@ -523,6 +525,12 @@ function lobbyPickColor(idx){
 
 // Host-only: settings radios changed.
 function onLobbyMapSizeChange(){ if (!lobbyState || netRole !== 'host') return; lobbyState.mapSize = lobbyReadMapSizeRadio(); lobbyBroadcast(); }
+function onLobbyFogChange(){
+  if (!lobbyState || netRole !== 'host') return;
+  let sel = document.querySelector('input[name="lobbyfog"]:checked');
+  lobbyState.fog = !!(sel && sel.value === 'open');
+  lobbyBroadcast();
+}
 function onLobbySpeedChange(){
   if (!lobbyState || netRole !== 'host') return;
   let sel = document.querySelector('input[name="lobbyspeed"]:checked');
@@ -612,7 +620,7 @@ function lobbySetRadio(name, value){
 }
 function lobbySetSettingsEnabled(enabled){
   document.querySelectorAll('#lobby-settings-grid input[type="radio"]').forEach(el => { el.disabled = !enabled; });
-  let grid = document.getElementById('lobby-settings-grid');
+  let grid = byId('lobby-settings-grid');
   if (grid) grid.style.opacity = enabled ? '' : '0.75';
 }
 
@@ -622,7 +630,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('input[name="lobbyaidiff"]').forEach(el => el.addEventListener('change', onLobbyAiDiffChange));
   document.querySelectorAll('input[name="lobbymapsize"]').forEach(el => el.addEventListener('change', onLobbyMapSizeChange));
   document.querySelectorAll('input[name="lobbyspeed"]').forEach(el => el.addEventListener('change', onLobbySpeedChange));
-  let input = document.getElementById('lobby-chat-input');
+  document.querySelectorAll('input[name="lobbyfog"]').forEach(el => el.addEventListener('change', onLobbyFogChange));
+  let input = byId('lobby-chat-input');
   if (input) {
     input.addEventListener('keydown', e => {
       e.stopPropagation();

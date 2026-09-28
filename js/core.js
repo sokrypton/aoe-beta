@@ -1,9 +1,31 @@
-const C=document.getElementById('game');
+// ---- THE TIMEBASE ----
+// TPS = simulation ticks per GAME-second. A single BUILD constant, never a
+// runtime option (lockstep peers on the same build agree automatically).
+// 20 matches classic AoE2's effective ~15-20Hz world rate (GDC "1,500
+// Archers" paper) — proven sufficient for the genre — and simulates a match
+// in 1/3 fewer ticks than the original 30.
+// EVERY tick-denominated duration in the codebase is authored at the
+// CANONICAL 30tps value and wrapped in T30() below, so TPS=30 reproduces the
+// original behavior bit-for-bit (T30 is the identity at 30) and any other
+// rate is a one-line experiment. Never hardcode a tick-rate literal in a
+// formula — use TPS; never write a raw tick duration — wrap it in T30().
+const TPS = 20;
+// Canonical converter: `x` is a duration in ticks ON THE 30TPS CLOCK.
+function T30(x){ return Math.round(x * TPS / 30); }
+// Render-side mirror of T30: cosmetic animation PHASES are authored in
+// 30tps units (rad per authored tick). animTick advances 1 per authored
+// tick regardless of the build TPS, so animation speed is timebase-
+// invariant like the sim's T30 durations. Live getter — the gallery/lab
+// pages drive `tick` directly and stay correct. VIEWER-ONLY: the sim
+// must never read it.
+Object.defineProperty(window, 'animTick', { get: () => tick * (30 / TPS) });
+
+const C=byId('game');
 // X is reassignable (not const): drawSelectedUnitOutlines() briefly redirects
 // it to an offscreen buffer so it can reuse drawUnit() itself to capture a
 // unit's exact silhouette, instead of maintaining a separate outline shape.
 let X=C.getContext('2d');
-const MC=document.getElementById('minimap'),MX=MC.getContext('2d');
+const MC=byId('minimap'),MX=MC.getContext('2d');
 const isMobile='ontouchstart' in window||navigator.maxTouchPoints>0;
 // Command markers (visual feedback when you issue a command)
 let cmdMarkers=[]; // {x,y,time,color}
@@ -120,13 +142,13 @@ function isEnemyOf(team, e){ return isPlayerTeam(e.team) && !sameSide(team, e.te
 // ---- AGES ----
 // AoE2-lite age progression. teamAge[t] = 0 (Dark) / 1 (Feudal) / 2
 // (Castle). SIM state with the full teamAlliance treatment: snapshots,
-// resync, save, checksum. Advancing is TC research (see execResearchAge,
-// js/commands.js, and the TC tick in js/logic.js).
+// resync, save, checksum. Advancing is Town Center research (see execResearch,
+// js/commands.js, and updateBuildingResearch in js/logic.js).
 const AGES = [
   {key:'dark',   name:'Dark Age'},
   // Research times match AoE2 (DE): Feudal 130s, Castle 160s (30 ticks/game-s).
-  {key:'feudal', name:'Feudal Age', cost:{f:500},         researchTicks:3900},
-  {key:'castle', name:'Castle Age', cost:{f:800, g:200},  researchTicks:4800}
+  {key:'feudal', name:'Feudal Age', cost:{f:500},         researchTicks:T30(3900)},
+  {key:'castle', name:'Castle Age', cost:{f:800, g:200},  researchTicks:T30(4800)}
 ];
 // Minimum age index per unit/building type; absent => available from Dark.
 const AGE_REQ = {
@@ -140,16 +162,44 @@ let teamAge = null;
 function resetTeamAge(){
   teamAge = Array.from({length: NUM_TEAMS}, () => 0);
 }
-// Military units get +1 attack and +1 melee/pierce armor per age past
-// Dark via the forging/iron_casting and scale_armor/chain_mail cards (see
-// UPGRADES below): attack applied at spawn + swept on age-up (attack is
-// snapshotted onto entities), armor added live in damageEntity.
+// Per-team researched-tech bitmask (bit = UPGRADE_BITS[key], set below). SIM
+// state with the full teamAge treatment: snapshots, resync, save, checksum.
+// Techs are researched at their owning building (execResearch), not granted on age-up.
+let teamTechs = null;
+function resetTeamTechs(){
+  teamTechs = Array.from({length: NUM_TEAMS}, () => 0);
+}
+// Military units get +1 attack and +1 melee/pierce armor per forging/
+// iron_casting and scale_armor/chain_mail tech researched at the Barracks
+// (see UPGRADES below): attack applied at spawn + swept on research (attack
+// is snapshotted onto entities), armor added live in damageEntity.
 const MILITARY = new Set(['militia','spearman','archer','scout','knight']);
+// DE's Forging/Iron Casting are INFANTRY + CAVALRY only — archers have their
+// own attack line (Fletching -> Bodkin Arrow), so they must not take both.
+const FORGE_UNITS = new Set(['militia','spearman','scout','knight']);
+// DE scales the AI's unit-training AND research time by difficulty (Easiest
+// 200%, Easy 133%, Moderate+ 100%) and never caps WHICH technologies it may
+// take — an easy AI gets the whole list, just later. Ours mirrors that on both
+// clocks: a weaker AI is slow at everything, the way a beginner is. AI teams
+// only — a human's training and research are never slowed.
+function aiTimeMult(team){
+  if(!isAITeam(team)) return 1;
+  let p = aiProfileFor(team);
+  return (p && p.aiTimeMult) || 1;
+}
 // "Fights in the army" — MILITARY plus siege. The ram is deliberately NOT
 // in MILITARY (no blacksmith cards, no soft-push yielding: a parked ram is
 // a wall), but the AI's army control, wave sizing and the idle-military
 // hotkey must still treat it as a soldier.
 function isArmyUnit(t){ return MILITARY.has(t) || t === 'ram'; }
+// ---- Building-center helpers: THE two spellings, do not inline them. ----
+// centerOf = the TRUE midpoint (fractional for even footprints — a 4-wide TC
+// centers at +2.0): feeds dist()/vector math. centerTile = the floored center
+// TILE: feeds map[y][x] indexing, pathfinding endpoints, and placement rings.
+// The floor/non-floor split is load-bearing — mixing them shifts distances by
+// up to half a tile and desyncs AI decisions.
+function centerOf(e){ return { x: e.x + e.w / 2, y: e.y + e.h / 2 }; }
+function centerTile(e){ return { x: e.x + Math.floor(e.w / 2), y: e.y + Math.floor(e.h / 2) }; }
 // Wall/gate material families: palisade (Dark) and stone (Feudal).
 function isWallBtype(bt){ return bt === 'WALL' || bt === 'SWALL'; }
 function isGateBtype(bt){ return bt === 'GATE' || bt === 'SGATE'; }
@@ -159,6 +209,10 @@ function isTowerBtype(bt){ return bt === 'TOWER' || bt === 'PTOWER'; }
 // Buildings that auto-fire arrows at nearby enemies (TC + every tower).
 function firesArrows(bt){ return bt === 'TC' || isTowerBtype(bt); }
 const GATE_WALL_MATCH = { GATE: 'WALL', SGATE: 'SWALL' };
+// Palisade→stone upgrade families: dropping the stone piece on its wooden
+// counterpart builds the upgrade in place (build-over), the same salvage-swap
+// the Upgrade button triggers (execUpgradeWalls, js/commands.js).
+const WALL_STONE_MATCH = { WALL: 'SWALL', GATE: 'SGATE', PTOWER: 'TOWER' };
 // Given a clicked tile and an isWall(x,y) predicate (matching-material wall,
 // same team), pick the gate footprint: prefer a 3-tile run through the click
 // (centred, then shifted), then a 2-tile run, else a lone 1x1. Horizontal
@@ -195,7 +249,9 @@ function gateBaseAt(x, y, btype, team){
   if (x < 0 || y < 0 || x >= MAP || y >= MAP) return false;
   let id = map[y][x] && map[y][x].occupied;
   let e = id && entitiesById.get(id);
-  return !!(e && e.type === 'building' && e.btype === btype && e.team === team);
+  // Snap onto a same-type gate (rebuild) OR the palisade gate this stone gate
+  // upgrades (build-over) — both share the doorway's footprint.
+  return !!(e && e.type === 'building' && (e.btype === btype || WALL_STONE_MATCH[e.btype] === btype) && e.team === team);
 }
 function ageBonus(team){ return teamAge && isPlayerTeam(team) ? teamAge[team] : 0; }
 
@@ -206,41 +262,41 @@ function ageBonus(team){ return teamAge && isPlayerTeam(team) ? teamAge[team] : 
 // createUnit/createBuilding spawn stats, gather cooldowns, farm food) that
 // read hasUpgrade(team, key) at the moment the stat matters.
 //
-// Today every card is baked into age-up: applyAgeUpgrades() runs from the
-// TC research completion (js/logic.js) and hasUpgrade derives from teamAge —
-// deliberately NO new sim state, since teamAge already rides snapshots,
-// saves and simChecksum. When cards become draftable later, replace
-// hasUpgrade/applyAgeUpgrades with a real per-team card set (with the full
-// teamAge sim-state treatment); every hook and apply() stays unchanged.
+// Each tech is researched at its owning building: execResearch charges its
+// cost/researchTicks, updateBuildingResearch runs applyTech() on completion.
+// hasUpgrade reads the per-team teamTechs bitmask — the "real per-team card
+// set" the original age-up bake anticipated. teamTechs gets the full teamAge
+// sim-state treatment (snapshots, resync, save, simChecksum); every apply()
+// and live hook is unchanged — only the trigger moved from age-up to research.
 const UPGRADES = {
   // -- Feudal --
-  forging: {age:1, name:'Forging', desc:'Military units +1 attack', apply(team){
-    entities.forEach(u => { if (u.type==='unit' && u.team===team && u.hp>0 && MILITARY.has(u.utype)) u.atk += 1; });
+  forging: {age:1, cost:{f:150}, researchTicks:T30(1500), name:'Forging', desc:'Infantry and cavalry +1 attack', apply(team){
+    entities.forEach(u => { if (u.type==='unit' && u.team===team && u.hp>0 && FORGE_UNITS.has(u.utype)) u.atk += 1; });
   }},
-  scale_armor: {age:1, name:'Scale Mail Armor', desc:'Military units +1/+1 armor'}, // live: damageEntity
-  fletching: {age:1, name:'Fletching', desc:'Archers +1 range', apply(team){
-    entities.forEach(u => { if (u.type==='unit' && u.team===team && u.hp>0 && u.utype==='archer') u.range += 1; });
+  scale_armor: {age:1, cost:{f:100}, researchTicks:T30(1200), name:'Scale Mail Armor', desc:'Military units +1/+1 armor'}, // live: damageEntity
+  fletching: {age:1, cost:{f:100, g:50}, researchTicks:T30(900), name:'Fletching', desc:'Archers +1 attack, +1 range', apply(team){
+    entities.forEach(u => { if (u.type==='unit' && u.team===team && u.hp>0 && u.utype==='archer') { u.atk += 1; u.range += 1; } });
   }},
-  wheelbarrow: {age:1, name:'Wheelbarrow', desc:'Villagers move 10% faster, carry +3', apply(team){
+  wheelbarrow: {age:1, cost:{f:175, w:50}, researchTicks:T30(2250), name:'Wheelbarrow', desc:'Villagers move 10% faster, carry +3', apply(team){
     entities.forEach(u => { if (u.type==='unit' && u.team===team && u.hp>0 && u.utype==='villager') {
       u.speed = UNITS.villager.speed * 1.1; u.carryMax += 3;
     }});
   }},
-  horse_collar: {age:1, name:'Horse Collar', desc:'Farms hold +75 food', apply(team){
+  horse_collar: {age:1, cost:{f:75, w:75}, researchTicks:T30(600), name:'Horse Collar', desc:'Farms hold +75 food', apply(team){
     topUpTeamFarms(team, 75); // future harvests: live via farmFoodFor
   }},
-  double_bit_axe: {age:1, name:'Double-Bit Axe', desc:'Villagers chop wood 20% faster'}, // live: gatherCooldownFor
-  gold_mining: {age:1, name:'Gold Mining', desc:'Villagers mine gold 15% faster'}, // live: gatherCooldownFor
+  double_bit_axe: {age:1, cost:{f:100, w:50}, researchTicks:T30(750), name:'Double-Bit Axe', desc:'Villagers chop wood 20% faster'}, // live: gatherCooldownFor
+  gold_mining: {age:1, cost:{f:100, w:75}, researchTicks:T30(900), name:'Gold Mining', desc:'Villagers mine gold 15% faster'}, // live: gatherCooldownFor
   // -- Castle --
-  iron_casting: {age:2, name:'Iron Casting', desc:'Military units +1 attack', apply(team){
-    entities.forEach(u => { if (u.type==='unit' && u.team===team && u.hp>0 && MILITARY.has(u.utype)) u.atk += 1; });
+  iron_casting: {age:2, cost:{f:220, g:120}, researchTicks:T30(2250), name:'Iron Casting', desc:'Infantry and cavalry +1 attack', apply(team){
+    entities.forEach(u => { if (u.type==='unit' && u.team===team && u.hp>0 && FORGE_UNITS.has(u.utype)) u.atk += 1; });
   }},
-  chain_mail: {age:2, name:'Chain Mail Armor', desc:'Military units +1/+1 armor'}, // live: damageEntity
-  bow_saw: {age:2, name:'Bow Saw', desc:'Villagers chop wood another 20% faster'}, // live: gatherCooldownFor
-  heavy_plow: {age:2, name:'Heavy Plow', desc:'Farms hold +125 food', apply(team){
+  chain_mail: {age:2, cost:{f:200, g:100}, researchTicks:T30(1650), name:'Chain Mail Armor', desc:'Military units +1/+1 armor'}, // live: damageEntity
+  bow_saw: {age:2, cost:{f:150, w:100}, researchTicks:T30(1500), name:'Bow Saw', desc:'Villagers chop wood another 20% faster'}, // live: gatherCooldownFor
+  heavy_plow: {age:2, cost:{f:125, w:125}, researchTicks:T30(1200), name:'Heavy Plow', desc:'Farms hold +125 food', apply(team){
     topUpTeamFarms(team, 125);
   }},
-  masonry: {age:2, name:'Masonry', desc:'Buildings +10% hit points', apply(team){
+  masonry: {age:2, cost:{f:150, w:175}, researchTicks:T30(1500), name:'Masonry', desc:'Buildings +10% hit points', apply(team){
     entities.forEach(b => { if (b.type==='building' && b.team===team && b.hp>0) {
       b.hp = Math.round(b.hp * 1.1); b.maxHp = Math.round(b.maxHp * 1.1);
     }});
@@ -249,45 +305,110 @@ const UPGRADES = {
   // bastion it (our tower-in-wall deviation, see BLDGS.TOWER). Keep the btype
   // set in sync with buildingMaxHpFor so a tower built after the tech founds at
   // the boosted HP too.
-  fortified_wall: {age:2, name:'Fortified Wall', desc:'Stone walls, gates, and towers +50% hit points', apply(team){
+  fortified_wall: {age:2, cost:{f:200, s:100}, researchTicks:T30(1500), name:'Fortified Wall', desc:'Stone walls, gates, and towers +50% hit points', apply(team){
     entities.forEach(b => { if (b.type==='building' && b.team===team && b.hp>0 && (b.btype==='SWALL' || b.btype==='SGATE' || b.btype==='TOWER')) {
       b.hp = Math.round(b.hp * 1.5); b.maxHp = Math.round(b.maxHp * 1.5);
     }});
   }},
+  // No apply() sweep — a pure live hook read at trade time (marketSellRatio,
+  // read by execMarketTrade). AoE2's Guilds halves the market commission.
+  guilds: {age:2, cost:{f:300, g:200}, researchTicks:T30(1500), name:'Guilds', desc:'Market fee halved — selling returns 85% instead of 70%'},
+  // APPENDED, not inserted: UPGRADE_BITS indexes this registry by ORDER, so a
+  // mid-list insert would shift every later tech's bit and misread saves.
+  // The archers' second attack card — without it, splitting Forging/Iron
+  // Casting off archers (DE-correct) would leave them a net attack behind
+  // melee, which DE avoids precisely by giving them their own two-step line.
+  bodkin_arrow: {age:2, cost:{f:200, g:100}, researchTicks:T30(1050), name:'Bodkin Arrow', desc:'Archers +1 attack, +1 range', apply(team){
+    entities.forEach(u => { if (u.type==='unit' && u.team===team && u.hp>0 && u.utype==='archer') { u.atk += 1; u.range += 1; } });
+  }},
+  // Arrows LEAD a moving target (spawnProjectile). Untrained, a shot flies at
+  // the spot the target left — a scout drifts 0.83 tiles during a 4-tile flight
+  // against a 0.45 impact radius, so cavalry outruns arrows. No apply sweep:
+  // the aim point is computed per shot.
+  ballistics: {age:2, cost:{f:300, w:175}, researchTicks:T30(1800), name:'Ballistics', desc:'Archers and towers lead moving targets'},
 };
+// Stable bit index per tech (UPGRADES registry order) — teamTechs is a
+// per-team bitmask of researched cards. 16 techs fit a 32-bit int.
+const UPGRADE_BITS = {};
+Object.keys(UPGRADES).forEach((k, i) => { UPGRADE_BITS[k] = i; });
+// teamTechs-shaped bitmask for a list of tech keys.
+function techMask(keys){ return keys.reduce((m, k) => m | (1 << UPGRADE_BITS[k]), 0); }
+// Castle tech → the Feudal tech it upgrades (same blacksmith line). A Castle
+// upgrade can't be researched until its predecessor is (AoE2 blacksmith lines).
+const TECH_PREREQ = { iron_casting:'forging', chain_mail:'scale_armor', bow_saw:'double_bit_axe', heavy_plow:'horse_collar', bodkin_arrow:'fletching' };
+// A researched tech is a set bit in the per-team teamTechs bitmask.
 function hasUpgrade(team, key){
-  let c = UPGRADES[key];
-  return !!c && teamAge && isPlayerTeam(team) && teamAge[team] >= c.age;
+  let bit = UPGRADE_BITS[key];
+  return bit !== undefined && teamTechs && isPlayerTeam(team) && (teamTechs[team] & (1 << bit)) !== 0;
 }
-// One-time application of every card unlocked by reaching `age`; returns
-// the display names for the age-up message. Registry (insertion) order is
-// the application order — masonry before fortified_wall, so a stone wall
-// gets both multipliers the same way a wall built afterwards does.
+// Whether `team` may START researching `key` now: a known tech, not already
+// owned, within reach of its age, and its predecessor (if any) researched.
+// THE gate shared by execResearch and the button-list filter.
+// TESTING: a tech is researchable ONE AGE EARLY (age-1) — you can queue the
+// next age's upgrades at the owning building during the age right before, so they're
+// ready by age-up. (Age advancement itself stays at the Town Center.)
+function canResearch(team, key){
+  let c = UPGRADES[key];
+  if (!c || hasUpgrade(team, key)) return false;
+  if (teamAge && isPlayerTeam(team) && teamAge[team] < c.age - TECH_RESEARCH_LEAD) return false;
+  let pre = TECH_PREREQ[key];
+  return !pre || hasUpgrade(team, pre);
+}
+// Apply one researched card: run its one-time apply() sweep (if any) over
+// existing entities, then set the team's bit. Single-card analog of the old
+// age-up sweep; called from research completion (updateBuildingResearch).
+// apply() isn't idempotent (fortified_wall ×1.5 hp), but execResearch/
+// canResearch never let an owned tech re-research, so each fires exactly once.
+function applyTech(team, key){
+  let c = UPGRADES[key];
+  if (!c || !teamTechs) return;
+  if (c.apply) c.apply(team);
+  teamTechs[team] |= (1 << UPGRADE_BITS[key]);
+}
+// ---- Research economy (flags kept as kill-switches) ----
+// Age advancement is at the TOWN CENTER. Techs are researched at the building
+// that OWNS each one (AoE2-style, no University) — see the `researches` arrays
+// in BLDGS: Barracks (military/armor/fortification), Mill (farming), Lumber Camp
+// (wood), Mining Camp (gold), Market (Guilds), Town Center (Wheelbarrow).
+//   AUTO_APPLY_TECHS_AT_AGE — false: techs come only from research, not free at
+//     age-up (was a transitional safety net).
+//   INSTANT_TECH_RESEARCH — false: research is a timed clock (researchTicks).
+//   TECH_PRICES — true: research charges each tech's cost.
+//   TECH_RESEARCH_LEAD — 0: a tech is researchable only once its age is reached
+//     (AoE2-accurate — no Dark-age research). 1 would allow one age early.
+const AUTO_APPLY_TECHS_AT_AGE = false;
+const INSTANT_TECH_RESEARCH = false;
+const TECH_PRICES = true;
+const TECH_RESEARCH_LEAD = 0;
+// Apply every card unlocked by reaching `age`, in registry order (masonry
+// before fortified_wall), each via applyTech (sets the teamTechs bit + runs its
+// one-time sweep). Idempotent — skips cards already owned. Returns the display
+// names for the age-up message. Used by the auto-apply path above.
 function applyAgeUpgrades(team, age){
   let names = [];
   Object.keys(UPGRADES).forEach(k => {
-    let c = UPGRADES[k];
-    if (c.age !== age) return;
-    if (c.apply) c.apply(team);
-    names.push(c.name);
+    if (UPGRADES[k].age !== age || hasUpgrade(team, k)) return;
+    applyTech(team, k);
+    names.push(UPGRADES[k].name);
   });
   return names;
 }
-// Directly SET a team's age (editor / scenario / loader — the game itself only
-// advances age via TC research over time, there's no instant setter). Applies
-// each not-yet-reached age's one-time upgrade sweep over EXISTING units
-// (applyAgeUpgrades touches live entities) so they gain that age's
-// atk/range/speed bonuses, matching a normally-aged team. Only sweeps ages
-// ABOVE the team's current age: c.apply isn't idempotent (e.g. fortified_wall
-// ×1.5 hp), so re-applying would double it. Lowering age just sets the number —
-// bonuses already snapshotted on existing units aren't reverted, but units
-// built afterward read the lower age via hasUpgrade. Clamped to 0..2
+// Directly SET a team's age (editor / scenario / loader — the game itself
+// advances age via Town Center research over time, there's no instant setter).
+// Techs are now independent of age (researched at their owning building), so this only
+// sets the age number; it does NOT grant any upgrades. Clamped to 0..2
 // (Dark/Feudal/Castle).
 function setTeamAge(team, age){
   if(!teamAge)resetTeamAge();
+  if(!teamTechs)resetTeamTechs(); // applyAgeUpgrades→applyTech below needs a non-null bitmask
   age=Math.max(0,Math.min(2,age|0));
-  let cur=teamAge[team]||0;
-  for(let a=cur+1;a<=age;a++)applyAgeUpgrades(team,a);
+  // TEMP (AUTO_APPLY_TECHS_AT_AGE): sweep each newly-reached age's free techs,
+  // so an editor/scenario/loaded team at a higher age has them (applyAgeUpgrades
+  // is idempotent — skips owned cards, so lowering/reloading never doubles).
+  if(AUTO_APPLY_TECHS_AT_AGE){
+    let cur=teamAge[team]||0;
+    for(let a=cur+1;a<=age;a++)applyAgeUpgrades(team,a);
+  }
   teamAge[team]=age;
 }
 // +1 attack per Forging/Iron Casting held — spawn-time counterpart of the
@@ -320,9 +441,18 @@ function gatherCooldownFor(team, resource, baseCooldown){
 }
 // Max HP a building of this team founds at (or converts to — see
 // execUpgradeWalls): base stat plus the HP card multipliers, masonry first
-// then fortified_wall, matching applyAgeUpgrades' registry order.
+// then fortified_wall (a fixed order for new buildings; existing-building
+// sweeps in applyTech commute to the same result).
+// AoE2 buildings gain HP with every age — House 550/750/900, Barracks
+// 1200/1500/1800, Mill and camps 600/800/1000 (docs/reference). Ours were flat
+// at the Dark-Age figure, so buildings got relatively WEAKER as a match ran on
+// and Masonry's +10% was papering over an ageing bonus DE grants for free.
+// Walls, gates, towers, farms and the Town Centre are flat in DE too, so they
+// simply carry no hpAge.
 function buildingMaxHpFor(team, btype){
-  let hp = BLDGS[btype].hp;
+  let b = BLDGS[btype];
+  let age = (teamAge && isPlayerTeam(team)) ? (teamAge[team] || 0) : 0;
+  let hp = (b.hpAge && b.hpAge[age] !== undefined) ? b.hpAge[age] : b.hp;
   if (hasUpgrade(team, 'masonry')) hp = Math.round(hp * 1.1);
   if ((btype === 'SWALL' || btype === 'SGATE' || btype === 'TOWER') && hasUpgrade(team, 'fortified_wall')) hp = Math.round(hp * 1.5);
   return hp;
@@ -344,25 +474,28 @@ function topUpTeamFarms(team, bonus){
 // Who drives each team: {type:'human'} (this tab or a remote peer — the
 // wire mapping decides which) or {type:'ai', difficulty}. This is SIM
 // state: lockstep peers must agree on it (carried in snapshots/resync and
-// mixed into simChecksum), and it replaces every old "team 1 is the AI
-// when netRole===null" special case with data. Today's two shapes are
-// [human, ai] (single-player) and [human, human] (1v1 lockstep), but
-// nothing below assumes that — any slot may be either type.
+// mixed into simChecksum). Any slot may be either type — nothing below
+// assumes a fixed human/AI layout.
 let teamControllers = [{type:'human'}, {type:'ai', difficulty:'standard'}];
 function isAITeam(t){ return isPlayerTeam(t) && teamControllers[t] && teamControllers[t].type === 'ai'; }
 function isHumanTeam(t){ return isPlayerTeam(t) && !isAITeam(t); }
+// The AI drives this unit: an AI team's unit, unless a player is steering it
+// in character mode (e.possessed, js/pov3d.js) — then the human rules apply.
+function aiDrives(u){ return isAITeam(u.team) && !u.possessed; }
+// A person sits at this seat: a human controller, or one who handed the town
+// to the AI (autopilot) and is still there. Net presence only (pacing, pause,
+// reclaim) — the sim never reads it, so `autopilot` is not hashed.
+function seatHasPerson(t){ let c = teamControllers[t]; return !!c && (c.type === 'human' || !!c.autopilot); }
 function aiProfileFor(t){
   let c = teamControllers[t];
   return AI_LEVELS[c && c.difficulty] || AI_LEVELS[aiDifficulty] || AI_LEVELS.standard;
 }
 
 // ---- PER-TEAM AI STATE ----
-// One plan-state object per AI-controlled team (null for human slots) —
-// replaces the old single set of globals (aiTick, window.aiIntel/aiWallPlan/
-// aiGateBuilt/aiGateTile/aiWaveCount/aiLastWaveTick/aiSeenWarTick/
-// lastAIBaseHitTick), which could only ever drive ONE AI. Plain data:
-// structuredClone/JSON-safe so it rides the lockstep snapshot ring and the
-// save file unchanged — required for a deterministic AI under rollback.
+// One plan-state object per AI-controlled team (null for human slots).
+// Plain data: structuredClone/JSON-safe so it rides the lockstep snapshot
+// ring and the save file unchanged — required for a deterministic AI under
+// rollback.
 let AI_STATES = null;
 // One restore path for the per-team sim state above, shared by every
 // deserializer (lockstep rollback restore, resync apply, save load) so the
@@ -374,11 +507,13 @@ function restoreTeamState(src){
   teamAlliance = src.teamAlliance || null;
   defeatedTeams = src.defeatedTeams || null;
   teamAge = src.teamAge || null;
+  teamTechs = src.teamTechs || null;
   if (!AI_STATES) resetAIStates();
   if (!lastTeamHit) resetLastTeamHit();
   if (!teamAlliance) resetTeamAlliance();
   if (!defeatedTeams) resetDefeatedTeams();
   if (!teamAge) resetTeamAge();
+  if (!teamTechs) resetTeamTechs();
   // Cosmetic seat labels/colors are NOT part of the lockstep snapshot (never
   // hashed/captured) — rollback/resync src won't carry them, so those keep the
   // current values. A SAVE file DOES carry them (js/save.js) so a loaded MP
@@ -404,17 +539,48 @@ function defaultAlliances(mp){
   if (!mp && NUM_TEAMS === 4) return [0, 0, 1, 1];
   return Array.from({length: NUM_TEAMS}, (_, t) => t);
 }
+// The AI's knowledge memory (updateAIIntel, js/ai.js) — everything here is
+// EARNED through the team's real vision (information parity) and carried
+// across ticks, so it is sim state: hashed in the AI digest
+// (js/determinism.js), snapshot/save rides AI_STATES. Shapes:
+//   strengthByTeam — DENSE length-NUM_TEAMS int array (decaying memory of
+//     each team's observed army power; fixed slot order, never key-iterated)
+//   tcSeen/tcX/tcY/tcTeam — sticky remembered enemy TC (ghost-cleared when
+//     the spot is re-sighted empty)
+//   contactX/Y/Tick — sticky nearest-enemy-contact memory (feeds
+//     getEnemyDirection)
+//   unitCounts — DERIVED, rebuilt before every read each decision tick
+//     (deliberately unhashed; must be hashed if it ever becomes carried)
+function freshAIIntel(){
+  return { unitCounts: {}, strength: 0,
+    strengthByTeam: new Array(NUM_TEAMS).fill(0),
+    tcSeen: false, tcX: 0, tcY: 0, tcTeam: null,
+    contactX: -1, contactY: -1, contactTick: -1 };
+}
 function freshAIState(team){
   return { team, tick: 0,
-    intel: null, wallPlan: null, gateBuilt: false, gateTile: null,
+    intel: freshAIIntel(), wallPlan: null, gateBuilt: false, gateTile: null,
+    // Scout bookkeeping (controlAIScouts/ensureAIScout, js/ai.js): the
+    // base-survey lap progress and the retrain cooldown. Sim state read on
+    // later ticks — hashed in the AI digest.
+    baseSurveyed: false, surveyIdx: 0, lastScoutTrainTick: null,
     waveCount: 0, lastWaveTick: null, lastWaveGlobalTick: null,
+    // Size of the last launched wave — the wave-casualty retreat compares
+    // far-from-home survivors against it (controlAIMilitary, js/ai.js).
+    lastWaveSize: 0,
+    // Civilian-militia response window: while set (> tick), villagers are
+    // fighting a small raid and the garrison bell stays suppressed.
+    militiaUntil: null,
     seenWarTick: null, lastBaseHitTick: null, savingForAge: false, lastAgeUpTick: null,
-    // Wildlife danger memory: gather tiles near a bear that mauled one of
-    // our villagers are off-limits until the stamp expires or the bear is
-    // hunted (canGatherTile, js/logic.js). AoE2 players route around
-    // wolves the same way; a 1.2-speed bear outruns 0.8-speed villagers,
-    // so avoidance — not fleeing — is what actually saves them.
+    // Wildlife danger memory: gather tiles near a bear that mauled a
+    // villager are off-limits until the stamp expires or the bear is hunted
+    // (canGatherTile, js/logic.js) — a 1.2-speed bear outruns 0.8-speed
+    // villagers, so avoidance (AoE2 wolf routing), not fleeing, saves them.
     dangerZones: [],
+    // Attacker siege camp (aiAttackCampControl, js/ai.js): where the army
+    // regroups AT the enemy town instead of cycling home — the resolution
+    // posture. campAssault latches once the assault begins.
+    campX: null, campY: null, campSince: null, campTeam: null, campAssault: false,
     // Consecutive "this is hopeless" decision ticks (maybeResignAI,
     // js/ai.js) — AoE2 AIs concede rather than make the winner grind
     // down every last wall segment.
@@ -453,9 +619,8 @@ const GAIA_COLOR = '#cccc88';
 // by the sim and never hashed in simChecksum (js/determinism.js), so the two
 // lockstep peers may legitimately hold different maps with zero desync risk —
 // but in practice both apply the SAME agreed map (carried in lockstep-start)
-// so outlines/minimap read consistently on both screens. The default identity
-// map [0,1,2,3] reproduces the old fixed behavior exactly (team 0 blue, team 1
-// red). Never add this (or teamNames below) to lockstepCaptureState.
+// so outlines/minimap read consistently on both screens. Never add this (or
+// teamNames below) to lockstepCaptureState.
 let teamColorMap = null;
 function resetTeamColorMap(){ teamColorMap = Array.from({length: NUM_TEAMS}, (_, t) => t); }
 function teamColorIdx(team){
@@ -473,6 +638,26 @@ const PLAYER_TEAM_COLORS_DARK = ['#1a4488', '#993333', '#1f6e30', '#9a7800'];
 const GAIA_COLOR_DARK = '#999966';
 function teamColorDark(team){
   return team === GAIA_TEAM ? GAIA_COLOR_DARK : PLAYER_TEAM_COLORS_DARK[teamColorIdx(team)];
+}
+// Lightened team color for accents that must POP against team-colored
+// cloth (fletching feathers next to the tc cap/tunic). Viewer-only.
+const _teamColorLightCache = {};
+function teamColorLight(team){
+  let h = teamColor(team);
+  let v = _teamColorLightCache[h];
+  if (v) return v;
+  let r = parseInt(h.slice(1,3),16), g = parseInt(h.slice(3,5),16), b = parseInt(h.slice(5,7),16);
+  v = 'rgb(' + Math.round(r+(255-r)*0.45) + ',' + Math.round(g+(255-g)*0.45) + ',' + Math.round(b+(255-b)*0.45) + ')';
+  _teamColorLightCache[h] = v;
+  return v;
+}
+// PURE, maxed-out player colors for the MINIMAP only (AoE2 does the same): a
+// few-px dot on green terrain needs maximum contrast, so the map uses vivid
+// primaries where the unit art uses the softer PLAYER_TEAM_COLORS above. Same
+// order (blue, red, green, yellow) and same teamColorMap remap.
+const PLAYER_TEAM_COLORS_MINIMAP = ['#0000ff', '#ff0000', '#00ff00', '#ffff00'];
+function teamColorMinimap(team){
+  return team === GAIA_TEAM ? GAIA_COLOR : PLAYER_TEAM_COLORS_MINIMAP[teamColorIdx(team)];
 }
 // Per-seat display names chosen in the lobby (js/lobby.js). teamNames[team] =
 // string | null (null = no name yet / AI / empty seat). Cosmetic and viewer-
@@ -526,34 +711,34 @@ const BLDGS={
   // buildTime is villager-work ticks (1 builder = 1 tick of progress per game
   // tick, 30 ticks/game-second), matching AoE2 1-villager build times.
   // armor is {m: melee, p: pierce} — see damageEntity() in logic.js.
-  TC:{name:'Town Center',w:4,h:4,hp:2400,cost:{w:275,s:100},builds:['villager'],buildTime:4500,range:6,atk:5,garrisonCap:15,armor:{m:3,p:5},desc:'Town Center. Trains villagers and accepts resource dropoffs. Garrison up to 15 units for protection and extra arrows.',icon:'🏰'},
-  HOUSE:{name:'House',w:1,h:1,hp:550,cost:{w:25},pop:5,buildTime:750,armor:{m:0,p:7},desc:'Increases population capacity by 5.',icon:'🏠'},
-  LCAMP:{name:'Lumber Camp',w:1,h:1,hp:600,cost:{w:100},drop:'wood',buildTime:1050,armor:{m:0,p:7},desc:'Drop site for Wood.',icon:'🪓'},
-  MCAMP:{name:'Mining Camp',w:1,h:1,hp:600,cost:{w:100},drop:'gold,stone',buildTime:1050,armor:{m:0,p:7},desc:'Drop site for Gold and Stone.',icon:'⛏️'},
-  MILL:{name:'Mill',w:2,h:2,hp:600,cost:{w:100},drop:'food',buildTime:1050,armor:{m:0,p:7},desc:'Drop site for Food. Food drop-off point. Lets you prepay Farm reseeds.',icon:'🛞'},
+  TC:{name:'Town Center',w:4,h:4,hp:2400,cost:{w:275,s:100},builds:['villager'],researches:['wheelbarrow'],buildTime:T30(4500),range:6,atk:5,garrisonCap:15,maxArrows:10,armor:{m:3,p:5},desc:'Trains villagers, advances ages, and accepts resource drop-off. Garrison units for shelter and extra arrows.',icon:'🏰'},
+  HOUSE:{name:'House',w:1,h:1,hp:550,hpAge:[550,750,900],cost:{w:25},pop:5,buildTime:T30(750),armor:{m:0,p:7},desc:'Increases population capacity by 5.',icon:'🏠'},
+  LCAMP:{name:'Lumber Camp',w:1,h:1,hp:600,hpAge:[600,800,1000],cost:{w:100},drop:'wood',researches:['double_bit_axe','bow_saw'],buildTime:T30(1050),armor:{m:0,p:7},desc:'Drop site for Wood. Researches wood-gathering upgrades.',icon:'🪓'},
+  MCAMP:{name:'Mining Camp',w:1,h:1,hp:600,hpAge:[600,800,1000],cost:{w:100},drop:'gold,stone',researches:['gold_mining'],buildTime:T30(1050),armor:{m:0,p:7},desc:'Drop site for Gold and Stone. Researches mining upgrades.',icon:'⛏️'},
+  MILL:{name:'Mill',w:2,h:2,hp:600,hpAge:[600,800,1000],cost:{w:100},drop:'food',researches:['horse_collar','heavy_plow'],buildTime:T30(1050),armor:{m:0,p:7},desc:'Drop site for Food. Lets you prepay Farm reseeds and researches farming upgrades.',icon:'🛞'},
   // isFarm buildings only turn their ORIGIN tile (x,y) into actual farmland
   // (see createBuilding in entities.js) — the extra footprint is just a
   // bigger plot of tilled ground for the crop art to fill, not extra food.
-  FARM:{name:'Farm',w:2,h:2,hp:480,cost:{w:60},isFarm:true,food:175,buildTime:450,armor:{m:0,p:0},desc:'Constant source of Food. Placed on flat land.',icon:'🌱'},
-  BARRACKS:{name:'Barracks',w:3,h:3,hp:1200,cost:{w:175},builds:['militia','spearman','archer','scout','knight','ram'],buildTime:1500,armor:{m:0,p:7},desc:'Trains infantry, archers, and light cavalry.',icon:'⚔️'},
+  FARM:{name:'Farm',w:2,h:2,hp:480,cost:{w:60},isFarm:true,food:175,buildTime:T30(450),armor:{m:0,p:0},desc:'Constant source of Food. Placed on flat land.',icon:'🌱'},
+  BARRACKS:{name:'Barracks',w:3,h:3,hp:1200,hpAge:[1200,1500,1800],cost:{w:175},builds:['militia','spearman','archer','scout','knight','ram'],researches:['forging','iron_casting','scale_armor','chain_mail','fletching','bodkin_arrow','ballistics','masonry','fortified_wall'],buildTime:T30(1500),armor:{m:0,p:7},desc:'Trains units and researches military, armor, and fortification upgrades.',icon:'⚔️'},
   // Watch Tower doubles as a WALL BASTION here — a deliberate deviation from
   // AoE2, which never lets a tower sit inside a wall line. Because ours anchors
   // the wall, it's the strongest link: hp 2000 (above the 1800 stone wall) and
   // it also rides the fortified_wall upgrade (see UPGRADES / buildingMaxHpFor),
   // so a fully-fortified ring keeps its towers tougher than its segments.
-  TOWER:{name:'Watch Tower',w:1,h:1,hp:2000,cost:{w:25,s:125},range:8,atk:5,buildTime:2400,garrisonCap:5,armor:{m:1,p:7},desc:'Defensive tower and wall bastion. Automatically shoots arrows at nearby enemies. Garrison up to 5 units for extra arrows.',icon:'🗼'},
+  TOWER:{name:'Watch Tower',w:1,h:1,hp:2000,cost:{w:25,s:125},range:8,atk:5,buildTime:T30(2400),garrisonCap:5,maxArrows:5,armor:{m:1,p:7},desc:'Shoots arrows at nearby enemies and anchors walls. Garrison units for extra arrows.',icon:'🗼'},
   // Dark-age wooden bastion in the same deliberate deviation: cheap all-wood
   // lookout that anchors an early palisade ring, then upgrades IN PLACE to a
   // Watch Tower once Feudal unlocks it (see WALL_STONE_MATCH / execUpgradeWalls
   // in commands.js). No fortified_wall bonus — that tech is stone-only.
-  PTOWER:{name:'Palisade Watch Tower',w:1,h:1,hp:850,cost:{w:110},range:6,atk:4,buildTime:1500,garrisonCap:3,armor:{m:0,p:5},desc:'Wooden lookout and palisade bastion. Shoots arrows at nearby enemies; garrison up to 3 units for extra arrows. Upgrades in place to a Watch Tower.',icon:'🗼'},
-  WALL:{name:'Palisade Wall',w:1,h:1,hp:250,cost:{w:2},buildTime:150,armor:{m:2,p:5},desc:'Wooden barrier to slow attackers and block chokepoints. Cheap, but burns fast under melee.',icon:'🪵'},
-  GATE:{name:'Palisade Gate',w:1,h:1,hp:400,cost:{w:30},buildTime:900,armor:{m:2,p:2},desc:'Wall opening. Automatically opens for allied units.',icon:'🚪'},
+  PTOWER:{name:'Palisade Watch Tower',w:1,h:1,hp:850,cost:{w:110},range:6,atk:4,buildTime:T30(1500),garrisonCap:3,maxArrows:3,armor:{m:0,p:5},desc:'Wooden tower: shoots arrows and anchors palisade walls. Garrison units for extra arrows. Upgrades to a Watch Tower.',icon:'🗼'},
+  WALL:{name:'Palisade Wall',w:1,h:1,hp:250,cost:{w:2},buildTime:T30(150),armor:{m:2,p:5},desc:'Cheap wooden barrier. Blocks attackers, but burns fast under melee.',icon:'🪵'},
+  GATE:{name:'Palisade Gate',w:1,h:1,hp:400,cost:{w:30},buildTime:T30(900),armor:{m:2,p:2},desc:'Wall opening. Opens automatically for allies.',icon:'🚪'},
   // Feudal-age stone fortifications — the pre-palisade stats. A stone gate
   // only replaces stone wall segments (and palisade gate only palisades):
   // matching material keeps the consume/refund math and the art coherent.
-  SWALL:{name:'Stone Wall',w:1,h:1,hp:1800,cost:{s:5},buildTime:240,armor:{m:8,p:10},desc:'Heavy stone defensive barrier. Requires the Feudal Age.',icon:'🧱'},
-  SGATE:{name:'Stone Gate',w:1,h:1,hp:2750,cost:{s:30},buildTime:2100,armor:{m:6,p:6},desc:'Stone wall opening. Automatically opens for allied units.',icon:'🚪'},
+  SWALL:{name:'Stone Wall',w:1,h:1,hp:1800,cost:{s:5},buildTime:T30(240),armor:{m:8,p:10},desc:'Heavy stone barrier. Requires the Feudal Age.',icon:'🧱'},
+  SGATE:{name:'Stone Gate',w:1,h:1,hp:2750,cost:{s:30},buildTime:T30(2100),armor:{m:6,p:6},desc:'Stone wall opening. Opens automatically for allies.',icon:'🚪'},
   // Feudal-age Market. Trains Trade Carts (which shuttle to any OTHER player's
   // Market for gold, allied or enemy — see updateTradeCart in logic.js) and
   // hosts the global commodity buy/sell exchange (see marketPrices / execMarketTrade
@@ -561,23 +746,27 @@ const BLDGS={
   // accept a rally point (execRally bails when builds is empty).
   // walkable: the market is an open-air plaza — once complete its whole
   // footprint passes units (see walkable() in pathfinding.js and the
-  // pushUnitsOut skip in entities.js); tiles stay `occupied` so nothing can
-  // be built on it.
-  MARKET:{name:'Market',w:3,h:3,hp:1200,cost:{w:175},builds:['tradecart'],buildTime:1500,armor:{m:0,p:7},walkable:true,desc:'Trains Trade Carts and lets you buy and sell resources for gold. Trade Carts earn gold by travelling to another player’s Market. Requires the Feudal Age.',icon:'⚖️'}
+  // isFarm/walkable skip in clearFootprintForBuild); tiles stay `occupied` so
+  // nothing can be built on it.
+  MARKET:{name:'Market',w:3,h:3,hp:1800,hpAge:[1800,1800,2100],cost:{w:175},builds:['tradecart'],researches:['guilds'],buildTime:T30(1500),armor:{m:0,p:7},walkable:true,desc:'Trains Trade Carts, trades resources for gold, and researches Guilds. Requires the Feudal Age.',icon:'⚖️'}
+  // Research is distributed to the buildings that "own" each tech (AoE2-style):
+  // see the `researches` arrays above — Barracks (military/armor/fortification),
+  // Mill (farming), Lumber Camp (wood), Mining Camp (gold), Market (Guilds),
+  // Town Center (Wheelbarrow). Age advancement stays at the TC (execResearch).
 };
 // speed is tiles per game-second; trainTime/rof are ticks (30/game-second).
 // rof = reload between attacks; armor = {m: melee, p: pierce}. All values
 // track AoE2 Dark/Feudal-age stats.
 const UNITS={
-  villager:{name:'Villager',hp:25,atk:3,range:0,speed:0.8,rof:60,armor:{m:0,p:0},cost:{f:50},trainTime:750,desc:'Gathers resources and constructs structures.',icon:'🧑‍🌾'},
-  militia:{name:'Militia',hp:40,atk:4,range:0,speed:0.9,rof:60,armor:{m:0,p:1},cost:{f:60,g:20},trainTime:630,desc:'Basic infantry soldier. Affordable defense.',icon:'🛡️'},
-  spearman:{name:'Spearman',hp:45,atk:3,range:0,speed:1.0,rof:90,armor:{m:0,p:0},cost:{f:35,w:25},trainTime:660,desc:'Anti-cavalry infantry. Strong counter to scouts.',icon:'🔱'},
-  archer:{name:'Archer',hp:30,atk:4,range:4,speed:0.96,rof:60,armor:{m:0,p:0},cost:{w:25,g:45},trainTime:1050,desc:'Ranged archer. Effective against infantry, weak to scouts.',icon:'🏹'},
+  villager:{bonuses:{building:3},name:'Villager',hp:25,atk:3,range:0,speed:0.8,rof:T30(60),armor:{m:0,p:0},cost:{f:50},trainTime:T30(750),desc:'Gathers resources and constructs structures.',icon:'🧑‍🌾'},
+  militia:{bonuses:{building:2},name:'Militia',hp:40,atk:4,range:0,speed:0.9,rof:T30(60),armor:{m:0,p:1},cost:{f:60,g:20},trainTime:T30(630),desc:'Basic infantry soldier. Affordable defense.',icon:'🛡️'},
+  spearman:{bonuses:{scout:15,knight:15},name:'Spearman',hp:45,atk:3,range:0,speed:1.0,rof:T30(90),armor:{m:0,p:0},cost:{f:35,w:25},trainTime:T30(660),desc:'Anti-cavalry infantry. Strong counter to scouts.',icon:'🔱'},
+  archer:{bonuses:{spearman:3},name:'Archer',hp:30,atk:4,range:4,speed:0.96,rof:T30(60),armor:{m:0,p:0},cost:{w:25,g:45},trainTime:T30(1050),desc:'Ranged archer. Effective against infantry, weak to scouts.',icon:'🏹'},
   // 1.55 is the Feudal+ scout speed (free +0.35 at Feudal in AoE2) — and
   // the scout IS Feudal-gated here now (AGE_REQ), so the speed fits.
-  scout:{name:'Scout Cavalry',hp:45,atk:3,range:0,speed:1.55,rof:60,armor:{m:0,p:2},cost:{f:80},trainTime:900,desc:'Fast light cavalry. Effective against archers and for scouting.',icon:'🏇'},
+  scout:{name:'Scout Cavalry',hp:45,atk:3,range:0,speed:1.55,rof:T30(60),armor:{m:0,p:2},cost:{f:80},trainTime:T30(900),desc:'Fast light cavalry. Effective against archers and for scouting.',icon:'🏇'},
   // Castle-age heavy cavalry (AoE2-ish knight).
-  knight:{name:'Knight',hp:100,atk:10,range:0,speed:1.35,rof:60,armor:{m:2,p:2},cost:{f:60,g:75},trainTime:900,desc:'Heavy cavalry. Devastating charges, strong armor; counter with spearmen.',icon:'🐴'},
+  knight:{name:'Knight',hp:100,atk:10,range:0,speed:1.35,rof:T30(54),armor:{m:2,p:2},cost:{f:60,g:75},trainTime:T30(900),desc:'Heavy cavalry. Devastating charges, strong armor; counter with spearmen.',icon:'🐴'},
   // Battering ram — Castle-age siege (AGE_REQ), trained at the Barracks
   // (no siege workshop building exists). NOT in MILITARY on purpose (AoE2
   // rams get no blacksmith melee/armor techs — see isArmyUnit). The tiny
@@ -585,40 +774,61 @@ const UNITS={
   // bonus in damageEntity (js/logic.js) — mirrored in the AI's
   // wallBreachTicks (js/ai.js). High pierce armor makes arrow fire (4-5
   // pierce) tick for 1; melee hits it at full damage, the AoE2 counter.
-  ram:{name:'Battering Ram',hp:175,atk:2,range:0,speed:0.5,rof:150,armor:{m:-3,p:8},cost:{w:160,g:75},trainTime:1080,desc:'Siege engine. Devastates buildings and walls; nearly immune to arrows but helpless against melee.',icon:'🐏'},
+  // garrisonCap: melee infantry rides inside (AoE2 garrison-rams) — protected
+  // en route, each rider speeds the ram up (unitMoveSpeed, js/logic.js), and
+  // riders pop out unharmed when the ram is destroyed (handleDeath).
+  // bonuses.building 110: the ram IS its building bonus — tuned so one ram's
+  // net DPS (~20.8 hp/s after a wall's 8 melee armor, rof 150) clearly
+  // EXCEEDS a villager's repair, so sieges breach instead of bouncing (at
+  // +70, two repairers stalled a ram forever — the finishing stalemate).
+  // Keep in sync with wallBreachTicks (ai.js). All `bonuses` tables are the
+  // AoE2 attack-bonus data read by damageEntity (js/logic.js).
+  ram:{bonuses:{building:110},name:'Battering Ram',hp:175,atk:2,range:0,speed:0.5,rof:T30(150),armor:{m:-3,p:180},cost:{w:160,g:75},trainTime:T30(1080),garrisonCap:4,desc:'Siege engine. Smashes buildings; immune to arrows but helpless in melee. Garrison infantry to ride protected and speed it up.',icon:'🐏'},
   // Wild predator (AoE2 wolf logic, bear body): gaia team, lurks in the
   // wild, charges any player unit that wanders into its territory, then
   // returns to its den area when the prey escapes. Stronger than an AoE2
   // wolf (45hp/7atk vs 25/3) so a lone villager should run, but a couple
   // of militia put it down without drama.
-  bear:{name:'Bear',hp:45,atk:7,range:0,speed:1.2,rof:60,armor:{m:1,p:0},cost:{f:0},trainTime:0,desc:'Wild animal. Attacks anyone who wanders too close.',icon:'🐻'},
-  sheep:{name:'Sheep',hp:7,atk:0,range:0,speed:0.7,rof:60,armor:{m:0,p:0},cost:{f:0},trainTime:0,food:100,desc:'Provides Food when harvested.',icon:'🐑'},
-  sheep_carcass:{name:'Sheep Carcass',hp:100,atk:0,range:0,speed:0.0,rof:60,armor:{m:0,p:0},cost:{f:0},trainTime:0,desc:'Provides Food when harvested.',icon:'🍖'},
+  bear:{name:'Bear',hp:45,atk:7,range:0,speed:1.2,rof:T30(60),armor:{m:1,p:0},cost:{f:0},trainTime:T30(0),desc:'Wild animal. Attacks anyone who wanders too close.',icon:'🐻'},
+  // The map's hazard: asleep at the centre; woken, its breath (updateDragonBehavior) burns everything in a cone.
+  // It can't be killed — a killing blow knocks it out to sleep it off (damageEntity). A place to steer round.
+  dragon:{name:'Dragon',hp:800,atk:14,range:0,speed:1.0,rof:T30(75),armor:{m:2,p:3},bonuses:{building:24},cost:{f:0},trainTime:T30(0),desc:'Sleeps at the heart of the map — wake it and it breathes fire on everything near. It cannot be killed: beat it down and it only sleeps it off, healing. Keep away.',icon:'🐉'},
+  sheep:{name:'Sheep',hp:7,atk:0,range:0,speed:0.7,rof:T30(60),armor:{m:0,p:0},cost:{f:0},trainTime:T30(0),food:100,desc:'Provides Food when harvested.',icon:'🐑'},
+  sheep_carcass:{name:'Sheep Carcass',hp:100,atk:0,range:0,speed:0.0,rof:T30(60),armor:{m:0,p:0},cost:{f:0},trainTime:T30(0),desc:'Provides Food when harvested.',icon:'🍖'},
   // Trade Cart — Feudal (AGE_REQ), trained at the Market. Unarmed and
   // defenceless: it shuttles between its home Market and another player's
   // Market, delivering gold scaled by the distance between them (see
   // updateTradeCart in logic.js). Costs 1 pop like any unit.
-  tradecart:{name:'Trade Cart',hp:70,atk:0,range:0,speed:1.0,rof:60,armor:{m:0,p:0},cost:{w:100},trainTime:750,desc:'Trades between your Market and another player’s Market to earn gold. The farther apart the Markets, the more gold per trip.',icon:'🛒'}
+  tradecart:{name:'Trade Cart',hp:70,atk:0,range:0,speed:1.0,rof:T30(60),armor:{m:0,p:0},cost:{w:100,g:50},trainTime:T30(1530),desc:'Earns gold trading between your Market and another player’s. Farther Markets pay more.',icon:'🛒'}
 };
 
 // ---- Unit classification: THE one place a new unit type gets sorted.
-// The sim used to spell these groups out as inline utype name-lists at
-// half a dozen sites (auto-engage, retaliation, defense responses, blood
-// vs timber death FX, guard eligibility) — adding the trade cart meant
-// finding and editing every list. Each predicate below names ONE semantic;
-// the sites read them.
+// Each predicate below names ONE semantic (auto-engage, retaliation, death
+// FX, guard eligibility); the sites read the predicates — never re-spell
+// inline utype lists.
 const HARMLESS_ANIMALS = new Set(['sheep', 'sheep_carcass']); // never fight back, no death cry
 const WOOD_VEHICLES = new Set(['ram', 'tradecart']);          // timber rigs: collapse sound, wreck corpse, no blood, never retaliate
 function isHarmlessAnimal(u){ return HARMLESS_ANIMALS.has(u.utype); }
+// Gaia hunters with their own leashed behaviour (bear, dragon): not soldiers, no pop, no stance.
+function isWildPredator(u){ return u.utype === 'bear' || u.utype === 'dragon'; }
 function isWoodVehicle(u){ return WOOD_VEHICLES.has(u.utype); }
 // A SOLDIER fights on its own initiative — auto-engages, answers a sieged
 // ally's call. Not a villager (works), not an animal (bears run their own
 // leashed aggro), not a vehicle (carts are unarmed; rams strike only what
 // they're ordered onto).
 function isSoldierUnit(u){
-  return u.type === 'unit' && u.utype !== 'villager' && u.utype !== 'bear'
+  return u.type === 'unit' && u.utype !== 'villager' && !isWildPredator(u)
     && !isHarmlessAnimal(u) && !isWoodVehicle(u);
 }
+// Who may ride inside a ram (AoE2 garrison-rams: melee infantry only —
+// archers need to shoot, cavalry doesn't fit, villagers work).
+const RAM_RIDER_TYPES = new Set(['militia', 'spearman']);
+function canRideRam(u){ return u.type === 'unit' && RAM_RIDER_TYPES.has(u.utype); }
+// Mid-tactical-retreat (retreatUntil stamp, js/ai.js aiRetreatUnit): the unit
+// is running home and must not be re-engaged by retaliation/auto-acquire or
+// re-dispatched by any AI pass. THE one predicate — the raw `retreatUntil >
+// tick` comparison must not be re-spelled at call sites.
+function isRetreatingUnit(u){ return u.retreatUntil > tick; }
 // AI pacing, authored against the AoE2-rate economy (30 ticks per
 // game-second; villager trains in 25 game-s, militia in 21 game-s).
 // AoE2-style attack plan: the first strike comes no earlier than attackTick,
@@ -630,27 +840,50 @@ function isSoldierUnit(u){
 // mirroring how AoE2 throttles difficulty through the economy (a stunted eco
 // fields small attacks) rather than a scripted attack timeline.
 // attackTick reference points: hard rushes ~8 game-minutes (a classic drush
-// window), easy waits ~18. trickle is free resources per decisionInterval —
-// the original AoE2's harder AIs cheated a modest resource trickle; easy
-// gets none.
-const AI_LEVELS={
-  // Easy is handicapped the AoE2 way — NOT by nerfing unit stats or capping the
-  // age, but by a weak economy and timid aggression. It CAN still reach Castle
-  // (maxAge:2) and build rams/knights, but so slowly (Castle age-up ~35min,
-  // needs 13 vils) and attacks so late/small/cautiously (first push ~18min,
-  // eco-capped waves of ~3, only commits at a 2x army advantage) that a beginner has ample
-  // time to stabilise and siege almost never lands. Mirrors how AoE2's easiest
-  // AI feels easy: it's played worse, not given weaker units. Harder levels tech
-  // faster and push harder for the real threat.
-  easy:{name:'Easy',decisionInterval:240,maxVils:14,queueLimit:1,houseBuffer:1,buildersPerBuilding:1,maxBarracks:1,barracksVil:8,attackSize:3,armyEcoFloor:8,armyPerVil:0.35,waveCooldown:3600,attackTick:32400,armyReserve:2,militaryFoodReserve:0,dropSites:true,walls:false,wallVils:0,wallRadius:0,attackAdvantage:2.0,trickle:{food:0,wood:0,gold:0,stone:0},maxTowers:0,maxTradeCarts:3,marketVil:12,ecoRatios:{forage:3,chop:3,mine_gold:2},farmShare:3,targetFarms:4,wallCheckInterval:600,wallMaintInterval:600,waveCap:6,allyJoinWindow:0,allyJoinFactor:1.0,maxAge:2,ageUpVils:[0,10,13],ageUpTick:[0,21600,63000],ageSurgeWindow:0,ageSurgeFactor:1.0},
-  // Standard plays FAIR — no resource cheat (trickle all 0), like AoE2's
-  // Moderate AI. It's still a real challenge (reaches Castle ~15min, fields
-  // rams/knights, walls + a tower, pushes from ~10min) but wins on competent
-  // play, not free resources. Only hard cheats — AoE2 reserves resource
-  // handicaps for its hardest tiers.
-  standard:{name:'Medium',decisionInterval:180,maxVils:18,queueLimit:2,houseBuffer:2,buildersPerBuilding:1,maxBarracks:1,barracksVil:8,attackSize:4,armyEcoFloor:8,armyPerVil:0.6,waveCooldown:2100,attackTick:18000,armyReserve:4,militaryFoodReserve:70,dropSites:true,walls:true,wallVils:10,wallRadius:6,attackAdvantage:1.15,trickle:{food:0,wood:0,gold:0,stone:0},maxTowers:1,maxTradeCarts:5,marketVil:12,ecoRatios:{forage:4,chop:3,mine_gold:3,mine_stone:1},farmShare:3,targetFarms:3,wallCheckInterval:600,wallMaintInterval:300,waveCap:12,allyJoinWindow:600,allyJoinFactor:0.75,maxAge:2,ageUpVils:[0,12,16],ageUpTick:[0,12600,27000],ageSurgeWindow:3600,ageSurgeFactor:0.75},
-  hard:{name:'Hard',decisionInterval:120,maxVils:24,queueLimit:3,houseBuffer:3,buildersPerBuilding:2,maxBarracks:2,barracksVil:7,attackSize:5,armyEcoFloor:8,armyPerVil:0.9,waveCooldown:1500,attackTick:14400,armyReserve:6,militaryFoodReserve:120,dropSites:true,walls:true,wallVils:8,wallRadius:7,attackAdvantage:0.9,trickle:{food:2,wood:2,gold:1,stone:1},maxTowers:2,maxTradeCarts:8,marketVil:10,ecoRatios:{forage:4,chop:4,mine_gold:4,mine_stone:1},farmShare:4,targetFarms:4,wallCheckInterval:450,wallMaintInterval:240,waveCap:24,allyJoinWindow:900,allyJoinFactor:0.6,maxAge:2,ageUpVils:[0,10,14],ageUpTick:[0,9000,19800],ageSurgeWindow:3600,ageSurgeFactor:0.6}
+// window), easy waits ~18. Parity rule: no free resources at any difficulty —
+// the AI plays with exactly the tools a human has.
+// ONE base profile; a difficulty is BASE plus the handful of knobs that
+// actually scale. Three full copies is how `standard` silently drifted on 20
+// knobs (economy, production, attack timing) while easy and hard were retuned
+// together — divergence is now impossible by construction, because anything
+// absent from an override IS the shared value. Per DE (§2 + the time-multiplier
+// correction) only aggression, reaction and the AI time multiplier scale;
+// maxVils/wallRadius/wallAge/maxTowers/ageUp* are our deliberate additions.
+const AI_BASE = {
+  queueLimit: 3,
+  houseBuffer: 3,
+  buildersPerBuilding: 2,
+  maxBarracks: 2,
+  barracksVil: 7,
+  sightedResponsePercent: 50,
+  civilianMilitia: 10,
+  armyEcoFloor: 8,
+  waveCooldown: T30(1500),
+  attackTick: T30(3600),
+  armyReserve: 6,
+  ramWoodReserve: 99,
+  militaryFoodReserve: 120,
+  dropSites: true,
+  walls: true,
+  wallVils: 8,
+  attackAdvantage: 0.9,
+  maxTradeCarts: 8,
+  marketVil: 10,
+  ecoRatios: {forage:4,chop:4,mine_gold:4,mine_stone:1},
+  farmShare: 4,
+  targetFarms: 4,
+  allyJoinWindow: T30(900),
+  allyJoinFactor: 0.6,
+  maxAge: 2,
+  ageSurgeWindow: T30(3600),
+  ageSurgeFactor: 0.6,
 };
+const AI_LEVELS = {
+  easy: { ...AI_BASE, aiTimeMult:2, name:'Easy', decisionInterval:T30(300), maxVils:18, attackSize:3, waveCap:8, commitPercent:35, armyPerVil:0.3, wallRadius:4, wallAge:1, maxTowers:1, ageUpVils:[0,10,13], ageUpTick:[0,T30(21600),T30(63000)] },
+  standard: { ...AI_BASE, aiTimeMult:1.33, name:'Medium', decisionInterval:T30(180), maxVils:18, attackSize:4, waveCap:12, commitPercent:56, armyPerVil:0.6, wallRadius:6, wallAge:2, maxTowers:1, ageUpVils:[0,12,16], ageUpTick:[0,T30(12600),T30(27000)] },
+  hard: { ...AI_BASE, aiTimeMult:1, name:'Hard', decisionInterval:T30(120), maxVils:24, attackSize:5, waveCap:24, commitPercent:75, armyPerVil:0.9, wallRadius:7, wallAge:2, maxTowers:2, ageUpVils:[0,10,14], ageUpTick:[0,T30(9000),T30(19800)] },
+};
+
 
 // Cosmetic-only RNG (particles, audio variation). Anything the SIM reads on
 // a later tick must use simRandom/simRandInt below instead — the lockstep
@@ -732,7 +965,7 @@ const CORPSE_SKEL=12000, CORPSE_LIFE=25000;
 // Tick-based corpse lifetime for the headless simulator only: render.js prunes
 // corpses by wall-clock (CORPSE_LIFE ms), but headless never runs render(), so
 // it prunes by tick age instead to bound memory (~CORPSE_LIFE at 30 tps).
-const CORPSE_LIFE_TICKS=750;
+const CORPSE_LIFE_TICKS=T30(750);
 
 // ---- GAME STATE ----
 let map=[], entities=[], entitiesById=new Map(), corpses=[], selected=[], camX=0, camY=0, tick=0;
@@ -742,11 +975,14 @@ let map=[], entities=[], entitiesById=new Map(), corpses=[], selected=[], camX=0
 function setZoomAroundPoint(newZoom, sx, sy){
   newZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, newZoom));
   if(newZoom === ZOOM) return;
-  let isoX = (sx - W/2)/ZOOM + camX;
-  let isoY = (sy - (H/2 + topH))/ZOOM + camY;
+  // THE shared anchor (zoomAnchor, js/iso.js) — mixing rounded/unrounded
+  // centers drifts the zoom focal point sub-pixel.
+  const {ax, ay} = zoomAnchor();
+  let isoX = ax + (sx - ax)/ZOOM - W/2 + camX;
+  let isoY = ay + (sy - ay)/ZOOM - (H/2 + topH) + camY;
   ZOOM = newZoom;
-  camX = isoX - (sx - W/2)/ZOOM;
-  camY = isoY - (sy - (H/2 + topH))/ZOOM;
+  camX = isoX - (ax + (sx - ax)/ZOOM - W/2);
+  camY = isoY - (ay + (sy - ay)/ZOOM - (H/2 + topH));
   window.cameraFollowId = null;
 }
 
@@ -758,32 +994,46 @@ function freshTeamResources(){
   return Array.from({length: NUM_TEAMS}, () => ({food:200,wood:200,gold:100,stone:200,prepaidFarms:0}));
 }
 let resources = freshTeamResources();
-// Global commodity exchange — ONE market shared by every player (AoE2 works
-// this way: buying/selling shifts the price for everyone). Gold is the
-// currency so it has no price. Buying a resource nudges its price up; selling
-// nudges it down; a buy/sell spread means round-tripping loses gold. Prices
-// are integer gold-per-100-units and are sim state: checksummed
-// (js/determinism.js) and saved (js/save.js), only mutated in execMarketTrade
-// (js/commands.js). See MARKET_* tuning constants below.
+// Commodity exchange prices — GLOBAL, not per-team (AoE2, openage
+// game_mechanics/market.md: "prices are global to all players"): every
+// player's trades move the one shared table. Gold is the currency so it has
+// no price; buying nudges a price up, selling down, and the buy/sell spread
+// means round-tripping loses gold. Integer gold-per-100-units, SIM state:
+// checksummed (js/determinism.js), saved (js/save.js), only mutated in
+// execMarketTrade (js/commands.js). See MARKET_* tuning constants below.
 function freshMarketPrices(){
   return {food:100, wood:100, stone:130};
 }
 let marketPrices = freshMarketPrices();
+// The shared price table behind a per-team accessor signature (the UI/AI
+// call sites don't care that prices are global).
+function marketPricesFor(team){
+  return marketPrices;
+}
 // Commodity exchange tuning (integer math for determinism). Trades move 100
 // units. SPREAD is applied so buying costs the full price and selling only
 // returns SELL_RATIO of it. STEP shifts the price after each 100-unit trade;
 // prices clamp to [MIN, MAX]. Mirrors AoE2's drifting commodity market.
 const MARKET_LOT = 100;
-const MARKET_PRICE_MIN = 25, MARKET_PRICE_MAX = 9999;
+const MARKET_PRICE_MIN = 20, MARKET_PRICE_MAX = 9999; // AoE2 clamp (openage market.md): [20, 9999]
 const MARKET_PRICE_STEP = 3;   // price change per 100-unit trade
-const MARKET_SELL_RATIO = 70;  // sell returns 70% of price (÷100), a 30% spread
-// Trade Cart gold per round trip = round(distance-between-markets * this).
-// Farther-apart Markets pay more, rewarding spread-out trade (AoE2 behavior).
-const TRADE_GOLD_PER_TILE = 1.2;
+const MARKET_SELL_RATIO = 70;  // sell returns 70% of price (÷100) — AoE2's 30% commission
+const MARKET_SELL_RATIO_GUILDS = 85; // Guilds halves the fee to 15% (sell returns 85%)
+// Percent of the buy price a team gets back when selling — AoE2's 30%
+// commission, halved to 15% once the team has the Guilds card (Castle age).
+function marketSellRatio(team){
+  return hasUpgrade(team, 'guilds') ? MARKET_SELL_RATIO_GUILDS : MARKET_SELL_RATIO;
+}
+// Trade Cart gold per round trip — The Conquerors formula (openage
+// doc/reverse_engineering/game_mechanics/market.md):
+//   gold = 2·(d/mapSize + 0.3)·d·K + 0.5,  d = max(0.1, √(max(0,Δx−5)² + max(0,Δy−5)²))
+// Longer routes pay SUPERLINEARLY (the d² term) and the map-size divisor
+// keeps income comparable across map sizes. K calibrated so a typical
+// half-map route on the 120 map (~50 tiles) pays ~60 gold.
+const TRADE_GOLD_FACTOR = 0.84;
 // Viewer-local convenience caches of MY team's population (see
 // refreshPopulationCounts, js/logic.js); per-team reads go through
-// teamPopUsed/teamPopCap directly. The old aiPop/aiPopCap/aiTick globals
-// are gone — AI bookkeeping lives in AI_STATES (above) per team.
+// teamPopUsed/teamPopCap directly.
 let popUsed=0, popCap=0;
 let placing=null, mouseX=0, mouseY=0, dragStart=null, dragEnd=null;
 let gameOver=false, won=false;
@@ -825,34 +1075,22 @@ function feedbackFor(team, fn){
   fn();
 }
 let netConn=null, netConnected=false;
-// Legacy snapshot-sync is gone (lockstep everywhere — js/lockstep.js), but
-// markMapDirty stays as a no-op seam: every sim-side map mutation already
-// calls it, which is exactly the hook a future map-mutation journal (e.g.
-// cheaper rollback snapshots) would need.
+// No-op seam: every sim-side map mutation calls this — exactly the hook a
+// future map-mutation journal (e.g. cheaper rollback snapshots) or a cached
+// terrain-art layer would need to invalidate.
 function markMapDirty(x,y){}
 
 // Which tile the falling-tree animation started on, and when — LOCAL-ONLY,
-// keyed by "x,y" rather than stored as a `fellTick` field directly on the
-// map tile object (js/render-terrain.js used to do this). Same bug shape
-// as scoutedByMe above: every wood-chop decrements a tile's `res`, which
-// calls markMapDirty() and sends that tile as a dirty-cell delta — on the
-// GUEST, applying that delta means `map[y][x] = cell` (a brand-new object
-// from the wire), wiping out whatever `fellTick` had been set on the OLD
-// object. Since the tree-falling trigger is `if (res<=60 && fellTick===
-// undefined)`, every single subsequent chop below that threshold saw a
-// fresh `undefined` and restarted the fall animation from scratch —
-// reported as "the tree falling sequence keeps repeating over and over".
+// keyed by "x,y" rather than a field on the map tile object: a synced tile
+// replacement wipes on-tile fields and restarts the fall animation on every
+// chop (js/render-terrain.js).
 let treeFellTicks = new Map();
 
-// Same shape of bug, two more instances found in the same audit:
-// - corpseImpactFxDone: which corpse ids have already played their one-time
-//   ground-impact dust puff (js/render-units.js's drawCorpse). Used to live
-//   as `c.impactFx` directly on the corpse object — corpses get wholesale-
-//   replaced by every sync (`corpses = data.corpses`, js/net-sync.js), so
-//   the guest kept re-triggering the puff on every sync instead of once.
-// - workSwingCycles: per-unit last work-swing cycle that already fired its
-//   impact particle (js/render-units.js) — was `e._swingCyc` directly on
-//   the entity, wiped by sync's wholesale entity replacement.
+// Same bug shape — one-shot render FX state kept OFF the synced objects
+// (corpses/entities get wholesale-replaced, re-triggering the FX):
+// - corpseImpactFxDone: corpse ids that played their ground-impact dust puff
+// - workSwingCycles: per-unit last work-swing cycle that fired its particle
+// (both js/render-units.js).
 let corpseImpactFxDone = new Set();
 let workSwingCycles = new Map();
 
@@ -878,14 +1116,35 @@ function markScoutedBuildings(){
   });
 }
 
-function darkenColor(hex, percent) {
-  if (!hex || hex.startsWith('rgba') || hex.startsWith('rgb')) return hex;
-  let num = parseInt(hex.slice(1), 16),
-      amt = Math.round(2.55 * percent * 100),
-      R = (num >> 16) - amt,
-      G = (num >> 8 & 0x00FF) - amt,
-      B = (num & 0x0000FF) - amt;
-  return "#" + (0x1000000 + (R<0?0:R>255?255:R)*0x10000 + (G<0?0:G>255?255:G)*0x100 + (B<0?0:B>255?255:B)).toString(16).slice(1);
+// Advancing an age raises every standing building's ceiling. Damage is kept as
+// a FRACTION so a half-ruined barracks stays half-ruined; an untouched one
+// stays exactly full (no rounding drift). A foundation's hp IS its build
+// progress, so only its ceiling moves. Mirrors the editor's rederiveTeamStats.
+// THE research duration for a team: the authored ticks, scaled by that team's
+// aiTimeMult. Three places computed this — the completion check (logic.js) and
+// BOTH progress bars (ui.js, render-buildings.js) — and only the completion
+// applied the multiplier, so an AI building's bar ran on a different clock from
+// its research. One spelling; a bar can no longer disagree with the thing it
+// is drawing.
+function researchDurationFor(team, target){
+  let base = (typeof target === 'number') ? AGES[target].researchTicks : UPGRADES[target].researchTicks;
+  return Math.round(base * aiTimeMult(team));
+}
+// THE training duration for a team (same aiTimeMult scaling): the completion
+// check and every training progress display read this one spelling.
+function trainDurationFor(team, utype){
+  return Math.round(UNITS[utype].trainTime * aiTimeMult(team));
+}
+
+function rescaleTeamBuildingHp(team){
+  entities.forEach(e => {
+    if (e.type !== 'building' || e.team !== team || e.hp <= 0) return;
+    let newMax = buildingMaxHpFor(team, e.btype);
+    if (newMax === e.maxHp) return;
+    if (!e.complete) { e.maxHp = newMax; return; }
+    if (e.hp === e.maxHp) { e.hp = newMax; e.maxHp = newMax; }
+    else { let f = e.hp / e.maxHp; e.maxHp = newMax; e.hp = Math.max(1, Math.round(newMax * f)); }
+  });
 }
 
 function initFog() {
@@ -899,46 +1158,6 @@ function initFog() {
   }
 }
 
-// Shared vision math used by updateFog() (each client's own live fog, for
-// whichever team is "me" locally) — the sight-radius table lives in one
-// place. Calls cb(x,y) for every currently-visible tile around every
-// entity on `team`.
-function forEachVisibleTile(team, cb){
-  entities.forEach(e => {
-    if (e.team !== team) return;
-
-    let sight = 5;
-    if (e.type === 'building') {
-      if (!e.complete) sight = 1;
-      else if (e.btype === 'TC') sight = 8;
-      else if (e.btype === 'TOWER') sight = 9;
-      else if (e.btype === 'PTOWER') sight = 8;
-      else if (e.btype === 'HOUSE') sight = 4;
-      else sight = 5;
-    } else {
-      if (e.utype === 'sheep') sight = 3;
-      else if (e.utype === 'scout') sight = 7;
-      else sight = 5;
-    }
-
-    let cx = Math.round(e.x);
-    let cy = Math.round(e.y);
-    if (e.type === 'building') {
-      let b = BLDGS[e.btype];
-      // Footprint spans [e.x, e.x+w) — center tile is Math.floor, not round
-      // (round pushes odd-sized buildings, incl. the 3x3 TC, one tile off).
-      cx = Math.floor(e.x + (e.w || b.w)/2);
-      cy = Math.floor(e.y + (e.h || b.h)/2);
-    }
-
-    let offs = sightOffsets(sight);
-    for (let i = 0; i < offs.length; i += 2) {
-      let tx = cx + offs[i];
-      let ty = cy + offs[i + 1];
-      if (tx >= 0 && tx < MAP && ty >= 0 && ty < MAP) cb(tx, ty);
-    }
-  });
-}
 
 // Precomputed in-circle tile offsets per sight radius: the naive loop
 // tested (2s+1)^2 boxes per entity per tick (361 iterations at sight 9,
@@ -971,28 +1190,22 @@ function updateFog() {
     for (let y = 0; y < MAP; y++) for (let x = 0; x < MAP; x++) fog[y][x] = 2;
     return;
   }
-  // Single combined pass when the sim's per-team visibility is fresh
-  // (updateTeamVision runs just before this in update()): downgrade stale
-  // active vision and set the new visible tiles in one sweep. A legacy
-  // (non-lockstep) guest never runs update(), so its grids are stale —
-  // fall back to the downgrade loop + its own vision walk.
-  if (visionFreshTick >= tick - 1 && visionFreshTick >= 0 && teamVisGrid) {
-    const vg = teamVisGrid[myTeam];
-    for (let y = 0; y < MAP; y++) {
-      const row = fog[y], base = y * MAP;
-      for (let x = 0; x < MAP; x++) {
-        if (vg[base + x] > 0) row[x] = 2;
-        else if (row[x] === 2) row[x] = 1;
-      }
-    }
-    return;
-  }
+  // Drive fog SOLELY from the sim's per-team visibility grid, which is
+  // ALLY-SHARED (updateTeamVision applies every unit's sight to its team AND
+  // its allies). It runs just before us in the tick (js/loop.js) and the load
+  // path builds it explicitly (js/save.js); if it somehow isn't built yet
+  // (visionFreshTick < 0), leave fog untouched this frame rather than
+  // recomputing visibility a second, divergent way — an own-team-only fallback
+  // here used to make ally-lit tiles flicker visible↔shroud between refreshes.
+  if (visionFreshTick < 0 || !teamVisGrid) return;
+  const vg = teamVisGrid[myTeam];
   for (let y = 0; y < MAP; y++) {
+    const row = fog[y], base = y * MAP;
     for (let x = 0; x < MAP; x++) {
-      if (fog[y][x] === 2) fog[y][x] = 1;
+      if (vg[base + x] > 0) row[x] = 2;
+      else if (row[x] === 2) row[x] = 1;
     }
   }
-  forEachVisibleTile(myTeam, (tx, ty) => { fog[ty][tx] = 2; });
 }
 
 // ---- Deterministic per-team visibility (SIM state) ----
@@ -1014,8 +1227,25 @@ function updateFog() {
 // set on add, never cleared — deterministic history, same on every peer).
 let visionFreshTick = -1; // which sim tick the grids were computed for
 // How often the deterministic per-team vision grids are rebuilt (see
-// updateTeamVision). 2 is the shipped default; higher = faster/laggier vision.
-const VISION_REFRESH_TICKS = 2;
+// updateTeamVision). Higher = faster/laggier vision: ~150ms was measured
+// imperceptible and worth ~2% sim throughput. Sim reads tolerate the
+// staleness by design.
+//
+// The cadence is anchored to ABSOLUTE tick phase (tick % PERIOD === 1),
+// NOT "ticks since last refresh": rollback/resync reset visionFreshTick,
+// and a relative cadence re-anchors the refresh phase to the rollback
+// tick — a peer that rolled back would then hold a differently-stale grid
+// than a peer that didn't, at the same tick. That diverges every
+// teamCanSeeTile/buildingVisibleToTeam SIM read (auto-acquire fog gates
+// today; every AI decision under information parity). Phase ≡ 1 because
+// lockstep snapshots are post-tick states taken at tick % LOCKSTEP_SNAP_EVERY
+// === 0 (js/lockstep.js): a restore re-executes from T+1 ≡ 1, so the forced
+// post-restore rebuild fires exactly on an aligned refresh tick and
+// reproduces what the original timeline computed there. PERIOD must divide
+// LOCKSTEP_SNAP_EVERY (asserted in js/lockstep.js) and is deliberately a
+// raw tick count, not T30(): the divisibility invariant must hold at every
+// TPS, and T30 rounding would break it.
+const VISION_REFRESH_PERIOD = 5; // ticks (250ms at TPS 20)
 let teamVisGrid = null, teamExploredGrid = null;
 let visStamps = new Map();  // entity id -> {t,cx,cy,s,gen} last-applied vision disk
 let visScanGen = 0;         // bumped each refresh; entities not re-marked this gen have vanished
@@ -1046,12 +1276,22 @@ function resetTeamVision(){
   visionRebuild = true;
   visionFreshTick = -1;
 }
+// Watch towers double as scouting outposts: their line of sight scales with the
+// owner's age like AoE2's Outpost (indexed by teamAge — Dark/Feudal/Castle).
+const TOWER_LOS_BY_AGE = [6, 9, 12];
 function updateTeamVision(){
+  // All-Visible match: every read of the grids is short-circuited
+  // (teamCanSeeTile/teamHasExplored return true, updateFog floods), so
+  // maintaining them is pure waste — historically the biggest sim cost at
+  // scale. The grids stay zeroed all match; snapshots/saves/checksum skip
+  // them under the same flag.
+  if (window.fogDisabled) return;
   if (!teamVisGrid || teamVisGrid[0].length !== MAP * MAP) resetTeamVision();
-  // Rebuilt every VISION_REFRESH_TICKS (the per-team vision update is the
-  // biggest sim cost at scale; sim reads tolerating a tick or two of stale
-  // visibility are imperceptible). Deterministic — cadence is tick-derived.
-  if (visionFreshTick >= 0 && tick - visionFreshTick < VISION_REFRESH_TICKS) return;
+  // Refreshed on phase-anchored ticks only (see VISION_REFRESH_PERIOD above
+  // for why the anchor is absolute phase, not elapsed-since-last), except a
+  // forced rebuild (visionFreshTick < 0: first run / rollback / resync /
+  // load) which fires immediately.
+  if (visionFreshTick >= 0 && tick % VISION_REFRESH_PERIOD !== 1) return;
   visionFreshTick = tick;
 
   // Ally-shared groups: an entity's disk is applied to its team AND every
@@ -1065,9 +1305,9 @@ function updateTeamVision(){
   if (sig !== visAllianceSig) { visionRebuild = true; visAllianceSig = sig; }
 
   // Apply an entity's sight disk to the count grids. delta +1 adds vision (and
-  // marks explored), -1 removes it. Center/sight math is identical to
-  // forEachVisibleTile (kept for updateFog), so the visible SET this produces
-  // equals the old full re-stamp exactly.
+  // marks explored), -1 removes it. This is the ONE place the sight-radius table
+  // and center math live — updateFog reads the resulting grid rather than
+  // re-walking the entities a second (drift-prone) way.
   const applyDisk = (t, cx, cy, s, delta) => {
     const offs = sightOffsets(s), group = allied[t];
     for (let i = 0; i < offs.length; i += 2) {
@@ -1099,8 +1339,7 @@ function updateTeamVision(){
       const b = BLDGS[e.btype];
       if (!e.complete) sight = 1;
       else if (e.btype === 'TC') sight = 8;
-      else if (e.btype === 'TOWER') sight = 9;
-      else if (e.btype === 'PTOWER') sight = 8;
+      else if (e.btype === 'TOWER' || e.btype === 'PTOWER') sight = TOWER_LOS_BY_AGE[Math.min(teamAge[team] || 0, 2)];
       else if (e.btype === 'HOUSE') sight = 4;
       else sight = 5;
       cx = Math.floor(e.x + (e.w || b.w) / 2);
@@ -1123,17 +1362,28 @@ function updateTeamVision(){
   visStamps.forEach((st, id) => { if (st.gen !== gsig) { applyDisk(st.t, st.cx, st.cy, st.s, -1); visStamps.delete(id); } });
 }
 function teamCanSeeTile(team, k){
+  // All-Visible match: the grids are not maintained at all (updateTeamVision
+  // skips) — everything is visible by definition.
+  if (window.fogDisabled) return true;
   return teamVisGrid != null && teamVisGrid[team][k] > 0;
 }
 function teamHasExplored(team, k){
+  // No-fog match (scenarios, dev): full knowledge for EVERYONE — the explored
+  // grids carry no information, which is also why v4 saves omit them when fog
+  // is off (js/save.js). Sim-consistent: fogDisabled is a match-level setting
+  // that rides saves/scenarios identically on every peer, and it already
+  // gates the other sim visibility reads (tileHiddenForTeam,
+  // buildingVisibleToTeam, the auto-acquire fog check).
+  if (window.fogDisabled) return true;
   return teamExploredGrid != null && teamExploredGrid[team][k] === 1;
 }
-// Deterministic "this human team can't act on tile k yet because it hasn't
-// been explored" gate — shared by canPlace (js/logic.js) and the villager
-// gather resolve (js/commands.js). AI teams are exempt (proximity vision,
-// not fog-based); fog-off (dev/sim) reveals everything.
+// Deterministic "this team can't act on tile k yet because it hasn't been
+// explored" gate — shared by canPlace (js/logic.js), the villager gather
+// resolve (js/commands.js) and the gather-tile scan (findNearTile,
+// js/logic.js). Applies to EVERY team — no AI exemption (information
+// parity). Fog-off (dev/sim) reveals everything.
 function tileHiddenForTeam(team, k){
-  return !window.fogDisabled && !isAITeam(team) && !teamHasExplored(team, k);
+  return !window.fogDisabled && !teamHasExplored(team, k);
 }
 // Building visibility for sim decisions: any footprint tile visible to `team`.
 function buildingVisibleToTeam(b, team){
@@ -1144,6 +1394,19 @@ function buildingVisibleToTeam(b, team){
     if (teamCanSeeTile(team, (b.y + dy) * MAP + (b.x + dx))) return true;
   }
   return false;
+}
+// THE sim-side "can `team` see entity `t`?" predicate — target acquisition,
+// target retention, sieged-building defense and AI spotting all flow through
+// here, so humans and AI teams read the exact same visibility (information
+// parity). Units resolve at their rounded tile, buildings via any footprint
+// tile; All-Visible matches short-circuit to full knowledge. `team` must be
+// a real team (never GAIA — gaia has no vision grid; callers whose acting
+// entity can be gaia must exclude it first).
+function entityVisibleToTeam(t, team){
+  if (window.fogDisabled) return true;
+  if (t.type === 'building') return buildingVisibleToTeam(t, team);
+  const tx = Math.round(t.x), ty = Math.round(t.y);
+  return tx >= 0 && tx < MAP && ty >= 0 && ty < MAP && teamCanSeeTile(team, ty * MAP + tx);
 }
 
 // One-shot / session-lifecycle flags for the MP connection, consolidated
@@ -1244,6 +1507,18 @@ function spawnProjectile(attacker, target) {
   attacker.lastAtkTick = tick; // combat activity — see stuck-watchdog exemption (js/logic.js)
   let targetX = target.type === 'building' ? target.x + (target.w || BLDGS[target.btype].w)/2 : target.x;
   let targetY = target.type === 'building' ? target.y + (target.h || BLDGS[target.btype].h)/2 : target.y;
+  // BALLISTICS: aim where the target WILL be. One solve pass — flight time off
+  // the un-led distance (DE's own approximation), and √ + arithmetic only, so
+  // it stays deterministic inside the tick.
+  if (target.type === 'unit' && hasUpgrade(attacker.team, 'ballistics')) {
+    let v = unitVelocityPerTick(target);
+    if (v) {
+      let adx = targetX - attacker.x, ady = targetY - attacker.y;
+      let flight = Math.sqrt(adx*adx + ady*ady) / PROJECTILE_TILES_PER_TICK; // ticks in the air
+      targetX += v.vx * flight;
+      targetY += v.vy * flight;
+    }
+  }
   let accuracy = attacker.type === 'building' ? 1.0 : 0.8;
   if (target.type !== 'building' && simRandom() > accuracy) {
     let ang = simRandom() * Math.PI * 2;
@@ -1267,6 +1542,10 @@ function spawnProjectile(attacker, target) {
     ty: targetY,
     // Buildings can't sidestep — a shot at a building always connects.
     targetBuildingId: target.type === 'building' ? target.id : null,
+    // Who the shot was AIMED at: the impact scan uses this to let a
+    // deliberately-hunted gaia animal take the hit while sparing wildlife
+    // from stray/dodged arrows meant for someone else (js/loop.js).
+    aimId: target.id,
     // Id + a plain-data snapshot instead of a live object reference: the
     // impact (js/loop.js) prefers the live entity by id, but the snapshot
     // means an arrow still lands with the right team/damage after its
@@ -1285,9 +1564,9 @@ function spawnProjectile(attacker, target) {
 }
 
 function isUnitOnScreen(en) {
-  let iso = toIso(en.x, en.y);
-  let sx = (iso.ix - camX) * ZOOM + W/2;
-  let sy = (iso.iy - camY + HALF_TH) * ZOOM + H/2 + topH;
+  if (window.world3D && window.__povOnScreen) return window.__povOnScreen(en); // the 3D world view is the screen
+  let a = unitAnchorLogical(en);
+  let { sx, sy } = logicalToScreen(a.x, a.y);
   return sx >= -50 * ZOOM && sx <= W + 50 * ZOOM && sy >= -50 * ZOOM && sy <= H + 50 * ZOOM;
 }
 
@@ -1297,6 +1576,14 @@ function isUnitOnScreen(en) {
 // time was measurable GC churn on mobile.
 const _unitGroupOffset = { ox: 0, oy: 0 };
 function getUnitGroupOffset(entityId) {
+  // VIEWER-ONLY anti-stack scatter (never steers the sim): overlapping
+  // units draw a few px apart so a pile stays readable.
+  // window.unitScatterOff (e.g. the style gallery, where the scatter
+  // made specimen rows sit un-level) disables it entirely.
+  if (window.unitScatterOff) {
+    _unitGroupOffset.ox = 0; _unitGroupOffset.oy = 0;
+    return _unitGroupOffset;
+  }
   let idOff = entityId % 7;
   _unitGroupOffset.ox = (idOff % 3 - 1) * 6;
   _unitGroupOffset.oy = (Math.floor(idOff / 3) - 1) * 4;

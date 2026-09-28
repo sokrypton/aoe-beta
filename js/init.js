@@ -27,14 +27,15 @@ function init(){
   });
   placeStartingSheep();
   placeWildBears();
+  placeDragonLair();
   }
   let iso=toIso(STARTS[0].x+1,STARTS[0].y+1);camX=iso.ix;camY=iso.iy;
   window.targetCamX=camX;window.targetCamY=camY;
   refreshPopulationCounts();
-  // (The old "Drag to pan \u2022 Tap to select" mobile hint that used to show
-  // here was removed \u2014 it re-fired on every init(), i.e. every restart and
-  // rematch, not just first launch; the \u2753 Help overlay documents the same
-  // gestures. #help-hint itself stays: showMsg() still coordinates with it.)
+  // (No auto-shown mobile gesture hint here \u2014 anything fired from init()
+  // re-fires on every restart/rematch, not just first launch; the \u2753 Help
+  // overlay documents the gestures. #help-hint itself stays: showMsg()
+  // still coordinates with it.)
 }
 
 function placeStartingSheep(){
@@ -102,6 +103,23 @@ function placeWildBears(){
   }
 }
 
+// One unkillable dragon asleep at the heart of the map: the nearest clear 5×5 of grass to the map's centre, 16+
+// tiles from every town — a hazard every army and scout has to steer round.
+function placeDragonLair(){
+  if(window.__noDragon)return; // headless-sim opt-out (tools/sim.html 'dragon=0') — never set by the real game
+  let starts=STARTS.map(s=>({x:s.x+2,y:s.y+2}));
+  let cx=Math.floor(MAP/2), cy=Math.floor(MAP/2);
+  const clear=(x,y)=>{ for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){ let t=map[y+dy]&&map[y+dy][x+dx]; if(!t||t.t!==TERRAIN.GRASS||t.occupied!=null)return false; } return true; };
+  for(let r=0;r<MAP/2;r++)for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){
+    if(Math.max(Math.abs(dx),Math.abs(dy))!==r)continue;
+    let x=cx+dx, y=cy+dy;
+    if(x<4||y<4||x>=MAP-4||y>=MAP-4||!clear(x,y))continue;
+    if(starts.some(s=>Math.hypot(s.x-x,s.y-y)<16))continue;
+    let d=createUnit('dragon',x,y,GAIA_TEAM); d.homeX=x; d.homeY=y; d.awake=false; d.calmSince=0;
+    return;
+  }
+}
+
 function startGame(difficulty){
   aiDifficulty=AI_LEVELS[difficulty]?difficulty:'standard';
   // Sync the AI slots' difficulty to the menu pick (per-team difficulty is
@@ -125,8 +143,9 @@ function startGame(difficulty){
   } catch (err) {
     console.warn('Music failed to start:', err);
   }
+  if (window.enterDefaultView) window.enterDefaultView(); // the 3D world view by default (js/pov3d.js)
   
-  let menu=document.getElementById('tutorial');
+  let menu=byId('tutorial');
   if(menu)menu.style.display='none';
   showMsg('Difficulty: '+AI_LEVELS[aiDifficulty].name);
 }
@@ -169,11 +188,13 @@ function applyGameSettings(){
   if (diffSel && AI_LEVELS[diffSel.value]) aiDifficulty = diffSel.value;
   let sizeSel = document.querySelector('input[name="mapsize"]:checked');
   let playersSel = document.querySelector('input[name="players"]:checked');
+  let fogSel = document.querySelector('input[name="fogmode"]:checked');
   try {
     if (diffSel) localStorage.setItem('aoeDifficulty', diffSel.value);
     if (sizeSel) localStorage.setItem('aoeMapSize', sizeSel.value);
     if (speedSel) localStorage.setItem('aoeGameSpeed', speedSel.value);
     if (playersSel) localStorage.setItem('aoePlayers', playersSel.value);
+    if (fogSel) localStorage.setItem('aoeFogMode', fogSel.value);
   } catch (e) {}
 }
 
@@ -202,7 +223,7 @@ function applyGameSettings(){
 // core.js having initialized.
 (function restoreGameSettings(){
   try {
-    [['aoeDifficulty','difficulty'], ['aoeMapSize','mapsize'], ['aoeGameSpeed','gamespeed'], ['aoePlayers','players']]
+    [['aoeDifficulty','difficulty'], ['aoeMapSize','mapsize'], ['aoeGameSpeed','gamespeed'], ['aoePlayers','players'], ['aoeFogMode','fogmode']]
       .forEach(([key, name]) => {
         let v = localStorage.getItem(key);
         if (!v) return;
@@ -221,9 +242,9 @@ function applyGameSettings(){
 // are visible for the current game state; menuPanel decides which of the
 // two panels is showing. Every path that opens the menu resets to 'main'.
 function showMenuPanel(which){
-  let main = document.getElementById('menu-panel-main');
-  let opts = document.getElementById('menu-panel-options');
-  let lobby = document.getElementById('menu-panel-lobby');
+  let main = byId('menu-panel-main');
+  let opts = byId('menu-panel-options');
+  let lobby = byId('menu-panel-lobby');
   if (main) main.style.display = which === 'main' ? '' : 'none';
   if (opts) opts.style.display = which === 'options' ? '' : 'none';
   if (lobby) lobby.style.display = which === 'lobby' ? '' : 'none';
@@ -237,7 +258,7 @@ function showMenuPanel(which){
 // doesn't affect offsetWidth/Height), so it must re-run whenever the
 // menu's content changes height (panel switch, host status/QR, menu mode).
 function scaleMenuToFit(){
-  let wrap = document.getElementById('menu-scale-wrap');
+  let wrap = byId('menu-scale-wrap');
   if (!wrap) return;
   wrap.style.transform = 'none';
   let w = wrap.offsetWidth, h = wrap.offsetHeight;
@@ -255,7 +276,7 @@ window.addEventListener('orientationchange', scaleMenuToFit);
 // changes menu state funnels through showMenuPanel/applyMenuMode, plus the
 // explicit MP entry points below.
 function updateUiSwitchVisibility(){
-  let row = document.getElementById('ui-switch-row');
+  let row = byId('ui-switch-row');
   if (!row) return;
   let preGame = (window.menuMode === undefined || window.menuMode === 'prestart')
     && !netRole && !gameStarted && menuPanelIsMain();
@@ -265,9 +286,13 @@ function updateUiSwitchVisibility(){
   // very much wants the escape hatch back to the mobile UI.
   let wrongAudience = isMobile && !(typeof isClassicUI !== 'undefined' && isClassicUI);
   row.style.display = (preGame && !wrongAudience) ? '' : 'none';
+  // The disclaimer shares the pristine-pre-game-main-menu condition (all
+  // audiences) — it disappears on Options / Resume / in-game / any MP panel.
+  let disc = byId('menu-disclaimer');
+  if (disc) disc.style.display = preGame ? '' : 'none';
 }
 function menuPanelIsMain(){
-  let opts = document.getElementById('menu-panel-options');
+  let opts = byId('menu-panel-options');
   return !opts || opts.style.display === 'none';
 }
 
@@ -321,7 +346,11 @@ function onStartClicked(){
   applyAudioSettings();
   applyGameSettings();
 
-  window.fogDisabled = false;
+  // Match-level fog setting (the "Map" option): Fog of War vs All Visible.
+  // Immutable for the whole match — sim reads, the AI's knowledge model,
+  // save format, lockstep snapshots and the checksum all key off it.
+  let fogSel = document.querySelector('input[name="fogmode"]:checked');
+  window.fogDisabled = !!(fogSel && fogSel.value === 'open');
 
   // Always regenerate the map (even on a fresh load) so the chosen size takes effect,
   // since init() already ran once at script load with the default size.
@@ -336,12 +365,12 @@ function scheduleMenuRescale(){
 }
 
 function showMpStatus(text, link){
-  let panel = document.getElementById('mp-status-panel');
-  let textEl = document.getElementById('mp-status-text');
-  let linkRow = document.getElementById('mp-link-row');
-  let linkBox = document.getElementById('mp-link-box');
-  let qrEl = document.getElementById('mp-qr');
-  let noteEl = document.getElementById('mp-share-note');
+  let panel = byId('mp-status-panel');
+  let textEl = byId('mp-status-text');
+  let linkRow = byId('mp-link-row');
+  let linkBox = byId('mp-link-box');
+  let qrEl = byId('mp-qr');
+  let noteEl = byId('mp-share-note');
   if (!panel) return;
   panel.style.display = 'block';
   if (textEl) textEl.textContent = text;
@@ -356,9 +385,8 @@ function showMpStatus(text, link){
     if (linkBox) linkBox.value = link;
     // QR of the join link, for the sitting-across-the-table case — the
     // guest points their phone camera at the host's screen instead of
-    // anyone typing/sending a URL. qrcode-generator is loaded from unpkg
-    // like PeerJS; if the CDN is unreachable the link box still works, so
-    // this degrades silently. Error level M, auto type — a localhost or
+    // anyone typing/sending a URL. qrcode-generator is vendored (vendor/);
+    // if it fails to load the link box still works, so this degrades silently. Error level M, auto type — a localhost or
     // github.io join URL fits comfortably.
     if (qrEl) {
       try {
@@ -388,10 +416,10 @@ function showMpStatus(text, link){
 // look, different title/text, and the spinner only makes sense for the
 // "trying to reconnect" case.
 function showMpOverlay(title, text, spinner){
-  let el = document.getElementById('mp-disconnect-overlay');
-  let titleEl = document.getElementById('mp-disconnect-title');
-  let textEl = document.getElementById('mp-disconnect-text');
-  let spinnerEl = document.getElementById('mp-disconnect-spinner');
+  let el = byId('mp-disconnect-overlay');
+  let titleEl = byId('mp-disconnect-title');
+  let textEl = byId('mp-disconnect-text');
+  let spinnerEl = byId('mp-disconnect-spinner');
   if (!el) return;
   if (titleEl) titleEl.textContent = title;
   if (textEl) textEl.textContent = text;
@@ -400,23 +428,56 @@ function showMpOverlay(title, text, spinner){
   // opponent-paused overlay): either side can bank the match to a file
   // right there while waiting, in case the reconnect never comes. A guest
   // save is just as valid as a host one (see js/save.js).
-  let saveBtn = document.getElementById('mp-disconnect-save');
-  if (saveBtn) saveBtn.style.display = (spinner && gameStarted && entities.length > 0 && netRole !== 'guest') ? '' : 'none';
+  show('mp-disconnect-save', (spinner && gameStarted && entities.length > 0 && netRole !== 'guest'));
   el.style.display = 'flex';
 }
 function hideMpOverlay(){
-  let el = document.getElementById('mp-disconnect-overlay');
-  if (el) el.style.display = 'none';
+  show('mp-disconnect-overlay', false);
 }
 function showDisconnectOverlay(text, showKick){
   showMpOverlay('Connection Lost', text, true);
-  let kickBtn = document.getElementById('mp-disconnect-kick');
+  let kickBtn = byId('mp-disconnect-kick');
   if (kickBtn) kickBtn.style.display = showKick ? '' : 'none';
 }
 function hideDisconnectOverlay(){
-  let kickBtn = document.getElementById('mp-disconnect-kick');
-  if (kickBtn) kickBtn.style.display = 'none';
+  show('mp-disconnect-kick', false);
   hideMpOverlay();
+}
+
+// Honor-system reconnect: the host couldn't auto-bind us by token, so it sent
+// the list of reclaimable seats (js/net.js). Let the player pick who they are;
+// the pick is sent as claim-seat, and the host rebinds this device's token so a
+// later plain refresh auto-rejoins without asking again.
+function showSeatPicker(seats){
+  if (mpReconnectTimer) { clearTimeout(mpReconnectTimer); mpReconnectTimer = null; } // stop the blind retry loop
+  hideDisconnectOverlay();
+  let el = byId('mp-seat-picker');
+  let list = byId('mp-seat-picker-list');
+  let txt = byId('mp-seat-picker-text');
+  if (!el || !list) return;
+  if (txt) txt.textContent = 'Pick your player to reconnect:';
+  list.innerHTML = '';
+  (seats || []).forEach(s => {
+    let btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'menu-action-btn';
+    let swatch = s.color ? '<span style="display:inline-block;width:12px;height:12px;border-radius:2px;background:'
+      + s.color + ';margin-right:8px;vertical-align:middle;"></span>' : '';
+    btn.innerHTML = swatch + (s.name || ('Player ' + (s.seat + 1)));
+    btn.onclick = () => claimSeat(s.seat);
+    list.appendChild(btn);
+  });
+  el.style.display = 'flex';
+}
+function hideSeatPicker(){ show('mp-seat-picker', false); }
+function claimSeat(seat){
+  sendToHost({ type: 'claim-seat', seat, token: mpClientToken(), tab: mpTabId(), name: (localPlayerName || '').trim() });
+  // Await welcome (success) or a fresh seat-list (we lost the race) — disable
+  // the buttons meanwhile so a double-tap can't fire two claims.
+  let list = byId('mp-seat-picker-list');
+  if (list) list.querySelectorAll('button').forEach(b => { b.disabled = true; });
+  let txt = byId('mp-seat-picker-text');
+  if (txt) txt.textContent = 'Reconnecting…';
 }
 
 // HOST: recompute the "waiting for a disconnected player" pause and tell
@@ -477,17 +538,13 @@ function kickDisconnectedPlayers(){
 function restoreMenuForMatch(){
   showMenuPanel('main');
   updateUiSwitchVisibility();
-  let startRow = document.getElementById('start-row');
-  if (startRow) startRow.style.display = '';
-  let statusPanel = document.getElementById('mp-status-panel');
-  if (statusPanel) statusPanel.style.display = 'none';
-  let startBtn = document.getElementById('start-game-btn');
-  if (startBtn) startBtn.style.display = 'none';
-  let menu = document.getElementById('tutorial');
-  // Options + Help ARE available mid-match now (unlike the pre-two-level
-  // menu, which dropped Help to keep the single panel small). Explicitly
-  // re-shown — a guest's enterGuestJoinMode broad-hid every
-  // .menu-button-container, including the ones inside #misc-row.
+  show('start-row', true);
+  show('mp-status-panel', false);
+  show('start-game-btn', false);
+  let menu = byId('tutorial');
+  // Options + Help ARE available mid-match. Explicitly re-shown — a
+  // guest's enterGuestJoinMode broad-hid every .menu-button-container,
+  // including the ones inside #misc-row.
   if (menu) {
     menu.querySelectorAll('#misc-row, #misc-row .menu-button-container, #options-back-row')
       .forEach(el => { el.style.display = ''; });
@@ -504,22 +561,19 @@ function restoreMenuForMatch(){
     if (speedCol) speedCol.style.display = netRole === 'guest' ? 'none' : '';
     menu.querySelectorAll('.menu-divider').forEach(el => { el.style.display = 'none'; });
   }
-  let mpRow = document.getElementById('mp-row');
-  if (mpRow) mpRow.style.display = 'none';
-  let saveLoadRow = document.getElementById('save-load-row');
-  if (saveLoadRow) saveLoadRow.style.display = '';
+  show('mp-row', false);
+  show('save-load-row', true);
   // Save Game is hidden by default in the HTML (no match exists yet on the
   // pre-game screen) — now that one genuinely does, show it back. HOST
   // only in multiplayer: a guest can't reload+re-host a save (it rejoins
   // the host's reload by token instead), so offering it would be a lie.
-  let saveBtn = document.getElementById('save-game-btn');
+  let saveBtn = byId('save-game-btn');
   if (saveBtn) saveBtn.style.display = netRole === 'guest' ? 'none' : '';
-  let loadBtn = document.getElementById('load-game-btn');
-  if (loadBtn) loadBtn.style.display = 'none';
+  show('load-game-btn', false);
 }
 
 function copyMpLink(){
-  let box = document.getElementById('mp-link-box');
+  let box = byId('mp-link-box');
   if (!box) return;
   box.select();
   if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -540,10 +594,9 @@ function onHostClicked(){
   // Slot 1 becomes a (future) human guest the instant Host is clicked —
   // NOT when the guest connects — so the AI can't make irreversible
   // decisions (spend resources, queue units) during the waiting-for-
-  // opponent window. This is the data-driven successor to the old
-  // `netRole == null` gate around updateAI (js/loop.js). AI_STATES[1] is
-  // deliberately left in place: cancelHosting() flips the slot back and
-  // the AI resumes its plans exactly where it stopped.
+  // opponent window. AI_STATES[1] is deliberately left in place:
+  // cancelHosting() flips the slot back and the AI resumes its plans
+  // exactly where it stopped.
   // Hosting from an in-progress game: a loaded MP save already carries the
   // real human/AI seat layout — keep it verbatim (its guests rejoin their
   // own seats by token). Hosting a single-player game as MP is the one
@@ -573,19 +626,18 @@ function onHostClicked(){
   }
   applyAudioSettings();
 
-  let hostBtn = document.getElementById('host-game-btn');
+  let hostBtn = byId('host-game-btn');
   if (hostBtn) hostBtn.disabled = true;
   showMpStatus('Starting host session…');
-  let cancelBtn = document.getElementById('mp-cancel-btn');
-  if (cancelBtn) cancelBtn.style.display = '';
+  show('mp-cancel-btn', true);
 
   // Hide the action rows so the "waiting for opponent" status/link panel
-  // stands alone (the settings grid needs no hiding anymore — it lives in
-  // the separate options panel). #mp-row (this very button) is included
+  // stands alone (the settings grid lives in the separate options panel,
+  // so it needs no hiding). #mp-row (this very button) is included
   // too — disabling it alone still left it sitting there grayed out, which
   // reads as "you could still click this," not "you're already hosting."
   // Everything hidden here is restored by cancelHosting() below.
-  let menu = document.getElementById('tutorial');
+  let menu = byId('tutorial');
   if (menu) {
     menu.querySelectorAll('#save-load-row, #start-row, #mp-row, #misc-row').forEach(el => { el.style.display = 'none'; });
   }
@@ -609,7 +661,7 @@ function onHostClicked(){
       return;
     }
     // NOTE: the HOST's own ?host=<id> resume URL is deliberately NOT written
-    // here anymore — only once the match actually starts (setHostResumeUrl,
+    // here — only once the match actually starts (setHostResumeUrl,
     // called from hostStartLockstepMatch / the save-resume path). Otherwise a
     // host refreshing during the LOBBY would boot straight into
     // enterHostResumeMode and try to auto-recover a match that never began.
@@ -679,9 +731,8 @@ function leaveMpSession(){
   recomputeGamePaused();
 }
 
-// Wired to #mp-cancel-btn on the "Waiting for opponent…" screen — before
-// this, clicking Host was irreversible: the setup UI was hidden and the
-// only way back was a page refresh.
+// Wired to #mp-cancel-btn on the "Waiting for opponent…" screen — without
+// it, clicking Host would be irreversible short of a page refresh.
 function cancelHosting(){
   let wasMidMatch = mpHostingFromExistingGame;
   leaveMpSession();
@@ -690,19 +741,17 @@ function cancelHosting(){
   // state was kept, so a match resumed behind the menu continues seamlessly.
   teamControllers = defaultControllers(false);
   if (AI_STATES && !AI_STATES[1]) AI_STATES[1] = freshAIState(1);
-  let panel = document.getElementById('mp-status-panel');
-  if (panel) panel.style.display = 'none';
-  let cancelBtn = document.getElementById('mp-cancel-btn');
-  if (cancelBtn) cancelBtn.style.display = 'none';
-  let qrEl = document.getElementById('mp-qr');
+  show('mp-status-panel', false);
+  show('mp-cancel-btn', false);
+  let qrEl = byId('mp-qr');
   if (qrEl) { qrEl.style.display = 'none'; qrEl.innerHTML = ''; }
-  let hostBtn = document.getElementById('host-game-btn');
+  let hostBtn = byId('host-game-btn');
   if (hostBtn) hostBtn.disabled = false;
   // Restore exactly the rows onHostClicked hid, then let applyMenuMode
   // re-derive per-button visibility for wherever we actually are (hosting
   // from a loaded save means a match is live behind the menu → 'ingame').
   ['save-load-row', 'start-row', 'mp-row', 'misc-row'].forEach(id => {
-    let el = document.getElementById(id);
+    let el = byId(id);
     if (el) el.style.display = '';
   });
   showMenuPanel('main');
@@ -730,8 +779,8 @@ window.onNetConnectionOpen = function(seat){
     // current copy is the guest's live mirror. Ask for it instead of
     // wiping the match with a fresh restartGame(); the 'state-snapshot'
     // reply (js/net-sync.js) applies it and finishes match setup. Repeat
-    // the request every 5s until one lands (same belt-and-suspenders idea
-    // as requestFullSync) — the interval self-clears once the flag drops.
+    // the request every 5s until one lands — the interval self-clears once
+    // the flag drops.
     if (window.__mpSession.awaitingStateFromGuest) {
       showMpStatus('Opponent reconnected! Recovering match…');
       broadcastToGuests({ type: 'request-state' });
@@ -748,15 +797,13 @@ window.onNetConnectionOpen = function(seat){
       return;
     }
     if (!mpMatchStarted) {
-      // Real per-team fog now (updateFog() in js/core.js computes vision
-      // for `myTeam` — 0 on the host, 1 on the guest — instead of a
-      // hardcoded team 0). Force it on explicitly regardless of whatever
-      // a loaded save's own fogDisabled flag was — a live multiplayer
-      // match should always use real fog, not a leftover "reveal map"
-      // setting from single-player. The guest forces it too on its own
-      // start path (js/lockstep.js), and resync state carries the flag
-      // (it gates sim-visible checks), so both peers agree.
-      window.fogDisabled = false;
+      // Fog is a synced match setting: a fresh lobby match gets it from
+      // lobbyState at start (hostStartLockstepMatch → lockstep-start, which
+      // the guest applies), so only DEFAULT it here; hosting from a loaded
+      // save keeps the save's own flag (applySavedGame restored it — a
+      // no-fog save resumes as a no-fog match on every peer via the resync
+      // state, which carries the flag).
+      if (!mpHostingFromExistingGame) window.fogDisabled = false;
       if (mpHostingFromExistingGame) {
         // Hosting from a save loaded before Host was clicked — keep that
         // exact state: hand it to the guest and enter lockstep from it
@@ -771,7 +818,7 @@ window.onNetConnectionOpen = function(seat){
         lockstepResetState();
         DET.enabled = true;
         lockstepResumeGuest(seat);
-        let menu = document.getElementById('tutorial');
+        let menu = byId('tutorial');
         if (menu) menu.style.display = 'none';
         localMenuOpen = false;
         recomputeGamePaused();
@@ -803,7 +850,7 @@ window.onNetConnectionOpen = function(seat){
     // the previous host session died (crash/reload) while a menu happened
     // to be open, the matching open:false can never arrive (the whole page
     // is gone), permanently stranding that guest paused with nothing on
-    // screen to explain why (confirmed by an actual test in the 1v1 era).
+    // screen to explain why.
     // The freshly recomputed verdict is always known-correct here. Only
     // meaningful once the match is live — during the lobby there's no sim
     // to pause, and a lobby panel isn't a "menu" the host should mirror.
@@ -839,11 +886,10 @@ window.onNetConnectionClosed = function(){
     window.__mpSession.inLobby = false;
     lobbyState = null;
     if (typeof showMenuPanel === 'function') showMenuPanel('main');
-    let menu = document.getElementById('tutorial');
+    let menu = byId('tutorial');
     if (menu) menu.style.display = 'flex';
     showMpStatus('The host has disconnected.');
-    let retryBtn = document.getElementById('mp-retry-btn');
-    if (retryBtn) retryBtn.style.display = '';
+    show('mp-retry-btn', true);
     if (typeof showMsg === 'function') showMsg('Host disconnected');
     return;
   }
@@ -896,8 +942,7 @@ function attemptReconnect(){
 // the connection is also mid-reconnect): this client's own #tutorial menu
 // being open, the OTHER peer's menu being open (either direction — see
 // the message handler below), and a disconnect/reconnect in progress. A
-// bug this exact shape already bit once (in the deleted snapshot-sync
-// code — a different unconditional overwrite): any
+// bug this exact shape already bit once: any
 // code path that just sets `gamePaused = false` directly, without
 // checking whether some OTHER reason is still active, will incorrectly
 // resume the game out from under a menu/overlay that's still visibly
@@ -973,6 +1018,11 @@ onNetMessage((msg) => {
   if (netRole !== 'guest') return;
   if (msg.type === 'welcome') {
     window.__mpSession.mySeat = msg.seat;
+    hideSeatPicker(); // an honor-system claim just succeeded (no-op otherwise)
+  } else if (msg.type === 'seat-list') {
+    // Unknown identity to the host (cross-device / cleared storage / a fresh
+    // page after save-load): pick which player we are (js/net.js reclaimableSeats).
+    showSeatPicker(msg.seats || []);
   } else if (msg.type === 'join-denied') {
     // The host turned this connection away (game full, match in progress,
     // or we were kicked). Stop any reconnect loop — retrying would just be
@@ -980,10 +1030,11 @@ onNetMessage((msg) => {
     if (mpReconnectTimer) { clearTimeout(mpReconnectTimer); mpReconnectTimer = null; }
     let why = msg.reason === 'kicked' ? 'You were removed from this game by the host.'
       : msg.reason === 'in-progress' ? 'This match is already in progress.'
+      : msg.reason === 'version' ? 'Your game version differs from the host’s — hard-refresh (Ctrl/Cmd+Shift+R) and reconnect.'
       : 'This game is full.';
     window.__mpSession.inLobby = false;
     lobbyState = null;
-    let menu = document.getElementById('tutorial');
+    let menu = byId('tutorial');
     if (menu) menu.style.display = 'flex';
     if (typeof showMenuPanel === 'function') showMenuPanel('main');
     hideDisconnectOverlay();
@@ -1018,9 +1069,13 @@ window.assignGuestSeat = function(msg){
 onNetMessage((msg) => {
   if (msg.type === 'proto' && msg.v !== NET_PROTOCOL_VERSION) {
     console.error('Protocol mismatch: peer is v' + msg.v + ', this client is v' + NET_PROTOCOL_VERSION);
-    showMpOverlay('Version Mismatch',
-      'Your game version differs from your opponent’s — the match cannot run safely. '
-      + 'Both players should hard-refresh the page (Ctrl/Cmd+Shift+R) and reconnect.', false);
+    // The host turns a mismatched guest away at the hello gate (js/net.js) and
+    // keeps playing — only a guest (whose sole peer is the host) must refresh.
+    if (netRole !== 'host') {
+      showMpOverlay('Version Mismatch',
+        'Your game version differs from your opponent’s — the match cannot run safely. '
+        + 'Both players should hard-refresh the page (Ctrl/Cmd+Shift+R) and reconnect.', false);
+    }
     return;
   }
 });
@@ -1059,7 +1114,7 @@ function enterGuestJoinMode(hostPeerId){
   // (lobby identity) and the authoritative team in lockstep-start/-resume's
   // yourTeam (js/lockstep.js).
   window.__mpSession.hostPeerId = hostPeerId; // remembered for attemptReconnect() above
-  let menu = document.getElementById('tutorial');
+  let menu = byId('tutorial');
   // Hide the normal setup UI (difficulty/map size/start button etc.) —
   // none of it applies to a guest, who inherits the host's match settings.
   if (menu) {
@@ -1095,7 +1150,7 @@ function enterHostResumeMode(peerId){
     }
   } catch (e) {}
   setTimeout(updateUiSwitchVisibility, 0); // after netRole set by hostSession below
-  let menu = document.getElementById('tutorial');
+  let menu = byId('tutorial');
   if (menu) {
     menu.querySelectorAll('.setup-grid, .menu-button-container, #save-load-row, #mp-row, #misc-row, .menu-divider')
       .forEach(el => { el.style.display = 'none'; });
@@ -1121,10 +1176,10 @@ function enterHostResumeMode(peerId){
 }
 
 // The guest's initial connection attempt, re-runnable via the Retry button
-// — the old inline version left "Could not connect" as a dead end with a
-// page refresh as the only recourse.
+// — otherwise "Could not connect" would be a dead end with a page refresh
+// as the only recourse.
 function attemptGuestJoin(){
-  let retryBtn = document.getElementById('mp-retry-btn');
+  let retryBtn = byId('mp-retry-btn');
   if (retryBtn) retryBtn.style.display = 'none';
   showMpStatus('Connecting to host…');
   joinSession(window.__mpSession.hostPeerId).catch(err => {
@@ -1148,24 +1203,24 @@ function handleStartButton(){
 }
 
 function applyMenuMode(mode){
-  let menu = document.getElementById('tutorial');
+  let menu = byId('tutorial');
   let difficultyRow = menu ? menu.querySelector('.setup-grid .setup-row:first-child') : null;
-  let startBtn = document.getElementById('start-game-btn');
-  let resumeBtn = document.getElementById('resume-game-btn');
-  let mpRow = document.getElementById('mp-row');
-  let saveBtn = document.getElementById('save-game-btn');
-  let loadBtn = document.getElementById('load-game-btn');
+  let startBtn = byId('start-game-btn');
+  let resumeBtn = byId('resume-game-btn');
+  let mpRow = byId('mp-row');
+  let saveBtn = byId('save-game-btn');
+  let loadBtn = byId('load-game-btn');
   if (!menu) return;
   window.menuMode = mode;
 
   // The VICTORY/DEFEAT banner block only exists in 'gameover' mode.
-  let banner = document.getElementById('game-over-banner');
+  let banner = byId('game-over-banner');
   if (banner) {
     banner.style.display = mode === 'gameover' ? '' : 'none';
     if (mode === 'gameover') {
       let iWon = didIWin();
-      let title = document.getElementById('game-over-title');
-      let sub = document.getElementById('game-over-sub');
+      let title = byId('game-over-title');
+      let sub = byId('game-over-sub');
       if (title) {
         title.textContent = iWon ? '🏆 Victory!' : '💀 Defeat';
         title.className = iWon ? 'game-over-victory' : 'game-over-defeat';
@@ -1177,7 +1232,7 @@ function applyMenuMode(mode){
   }
 
   if (mode === 'gameover') {
-    // This menu is NOT auto-opened on game over anymore (the end screen is the
+    // This menu is NOT auto-opened on game over (the end screen is the
     // canvas banner + standalone "See Map" button, js/init.js gameLoop) — it
     // only appears if the player clicks the ☰ button. When they do, it's the
     // full post-game menu: Play Again (single-player / dead MP), or Rematch for
@@ -1191,7 +1246,7 @@ function applyMenuMode(mode){
       startBtn.textContent = (liveMp && netRole === 'host') ? '🔄 Rematch' : '🔄 Play Again';
     }
     if (liveMp && netRole === 'guest') {
-      let sub = document.getElementById('game-over-sub');
+      let sub = byId('game-over-sub');
       if (sub) sub.textContent = 'Waiting for the host to start a rematch…';
     }
     if (resumeBtn) resumeBtn.style.display = 'none';
@@ -1244,7 +1299,7 @@ function applyMenuMode(mode){
 }
 
 function openRestartMenu(){
-  let menu = document.getElementById('tutorial');
+  let menu = byId('tutorial');
   if (!menu) return;
   menu.style.display = 'flex';
   localMenuOpen = true;
@@ -1261,6 +1316,9 @@ function restartGame(difficulty){
   entitiesById.clear();
   corpses = [];
   selected = [];
+  // The undo entry points at last match's entities — a stale 'select' entry
+  // would otherwise light the Undo arrow on a brand-new game.
+  if (window.__clearUndo) window.__clearUndo();
   tick = 0;
   bumpSimGen(); // tick rewound to 0 — invalidate every registered sim cache (js/core.js)
   scoutedByMe.clear(); // fresh map, fresh fog memory — see js/core.js
@@ -1303,6 +1361,8 @@ function restartGame(difficulty){
   teamAlliance = defaultAlliances(netRole != null); // [0,0,1,1] for SP 2v2, else identity (js/core.js)
   resetDefeatedTeams();
   resetTeamAge(); // everyone starts in the Dark Age (js/core.js)
+  resetTeamTechs(); // fresh per-team researched-tech bitmask (js/core.js) — MUST accompany
+                    // resetTeamAge, or applyTech bails on null teamTechs and NO upgrade ever applies
   // Cosmetic seat labels/colors back to defaults (identity palette, no names).
   // Like teamControllers above, the lobby/lockstep paths re-apply the agreed
   // names+colors AFTER restartGame — see hostStartLockstepMatch / the
@@ -1319,7 +1379,7 @@ function restartGame(difficulty){
   window.playedGameOverSound = false;
   window.__gameOverBannerDismissed = false; // fresh match → banner armed again
   window.seeMapMode = false; // exit the finished-map review mode
-  { let sm = document.getElementById('see-map-btn'); if (sm) sm.style.display = 'none'; }
+  { let sm = byId('see-map-btn'); if (sm) sm.style.display = 'none'; }
 
   // Re-generate map and spawn starts
   init();
@@ -1335,7 +1395,7 @@ function toggleCameraFollow(){
 }
 
 function toggleHelp(){
-  let o=document.getElementById('help-overlay');
+  let o=byId('help-overlay');
   if(o)o.style.display=(o.style.display==='none'||o.style.display==='')?'flex':'none';
 }
 
@@ -1346,9 +1406,12 @@ function toggleHelp(){
 //   - fog is turned off and every tile revealed so the whole map is visible.
 function seeMap(){
   window.__gameOverBannerDismissed = true;
+  // Viewer-only reveal: seeMapMode + flooding the fog grid below. It must NOT
+  // touch window.fogDisabled — that is now a match-start-immutable, peer-
+  // synced SIM setting (hashed in simChecksum); the post-game reveal is pure
+  // presentation. Input hit-testing reads seeMapMode alongside it (js/input.js).
   window.seeMapMode = true;
-  window.fogDisabled = true;
-  // Reveal every tile now (updateFog() no-ops while fogDisabled, so flip the
+  // Reveal every tile now (updateFog() doesn't run post-game, so flip the
   // grid directly — 2 = fully visible).
   if (typeof fog !== 'undefined' && fog && fog.length) {
     for (let y = 0; y < fog.length; y++) {
@@ -1366,7 +1429,7 @@ function seeMap(){
   // revealed above is actually seen (otherwise buildings keep their stale
   // fog-level-0 and stay hidden).
   if (typeof invalidateBuildingFogMemo === 'function') invalidateBuildingFogMemo();
-  let btn = document.getElementById('see-map-btn');
+  let btn = byId('see-map-btn');
   if (btn) btn.style.display = 'none';
 }
 
@@ -1394,14 +1457,14 @@ async function toggleFullscreen(){
 }
 
 window.addEventListener('fullscreenchange', ()=>{
-  let btn = document.getElementById('fs-btn');
+  let btn = byId('fs-btn');
   if (btn) btn.dataset.tipDesc = isFullscreen()
     ? 'Exit fullscreen mode.'
     : 'Enter fullscreen mode.';
 });
 
 function toggleMenu(){
-  let menu = document.getElementById('tutorial');
+  let menu = byId('tutorial');
   if (menu) {
     if (menu.style.display === 'none' || menu.style.display === '') {
       menu.style.display = 'flex';
@@ -1437,23 +1500,23 @@ function toggleMenu(){
 }
 
 let lastTime = performance.now();
-// Simulation runs at 30 ticks per game-second (all tick-count constants in
-// core.js/logic.js are authored against that), scaled by GAME_SPEED — like
-// AoE2, where "1.7x speed" just runs more game-seconds per real second.
-let timeStep = 1000 / (30 * GAME_SPEED);
+// Simulation runs at TPS ticks per game-second (tick-count constants are
+// authored at the canonical 30tps and wrapped in T30 — js/core.js), scaled
+// by GAME_SPEED — like AoE2, where "1.7x speed" just runs more
+// game-seconds per real second.
+let timeStep = 1000 / (TPS * GAME_SPEED);
 function setGameSpeed(speed){
   GAME_SPEED = speed;
-  timeStep = 1000 / (30 * GAME_SPEED);
+  timeStep = 1000 / (TPS * GAME_SPEED);
 }
 let accumulator = 0;
 
-// The on-screen bandwidth stats box was removed, but the underlying
-// counters (netBytesSent/netBytesReceived, js/net.js) still accumulate —
-// handy from the console when debugging sync traffic.
+// netBytesSent/netBytesReceived (js/net.js) accumulate with no on-screen
+// readout — handy from the console when debugging sync traffic.
 
 // requestAnimationFrame stops entirely in a hidden tab — fine in single-
-// player (the game just pauses with you), but a HOST alt-tabbing away used
-// to halt simulation and all sync broadcasts, leaving the guest frozen
+// player (the game just pauses with you), but a HOST alt-tabbing away
+// would halt simulation and all sync broadcasts, leaving the guest frozen
 // staring at a live-but-silent connection (and at risk of a false
 // heartbeat-timeout trip). This interval keeps the host's simulation
 // running while hidden. Background setInterval is throttled to ~1/sec —
@@ -1475,8 +1538,7 @@ setInterval(() => {
   // hidden host free-ran unbounded ahead of the guest (pacing/hard-stop
   // never enforced), the snapshot ring froze at pre-hidden ticks (guest
   // commands then forced fatal too-old rollbacks), and progress reports
-  // stopped. This interval predates lockstep — it was written for the
-  // legacy snapshot-sync broadcasts.
+  // stopped.
   while (accumulator >= timeStep) {
     if (lockstepEnabled()) {
       let surcharge = lockstepTickSurcharge();
@@ -1500,11 +1562,8 @@ function gameLoop(){
 
   if(gameStarted && !gamePaused) {
     handleScroll(elapsed);
-    // A multiplayer guest never runs its own simulation tick — its
-    // `entities`/`map`/etc. get wholesale-overwritten by the host's next
-    // sync payload anyway (see net-sync.js), so locally advancing a copy
-    // that's about to be discarded is wasted work and can look glitchy
-    // (e.g. a cooldown ticking down locally then snapping back on sync).
+    // A guest simulates only once lockstep is running: before lockstep-start
+    // (or lockstep-resume) its world is a placeholder that message replaces.
     // Camera scroll above stays local either way — that's pure UI.
     if (netRole !== 'guest' || lockstepEnabled()) {
       accumulator += elapsed;
@@ -1541,6 +1600,7 @@ function gameLoop(){
   const RENDER_MIN_MS = isMobile ? 1000 / 30 - 2 : 0; // -2ms slack so a 33.4ms rAF gap doesn't drop to 20fps
   if (now - window.__lastRenderAt >= RENDER_MIN_MS) {
     window.__lastRenderAt = now;
+    if (gameStarted) syncCameraFollow(); // after sim ticks — a pre-tick recenter vibrates the followed unit
     render();
     updateUI();
   }
@@ -1557,8 +1617,7 @@ function gameLoop(){
     // restartGame). See Map (seeMap()) dismisses the banner to show the map.
     if (!window.gameOverMenuShown) {
       window.gameOverMenuShown = true;
-      let sm = document.getElementById('see-map-btn');
-      if (sm) sm.style.display = '';
+      show('see-map-btn', true);
     }
     if (!window.__gameOverBannerDismissed) {
       X.fillStyle='rgba(0,0,0,0.65)';X.fillRect(0,0,W,window.innerHeight);
@@ -1630,7 +1689,7 @@ if (joinHostId) {
 // guest who opened a ?join= link (or a host resuming via ?host=) lands in
 // the other skin still connected to the same match flow.
 (function wireUiSwitchLink(){
-  let link = document.getElementById('ui-switch-link');
+  let link = byId('ui-switch-link');
   if (!link) return;
   let target = location.pathname.endsWith('classic.html') ? 'index.html' : 'classic.html';
   link.href = target + location.search;

@@ -6,40 +6,30 @@ function drawGhost(){
   // (same ghost style as a single hovered wall), not just flat tint tiles.
   if (isWallBtype(placing) && window.isDraggingWall && window.wallDragStart && window.wallDragEnd) {
     let line = getWallElbowTiles(window.wallDragStart, window.wallDragCorner || window.wallDragEnd, window.wallDragEnd);
-    let pillarH = 22, wallH = 14;
-    let toScr = (tx, ty) => {
-      let iso = toIso(tx + 0.5, ty + 0.5);
-      return { x: iso.ix - camX + W/2, y: iso.iy - camY + topH + H/2 - HALF_TH };
-    };
+    let b = BLDGS[placing];
+    // Render the drag preview through the REAL placed-wall path (drawBuilding's
+    // WALL branch), so pillars/materials/links/cross-rung suppression and joins
+    // to existing walls are all identical to what gets built — one code path,
+    // no separate ghost geometry to drift. The not-yet-placed tiles are exposed
+    // to getConnectedBuilding via a viewer-side overlay (no grid mutation).
+    let overlay = new Map();
+    line.forEach(t => overlay.set(t.y*MAP + t.x, {
+      type:'building', btype:placing, x:t.x, y:t.y, team:myTeam,
+      hp:b.hp, maxHp:b.hp, complete:true, buildProgress:0, buildTime:200,
+      queue:[], garrison:[], w:1, h:1
+    }));
     X.globalAlpha = 0.55;
-    window._ghostDraw = true;
-    // Ghost in the material actually being placed — the pillar colors here
-    // used to be hardcoded stone, so dragging a Dark-age palisade briefly
-    // previewed as stone.
-    let gMat = wallMat(placing);
-    let gpf = gMat === 'stone' ? ['#cfc8b6', '#aca392', '#b7ad97'] : ['#a5723a', '#8b5a2b', '#9c6c3f'];
-    line.forEach((t, i) => {
-      let p = toScr(t.x, t.y);
-      let linkY = p.y + 16;
-      // pillar caps + link walkway tops are team-colored on the real
-      // wall — mirror it here (caps single flat color); pillar first so
-      // the walkway link connects visibly between towers, like the real wall
-      drawBuildingBlock(p.x, p.y+11, 9, 4.5, pillarH, gpf[0], gpf[1], 'flat', 0, teamColor(myTeam), teamColor(myTeam), false);
-      let next = line[i+1];
-      if (next) {
-        let ddx = next.x - t.x, ddy = next.y - t.y;
-        let off = toIso(ddx, ddy);
-        drawWallLink(p.x, linkY - 0.5, off.ix, off.iy, wallH, false, 2.25*Math.sqrt(5), 2.25*Math.sqrt(5), null, teamColor(myTeam), 4.5, false, gMat);
-      }
-    });
-    window._ghostDraw = false;
+    window._ghostDraw = true; window._ghostValid = true; window._ghostTiles = overlay;
+    // Depth order: far tiles (smaller y+x) first so nearer pillars overlap.
+    line.slice().sort((a,c) => (a.y+a.x) - (c.y+c.x))
+        .forEach(t => drawBuilding(overlay.get(t.y*MAP + t.x)));
+    window._ghostTiles = null; window._ghostDraw = false;
     X.globalAlpha = 1;
 
     // Tint each tile green (valid) or red (invalid)
     line.forEach(t => {
-      let ok = canPlace(placing, t.x, t.y, myTeam, window.__editorMode);
-      let iso = toIso(t.x, t.y);
-      let sx = iso.ix - camX + W/2, sy = iso.iy - camY + topH + H/2;
+      let ok = canPlace(placing, t.x, t.y, myTeam, window.__editorMode, window.__editorMode);
+      let {sx, sy} = mapToScreen(t.x, t.y);
       X.fillStyle = ok ? 'rgba(0,200,0,0.28)' : 'rgba(200,0,0,0.28)';
       X.beginPath();
       X.moveTo(sx,sy);X.lineTo(sx+HALF_TW,sy+HALF_TH);
@@ -57,14 +47,11 @@ function drawGhost(){
     let fp = gateFootprint(tile.x, tile.y, isWall);
     ox=fp.ox; oy=fp.oy; bw=fp.gw; bh_=fp.gh;
     // Show EXACTLY the footprint that will be built (gateFootprint) — no
-    // fabricated size. The old "preview a full 1x3 when there's no wall run"
-    // was misleading: a gate can't be built off a wall (canPlace is false),
-    // and it made the ghost JUMP + flip orientation the instant a gate was
-    // placed (the walls it consumed stop being a run, so the same cursor tile
-    // fell into this case) — a jarring artifact in both the editor and the
-    // real game. With no run it's a 1x1 red ghost: honestly "can't place here".
+    // fabricated size (a full-1x3 fallback made the ghost jump + flip the
+    // instant a gate consumed its wall run). With no run it's a 1x1 red
+    // ghost: honestly "can't place here".
   }
-  let ok=canPlace(placing,tile.x,tile.y,myTeam,window.__editorMode);
+  let ok=canPlace(placing,tile.x,tile.y,myTeam,window.__editorMode,window.__editorMode);
 
   // Draw ghost: actual building rendered semi-transparently
   let fakeE={
@@ -75,6 +62,7 @@ function drawGhost(){
   };
   X.globalAlpha=0.55;
   window._ghostDraw=true;
+  window._ghostValid=ok; // invalid ghosts draw no wall-connection stubs (getConnectedBuilding)
   drawBuilding(fakeE);
   window._ghostDraw=false;
   X.globalAlpha=1;
@@ -82,8 +70,7 @@ function drawGhost(){
   // Tint footprint tiles green (valid) or red (invalid)
   X.fillStyle=ok?'rgba(0,200,80,0.28)':'rgba(220,30,0,0.28)';
   for(let dy=0;dy<bh_;dy++)for(let dx=0;dx<bw;dx++){
-    let iso=toIso(ox+dx,oy+dy);
-    let sx=iso.ix-camX+W/2, sy=iso.iy-camY+topH+H/2;
+    let {sx, sy} = mapToScreen(ox+dx, oy+dy);
     X.beginPath();
     X.moveTo(sx,sy);X.lineTo(sx+HALF_TW,sy+HALF_TH);
     X.lineTo(sx,sy+TH);X.lineTo(sx-HALF_TW,sy+HALF_TH);
@@ -201,21 +188,21 @@ function drawMinimap(){
     let ex = Math.round(e.x), ey = Math.round(e.y);
     let f = e.type === 'building' ? buildingFogLevel(e) : ((fog[ey] && fog[ey][ex]) || 0);
     if (f === 0) return; // completely unexplored — hide everything
-    if (f === 1 && e.team !== myTeam && e.type !== 'building') return; // hide enemy units in shroud (buildings remembered)
+    if (f === 1 && !sameSide(e.team, myTeam) && e.type !== 'building') return; // hide ENEMY units in shroud (allies shared-visible; buildings remembered)
     // Enemy buildings in shroud are only "remembered" if they were actually
     // seen at some point — same scoutedByMe rule as the main map (js/core.js),
     // so the two views never disagree (and buildings put up after we left
     // aren't leaked).
-    if (f === 1 && e.team !== myTeam && e.type === 'building' && !scoutedByMe.has(e.id)) return;
+    if (f === 1 && !sameSide(e.team, myTeam) && e.type === 'building' && !scoutedByMe.has(e.id)) return;
 
     let isSel=selectedIds.has(e.id);
     // Under-attack blink (AoE2): a player object hit in the last ~4 game-s
     // pulses white on the minimap so raids are spottable at a glance.
     // 60-tick cycle ≈ 1 blink per real second at 2x speed — slow enough to
     // read as a deliberate alert rather than a flicker.
-    let recentlyHit=e.team===myTeam&&e.lastHitTick!==undefined&&tick-e.lastHitTick<120;
-    let blinkOn=recentlyHit&&(tick-e.lastHitTick)%60<30;
-    let color=(isSel||blinkOn)?'#ffffff':teamColor(e.team);
+    let recentlyHit=e.team===myTeam&&e.lastHitTick!==undefined&&tick-e.lastHitTick<T30(120);
+    let blinkOn=recentlyHit&&(tick-e.lastHitTick)%T30(60)<T30(30);
+    let color=(isSel||blinkOn)?'#ffffff':teamColorMinimap(e.team);
     if(e.type==='building'){
       let w=e.w||1,h=e.h||1;
       fillDiamond([miniPoint(e.x,e.y),miniPoint(e.x+w,e.y),miniPoint(e.x+w,e.y+h),miniPoint(e.x,e.y+h)],color);
@@ -261,9 +248,9 @@ function drawParticles() {
     // and kill the whole frame. Skip the particle instead.
     if (!Number.isFinite(px) || !Number.isFinite(ppy) || ppy < 0 || ppy >= MAP || px < 0 || px >= MAP || fog[ppy][px] !== 2) return;
     
-    let iso = toIso(p.x, p.y);
-    let sx = iso.ix - camX + W/2;
-    let sy = iso.iy - camY + topH + H/2 + HALF_TH;
+    let scr = mapToScreen(p.x, p.y);
+    let sx = scr.sx;
+    let sy = scr.sy + HALF_TH;
     
     let pz = p.z || 0;
     sy -= pz * 35;
@@ -335,9 +322,9 @@ function drawProjectiles() {
     let dCurrent = Math.hypot(p.x - targetX, p.y - targetY);
     let progress = p.totalDist > 0.1 ? Math.max(0, Math.min(1, 1 - dCurrent / p.totalDist)) : 1;
 
-    let iso = toIso(p.x, p.y);
-    let sx = iso.ix - camX + W/2;
-    let sy = iso.iy - camY + topH + H/2 + HALF_TH;
+    let scr = mapToScreen(p.x, p.y);
+    let sx = scr.sx;
+    let sy = scr.sy + HALF_TH;
     // Height along the flight: launch height (bow / battlements) blends to
     // impact height at the target's body, plus the ballistic arc.
     let startH = p.startH || 12;
@@ -378,19 +365,24 @@ function drawProjectiles() {
     X.lineTo(sx - ca*1.5 + px2*2.3, sy - sa*1.5 + py2*2.3);
     X.lineTo(sx - ca*1.5 - px2*2.3, sy - sa*1.5 - py2*2.3);
     X.closePath(); X.fill(); X.stroke();
-    // Red fletching fins
-    let tx2 = sx - ca*L, ty2 = sy - sa*L;
-    X.fillStyle = '#cc4444';
-    X.beginPath();
-    X.moveTo(tx2 + ca*2, ty2 + sa*2);
-    X.lineTo(tx2 - ca*3 + px2*2.8, ty2 - sa*3 + py2*2.8);
-    X.lineTo(tx2, ty2);
-    X.closePath(); X.fill();
-    X.beginPath();
-    X.moveTo(tx2 + ca*2, ty2 + sa*2);
-    X.lineTo(tx2 - ca*3 - px2*2.8, ty2 - sa*3 - py2*2.8);
-    X.lineTo(tx2, ty2);
-    X.closePath(); X.fill();
+    // Fletching is LITERAL: bare shafts until the shooter's team has the
+    // tech, TEAM-COLOR feather vanes after (archer arrows only; tower/TC
+    // bolts always fly bare). attackerSnap rides every projectile,
+    // render-only read.
+    if (p.attackerSnap && p.attackerSnap.utype === 'archer' &&
+        hasUpgrade(p.attackerSnap.team, 'fletching')) {
+      let tx2 = sx - ca*L, ty2 = sy - sa*L;
+      X.fillStyle = teamColorLight(p.attackerSnap.team);
+      X.strokeStyle = '#000'; X.lineWidth = 1; X.lineJoin = 'round';
+      for (const sgn of [-1, 1]) {
+        X.beginPath();
+        X.moveTo(tx2 + ca*5.2 + px2*sgn*0.6, ty2 + sa*5.2 + py2*sgn*0.6); // front, hugging the shaft
+        X.lineTo(tx2 + ca*1.4 + px2*sgn*3.1, ty2 + sa*1.4 + py2*sgn*3.1); // swept outer edge
+        X.lineTo(tx2 - ca*2.6 + px2*sgn*3.1, ty2 - sa*2.6 + py2*sgn*3.1); // feather back edge
+        X.lineTo(tx2 - ca*0.8 + px2*sgn*0.6, ty2 - sa*0.8 + py2*sgn*0.6); // notch into the nock
+        X.closePath(); X.fill(); X.stroke();
+      }
+    }
   });
   X.restore();
 }

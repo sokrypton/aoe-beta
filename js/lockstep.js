@@ -34,7 +34,7 @@ let lastReportedSimTick = -1;
 let lockstepDesyncedAt = null;
 let lockstepRollbacks = 0; // stats: rewinds this match
 
-// Report every 6th tick (~10/s at default speed): enough for drift control
+// Report every 6th tick (TPS*GAME_SPEED/6 ≈ 6.7/s at defaults): enough for drift control
 // and checksum exchange; per-message compress+send is real CPU on mobile.
 const LOCKSTEP_REPORT_EVERY = 6;
 // Snapshot ring: every SNAP_EVERY ticks, keep SNAP_KEEP — a ~5s rewind
@@ -42,6 +42,13 @@ const LOCKSTEP_REPORT_EVERY = 6;
 // effectively dead longer than the net-layer heartbeat tolerates anyway.
 const LOCKSTEP_SNAP_EVERY = 10;
 const LOCKSTEP_SNAP_KEEP = 30;
+// The vision refresh phase (VISION_REFRESH_PERIOD, js/core.js) relies on
+// every snapshot tick being a multiple of the refresh period so that a
+// rollback's forced grid rebuild lands on an aligned refresh tick — see
+// the comment at VISION_REFRESH_PERIOD. Fail loudly if someone retunes
+// one constant without the other.
+if (LOCKSTEP_SNAP_EVERY % VISION_REFRESH_PERIOD !== 0)
+  throw new Error('LOCKSTEP_SNAP_EVERY must be a multiple of VISION_REFRESH_PERIOD (vision rollback alignment)');
 // Checksums are only exchanged for ticks at least a full ROLLBACK WINDOW
 // old: any command that can still legally rewrite tick T arrives within
 // the window, so only then is T final on both sides. (This was 90 ticks —
@@ -71,7 +78,7 @@ function lockstepExpectedSeatsMissing(){
   let out = [];
   if (netRole !== 'host') return out;
   for (let t = 1; t < NUM_TEAMS; t++) {
-    if (!teamControllers[t] || teamControllers[t].type !== 'human') continue;
+    if (!seatHasPerson(t)) continue; // incl. a player whose town runs on autopilot
     let rec = typeof netGuestBySeat === 'function' ? netGuestBySeat(t) : null;
     if (rec && rec.kicked) continue; // being handed to the AI — not awaited
     if (!rec || !rec.connected) out.push(t);
@@ -88,7 +95,7 @@ function lockstepExpectedSeats(){
   let seats = [];
   for (let t = 0; t < NUM_TEAMS; t++) {
     if (t === myTeam) continue;
-    if (!teamControllers[t] || teamControllers[t].type !== 'human') continue;
+    if (!seatHasPerson(t)) continue; // incl. a player whose town runs on autopilot
     if (netRole === 'host') {
       let rec = typeof netGuestBySeat === 'function' ? netGuestBySeat(t) : null;
       if (!rec || !rec.connected) continue;
@@ -130,7 +137,11 @@ function hostStartLockstepMatch(){
   NUM_TEAMS = ls ? (ls.numTeams || 2) : 2; // one team per lobby seat (2-4 humans/AI in any mix)
   let sizeKey = ls ? ls.mapSize : (function(){ let s = document.querySelector('input[name="mapsize"]:checked'); return s ? s.value : 'medium'; })();
   if (ls && typeof setGameSpeed === 'function') setGameSpeed(ls.speed);
-  window.fogDisabled = false;
+  // Match fog setting from the lobby (host-controlled): false = Fog of War,
+  // true = All Visible. Set BEFORE restartGame (initFog seeds from it) and
+  // shipped in lockstep-start below — a peer disagreement trips the checksum
+  // (the flag is hashed, js/determinism.js).
+  window.fogDisabled = !!(ls && ls.fog);
   // Each player's ALLIANCE drives the spawn adjacency (js/core.js
   // setMapSize) — every peer must build STARTS from the SAME array, so
   // it's taken from the lobby seats here and sent in lockstep-start below
@@ -157,7 +168,7 @@ function hostStartLockstepMatch(){
   // guests so every screen renders the agreed labels/colors consistently.
   // Per-guest send: yourTeam is how each guest learns which seat it plays —
   // the ONE per-recipient field in an otherwise identical payload.
-  let startPayload = { type: 'lockstep-start', seed: matchSeed, mapSize: sizeKey, speed: GAME_SPEED, numTeams: NUM_TEAMS, controllers: teamControllers, alliances: teamAlliance, names: teamNames, colors: teamColorMap };
+  let startPayload = { type: 'lockstep-start', seed: matchSeed, mapSize: sizeKey, speed: GAME_SPEED, fog: !!window.fogDisabled, numTeams: NUM_TEAMS, controllers: teamControllers, alliances: teamAlliance, names: teamNames, colors: teamColorMap };
   for (const s of netConnectedGuestSeats()) {
     sendToGuest(s, Object.assign({}, startPayload, { yourTeam: s }));
   }
@@ -167,7 +178,9 @@ onNetMessage((msg, src) => {
   if (msg.type === 'lockstep-start' && netRole === 'guest') {
     lockstepActive = true;
     lockstepResetState();
-    window.fogDisabled = false;
+    // Match fog setting, host-decided (lobby): must land before restartGame
+    // (initFog seeds from it) and match the host exactly — it's hashed.
+    window.fogDisabled = !!msg.fog;
     // Which seat this guest plays — assigned by the host (replaces the old
     // hardcoded guest=1). Must land before restartGame/fog/camera below,
     // all of which read myTeam.
@@ -205,9 +218,10 @@ onNetMessage((msg, src) => {
       window.__mpSession.cameraCentered = true;
     }
     if (typeof showMpStatus === 'function') showMpStatus('Connected! Lockstep match started.');
-    let menu = document.getElementById('tutorial');
+    let menu = byId('tutorial');
     if (menu) menu.style.display = 'none';
     if (typeof restoreMenuForMatch === 'function') restoreMenuForMatch();
+    if (window.enterDefaultView) window.enterDefaultView(); // the 3D world view by default (js/pov3d.js)
   } else if (msg.type === 'cmd-ls' && lockstepActive) {
     // Commands from before a resync point are stale on BOTH sides — the
     // resync state already reflects (or deliberately drops) them.
@@ -222,6 +236,12 @@ onNetMessage((msg, src) => {
     } else {
       peerTeam = msg.from != null ? msg.from : 0;
     }
+    // Reject a malformed or absurd execTick before it hits commandQueue: a
+    // far-future value would bloat the queue unboundedly (pruning only drops
+    // OLD entries), and a non-integer key never matches a tick. A legit execTick
+    // is issuerTick+INPUT_DELAY, and a receiver trails the issuer by at most
+    // LOCKSTEP_HARD_AHEAD, so this ceiling never rejects a real command.
+    if (!Number.isInteger(msg.execTick) || msg.execTick > tick + LOCKSTEP_HARD_AHEAD + INPUT_DELAY_MAX) return;
     scheduleCommand(msg.execTick, peerTeam, msg.seq, msg.cmd);
     if (msg.execTick <= tick) {
       // Late: that tick already ran without this command. Rewind and replay
@@ -261,10 +281,16 @@ onNetMessage((msg, src) => {
     if (typeof hideDisconnectOverlay === 'function') hideDisconnectOverlay();
     disconnectedPause = false;
     if (typeof recomputeGamePaused === 'function') recomputeGamePaused();
-    let menu = document.getElementById('tutorial');
+    let menu = byId('tutorial');
     if (menu) menu.style.display = 'none';
     if (typeof restoreMenuForMatch === 'function') restoreMenuForMatch();
+    if (window.enterDefaultView) window.enterDefaultView(); // the 3D world view by default (js/pov3d.js)
     if (typeof showMpStatus === 'function') showMpStatus('Reconnected! Match resumed.');
+    // A fresh page steers nothing: release a unit our team left possessed
+    // (character mode, js/pov3d.js), or the AI would ignore it for good.
+    if (entities.some(e => e.team === myTeam && e.possessed) && !(typeof povSteering === 'function' && povSteering())) {
+      submitCommand({ kind: 'possess', on: false });
+    }
   } else if (msg.type === 'lockstep-resync-request' && netRole === 'host' && lockstepActive) {
     lockstepStartResync();
   } else if (msg.type === 'tick' && lockstepActive) {
@@ -353,11 +379,14 @@ function lockstepCaptureState(){
     popUsed, popCap, tick, gameOver, won,
     nextId, nextProjectileId, simRngState,
     bellRinging: window.bellRinging,
-    exploredSim: teamExploredGrid, // Uint8Arrays clone fine
+    // All-Visible match: the explored grids are not maintained (stay zeroed;
+    // every read short-circuits on fogDisabled), so don't clone NUM_TEAMS x
+    // MAP^2 bytes into every ring entry — restore rebuilds fresh zeros.
+    exploredSim: window.fogDisabled ? null : teamExploredGrid, // Uint8Arrays clone fine
     // Per-team controller + AI plan state: SIM state (an AI team's brain
     // must rewind with a rollback and agree across peers — plain data,
     // clones fine). Same for lastTeamHit (AI garrison signal, js/core.js).
-    teamControllers, aiStates: AI_STATES, lastTeamHit, teamAlliance, defeatedTeams, teamAge,
+    teamControllers, aiStates: AI_STATES, lastTeamHit, teamAlliance, defeatedTeams, teamAge, teamTechs,
     // Sim-relevant (gates buildingVisibleToTeam etc.) — both peers must
     // agree, e.g. after the host loads a fog-disabled save mid-match.
     fogDisabled: !!window.fogDisabled,
@@ -387,11 +416,17 @@ function lockstepRestore(snap){
   nextId = st.nextId; nextProjectileId = st.nextProjectileId;
   simRngState = st.simRngState;
   window.bellRinging = st.bellRinging;
-  teamExploredGrid = st.exploredSim;
+  if (st.exploredSim) teamExploredGrid = st.exploredSim;
+  else resetTeamVision(); // fog-off snapshot: grids were zeroed and unmaintained — fresh zeros are exact
   restoreTeamState(st); // controllers/AI_STATES/lastTeamHit (js/core.js)
   bumpSimGen(); // tick rewound — invalidate every registered sim cache (js/core.js)
   // UI object references now point at pre-restore objects — re-resolve by id.
   selected = selected.map(u => entitiesById.get(u.id)).filter(Boolean);
+  // unitBlock is a derived per-tick global, not in the snapshot: rebuild it from
+  // the restored entities so commands on the first replayed tick (which run
+  // BEFORE update()'s own rebuild) pathfind against this world, not the grid
+  // left over from the tick we rewound FROM (js/loop.js).
+  rebuildBlockGrid();
   // History beyond the restore point gets recomputed during resim.
   while (DET.history.length && DET.history[DET.history.length - 1].tick > tick) DET.history.pop();
 }
@@ -437,7 +472,9 @@ const LOCKSTEP_MAX_RESYNCS = 5;
 
 function lockstepBuildResyncState(){
   let st = lockstepCaptureState();
-  st.exploredSim = st.exploredSim.map(g => Array.from(g));
+  // null under All-Visible (see lockstepCaptureState) — also keeps the
+  // resync/rejoin wire payload free of NUM_TEAMS x MAP^2 dead bytes.
+  if (st.exploredSim) st.exploredSim = st.exploredSim.map(g => Array.from(g));
   // Corpse deathTime is performance.now()-epoch — meaningless on the peer's
   // clock (page-load relative). Ship ages instead, same as the save path
   // (js/save.js), and rebase on apply. Cosmetic only, but raw timestamps
@@ -481,20 +518,29 @@ function lockstepApplyResync(state){
   nextId = state.nextId; nextProjectileId = state.nextProjectileId;
   simRngState = state.simRngState;
   window.bellRinging = state.bellRinging;
-  teamExploredGrid = state.exploredSim.map(g => Uint8Array.from(g));
+  if (state.exploredSim) teamExploredGrid = state.exploredSim.map(g => Uint8Array.from(g));
+  else resetTeamVision(); // All-Visible match: grids unmaintained — fresh zeros are exact
   restoreTeamState(state); // controllers/AI_STATES/lastTeamHit (js/core.js)
   // A rejoining guest's fog was just rebuilt empty (fresh page) — its
   // explored memory only survives in the sim's explored grid. Seed fog=1
   // from our team's grid; a no-op for tiles already explored/visible, so
   // it's safe on a peer whose fog was never lost (incl. the host itself).
-  const myEg = teamExploredGrid[myTeam];
-  for (let y = 0; y < MAP; y++) {
-    for (let x = 0; x < MAP; x++) {
-      if (fog[y][x] === 0 && myEg[y * MAP + x] === 1) fog[y][x] = 1;
+  // (Skipped under All-Visible: initFog above already seeded fully revealed.)
+  if (!window.fogDisabled) {
+    const myEg = teamExploredGrid[myTeam];
+    for (let y = 0; y < MAP; y++) {
+      for (let x = 0; x < MAP; x++) {
+        if (fog[y][x] === 0 && myEg[y * MAP + x] === 1) fog[y][x] = 1;
+      }
     }
   }
   bumpSimGen(); // tick jumped — invalidate every registered sim cache (js/core.js)
   selected = selected.map(u => entitiesById.get(u.id)).filter(Boolean);
+  // Rebuild the derived unitBlock grid from the resynced entities (see
+  // lockstepRestore): each peer kept its own leftover grid from a different
+  // pre-resync tick, so a command on the first post-barrier tick would
+  // otherwise pathfind against a per-peer-divergent grid and re-desync (js/loop.js).
+  rebuildBlockGrid();
   // Prune only commands at/before the resync point — NOT the whole queue.
   // Commands scheduled past it (our own just-submitted ones included) were
   // already sent on the wire, and the peer's stale-guard keeps anything

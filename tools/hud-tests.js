@@ -64,10 +64,10 @@ function pageSuite() {
     stage();
     const m = createUnit('militia', 20, 20, 0), a = createUnit('archer', 21, 20, 0);
     execCommand({ kind: 'guard', unitIds: [m.id, a.id], x: 30, y: 30 }, 0);
-    assert(m.guardFlagged && a.guardFlagged, 'posts not flagged');
+    assert(m.order && m.order.kind === 'guard' && a.order && a.order.kind === 'guard', 'guard orders not issued');
     step(600);
-    assert(Math.hypot(m.x - m.guardX, m.y - m.guardY) < 1.6, 'militia not at post');
-    assert(Math.hypot(a.x - a.guardX, a.y - a.guardY) < 1.6, 'archer not at post');
+    assert(Math.hypot(m.x - m.order.x, m.y - m.order.y) < 1.6, 'militia not at post');
+    assert(Math.hypot(a.x - a.order.x, a.y - a.order.y) < 1.6, 'archer not at post');
   });
 
   T('guard: displaced idle unit returns to its post', () => {
@@ -77,46 +77,62 @@ function pageSuite() {
     step(600);
     m.x = 24; m.y = 24; clearUnitPath(m); m.target = null; m.task = null;
     step(600);
-    assert(Math.hypot(m.x - m.guardX, m.y - m.guardY) < 1.6, 'did not return');
+    assert(Math.hypot(m.x - m.order.x, m.y - m.order.y) < 1.6, 'did not return');
   });
 
-  T('guard: plain move RELOCATES the post (implicit, unflagged)', () => {
+  T('order slot: LAST ORDER WINS — a plain move REPLACES a guard order', () => {
     stage();
     const m = createUnit('militia', 20, 20, 0);
     execCommand({ kind: 'guard', unitIds: [m.id], x: 30, y: 30 }, 0);
     execCommand({ kind: 'command', unitIds: [m.id], tileX: 10, tileY: 10 }, 0);
-    assert(m.guardX === 10 && m.guardY === 10, 'post not relocated: ' + m.guardX + ',' + m.guardY);
-    assert(m.guardFlagged === false, 'implicit post must be unflagged');
+    assert(m.order && m.order.kind === 'move' && m.order.x === 10 && m.order.y === 10,
+      'move did not replace the guard order: ' + JSON.stringify(m.order));
+    // Plain units get only the defendX/Y anchor (defensive stance only).
+    const plain = createUnit('militia', 20, 20, 0);
+    execCommand({ kind: 'command', unitIds: [plain.id], tileX: 12, tileY: 14 }, 0);
+    assert(plain.defendX === 12 && plain.defendY === 14, 'anchor not set to destination');
   });
 
-  T('guard: edge-of-map formation posts are clamped on-map', () => {
+  T('guard: edge-of-map formation anchors/posts are clamped on-map', () => {
     stage();
     const squad = []; for (let i = 0; i < 8; i++) squad.push(createUnit('militia', 6 + i, 10, 0));
+    execCommand({ kind: 'guard', unitIds: squad.map(s => s.id), x: 0, y: 0 }, 0);
+    assert(squad.every(s => s.order && s.order.x >= 0 && s.order.y >= 0), 'negative post coords');
     execCommand({ kind: 'command', unitIds: squad.map(s => s.id), tileX: 0, tileY: 0 }, 0);
-    assert(squad.every(s => s.guardX >= 0 && s.guardY >= 0), 'negative post coords');
+    assert(squad.every(s => s.defendX >= 0 && s.defendY >= 0), 'negative anchor coords');
   });
 
-  T('guard: unreachable post SETTLES instead of repathing forever', () => {
+  T('guard: unreachable FLAGGED post holds its spot without a repath storm', () => {
     stage();
     const m = createUnit('militia', 20, 20, 0);
     for (let y = 28; y <= 32; y++) for (let x = 28; x <= 32; x++) { map[y][x].t = TERRAIN.FOREST; map[y][x].res = 100; markMapDirty(x, y); }
     execCommand({ kind: 'guard', unitIds: [m.id], x: 30, y: 30 }, 0);
     step(600);
-    assert(!(m.guardX === 30 && m.guardY === 30), 'post never settled off the forest');
-    assert(Math.hypot(m.x - m.guardX, m.y - m.guardY) < 2, 'settled post not at the unit');
+    // The player's flag is an explicit order: it must NOT silently move.
+    assert(m.order && m.order.kind === 'guard' && m.order.x === 30 && m.order.y === 30, 'guard order moved: ' + JSON.stringify(m.order));
+    // The unit walked as close as the forest allows...
+    assert(Math.hypot(m.x - 30, m.y - 30) < 6, 'unit did not approach its flag');
+    // ...and is NOT re-running A* every 30 ticks forever: count real
+    // pathfinder calls over an 800-tick window — the long back-off allows a
+    // handful of probes; a storm would be ~27 (one per 30-tick retry).
+    const realFindPath = findPath; let calls = 0;
+    findPath = function(...a){ calls++; return realFindPath.apply(this, a); };
+    step(800);
+    findPath = realFindPath;
+    assert(calls <= 10, 'repath storm: ' + calls + ' findPath calls in 800 ticks');
   });
 
   T('guard: escort follows a moving unit, post freezes on its death', () => {
     stage();
     const m = createUnit('militia', 20, 20, 0), v = createUnit('villager', 22, 20, 0);
     execCommand({ kind: 'guard', unitIds: [m.id], x: 22, y: 20, targetId: v.id }, 0);
-    assert(m.guardTargetId === v.id && m.followId === v.id, 'escort not bound');
+    assert(m.order && m.order.kind === 'escort' && m.order.id === v.id, 'escort not bound');
     pathUnitTo(v, 35, 30);
     step(700);
     assert(Math.hypot(m.x - v.x, m.y - v.y) < 4, 'escort lost its charge');
     v.hp = 0; handleDeath(v, 1);
     step(30);
-    assert(m.guardTargetId == null && m.guardX != null, 'post did not freeze on death');
+    assert(m.order && m.order.kind === 'guard', 'order did not freeze to a ground post on death: ' + JSON.stringify(m.order));
   });
 
   T('guard: building flag takes perimeter watch posts', () => {
@@ -125,21 +141,22 @@ function pageSuite() {
     const a = createUnit('archer', 20, 30, 0);
     execCommand({ kind: 'guard', unitIds: [a.id], x: 31, y: 31, targetId: bar.id }, 0);
     step(600);
-    assert(a.guardTargetId === bar.id, 'building not targeted');
+    assert(a.order && a.order.kind === 'guardBuilding' && a.order.id === bar.id, 'building not targeted');
     assert(Math.hypot(a.x - 31.5, a.y - 31.5) < 4, 'not standing watch at the building');
   });
 
-  T('guard: garrison release re-pins the post to the drop spot', () => {
+  T('guard: garrison release re-anchors at the drop spot; a FLAGGED post stays put', () => {
     stage();
     const m = createUnit('militia', 10, 10, 0);
-    m.guardX = 40; m.guardY = 40; m.guardFlagged = false;
+    execCommand({ kind: 'guard', unitIds: [m.id], x: 40, y: 40 }, 0);
     const tc = entities.find(u => u.btype === 'TC' && u.team === 0);
     enterGarrison(m, tc);
     ejectGarrison(tc);
-    assert(Math.hypot(m.guardX - 7, m.guardY - 7) < 6, 'post still at old spot: ' + m.guardX + ',' + m.guardY);
+    assert(m.order && m.order.kind === 'guard' && m.order.x === 40 && m.order.y === 40, 'guard order must survive shelter: ' + JSON.stringify(m.order));
+    assert(Math.hypot(m.defendX - 7, m.defendY - 7) < 6, 'anchor not at drop spot: ' + m.defendX + ',' + m.defendY);
   });
 
-  T('guard: trained HUMAN units inherit the rally flag as their post; AI units do NOT', () => {
+  T('guard: trained HUMAN units inherit the rally flag as their ANCHOR; AI units do NOT', () => {
     stage();
     const hb = createBuilding('BARRACKS', 30, 10, 0);
     hb.rallyX = 40; hb.rallyY = 12; hb.queue = ['militia']; hb.trainTick = 1e9;
@@ -150,8 +167,9 @@ function pageSuite() {
     step(5);
     const hm = entities.find(u => u.utype === 'militia' && u.team === 0);
     const am = entities.find(u => u.utype === 'militia' && u.team === 1);
-    assert(hm && hm.guardX === 40 && hm.guardY === 12, 'human unit missing rally post');
-    assert(am && am.guardX == null, 'AI unit must not carry a guard post');
+    assert(hm && hm.order == null, 'rally spawn must not plant an order');
+    assert(hm && hm.defendX === 40 && hm.defendY === 12, 'human unit missing rally anchor');
+    assert(am && am.order == null, 'AI unit must not carry an order');
   });
 
   T('auto-scout: turning it on drops the guard post; manual order cancels scouting', () => {
@@ -159,9 +177,9 @@ function pageSuite() {
     const sc = createUnit('scout', 30, 30, 0);
     execCommand({ kind: 'guard', unitIds: [sc.id], x: 35, y: 35 }, 0);
     execCommand({ kind: 'auto-scout', unitIds: [sc.id], on: true }, 0);
-    assert(sc.autoScout && sc.guardX == null && !sc.guardFlagged, 'guard not dropped');
+    assert(sc.order && sc.order.kind === 'scout', 'scout order did not replace the guard order');
     execCommand({ kind: 'command', unitIds: [sc.id], tileX: 20, tileY: 20 }, 0);
-    assert(!sc.autoScout, 'manual order did not cancel auto-scout');
+    assert(!(sc.order && sc.order.kind === 'scout'), 'manual order did not cancel auto-scout');
   });
 
   T('auto-scout: enabling it releases an ESCORT immediately (clears followId, no lingering chase)', () => {
@@ -169,15 +187,93 @@ function pageSuite() {
     const sc = createUnit('scout', 30, 30, 0);
     const vil = createUnit('villager', 31, 31, 0);
     execCommand({ kind: 'guard', unitIds: [sc.id], x: 31, y: 31, targetId: vil.id }, 0);
-    assert(sc.guardTargetId === vil.id && sc.followId === vil.id, 'escort not bound');
+    assert(sc.order && sc.order.kind === 'escort' && sc.order.id === vil.id, 'escort not bound');
     execCommand({ kind: 'auto-scout', unitIds: [sc.id], on: true }, 0);
-    assert(sc.autoScout, 'auto-scout not on');
-    assert(sc.followId == null, 'followId not cleared — scout would keep escorting');
-    assert(sc.guardTargetId == null && sc.guardX == null && !sc.guardFlagged, 'guard/escort state not fully dropped');
+    assert(sc.order && sc.order.kind === 'scout', 'auto-scout not on');
+    assert(sc.followId == null, 'legacy followId not cleared');
     // and it does not re-glue to the villager as the villager moves
     pathUnitTo(vil, 40, 40);
     step(60);
-    assert(sc.followId == null, 'escort re-bound after auto-scout');
+    assert(sc.order && sc.order.kind === 'scout', 'escort re-bound after auto-scout');
+  });
+
+  // ---- Stance behavior (driven through the real sim) ----
+  // Each test stages a soldier + one enemy soldier on open grass and steps the
+  // sim, asserting the auto-acquire / movement rules that distinguish the four
+  // stances. fogDisabled (set by stage) makes the enemy visible.
+  T('stance aggressive: auto-acquires an enemy within radius 8, ignores one beyond it', () => {
+    stage();
+    const m = createUnit('militia', 30, 30, 0); m.stance = 'aggressive';
+    const near = createUnit('militia', 37, 30, 1); // dist 7 < 8
+    step(9);
+    assert(m.target === near.id, 'aggressive did not acquire enemy at range 7: target=' + m.target);
+    // reset and place the foe beyond radius 8
+    stage();
+    const m2 = createUnit('militia', 30, 30, 0); m2.stance = 'aggressive';
+    createUnit('militia', 41, 30, 1); // dist 11 > 8
+    step(9);
+    assert(m2.target == null, 'aggressive acquired a foe beyond radius 8: target=' + m2.target);
+  });
+
+  T('stance defensive: aggros at radius 6 but NOT at 7 (tighter than aggressive)', () => {
+    stage();
+    const m = createUnit('militia', 30, 30, 0); m.stance = 'defensive'; m.defendX = 30; m.defendY = 30;
+    createUnit('militia', 37, 30, 1); // dist 7 > 6 → defensive ignores (aggressive would grab)
+    step(9);
+    assert(m.target == null, 'defensive acquired at range 7 (should be radius 6): target=' + m.target);
+    stage();
+    const m2 = createUnit('militia', 30, 30, 0); m2.stance = 'defensive'; m2.defendX = 30; m2.defendY = 30;
+    const near = createUnit('militia', 35, 30, 1); // dist 5 < 6
+    step(9);
+    assert(m2.target === near.id, 'defensive did not acquire at range 5: target=' + m2.target);
+  });
+
+  T('stance defensive: leash keeps it near its anchor — never marches to a foe beyond the leash', () => {
+    stage();
+    const m = createUnit('militia', 30, 30, 0); m.stance = 'defensive'; m.defendX = 30; m.defendY = 30;
+    const foe = createUnit('militia', 45, 30, 1); foe.stance = 'passive'; // sits still, 15 tiles away
+    m.target = foe.id; // force-engage a distant foe; the leash must reel it back in
+    step(200);
+    assert(Math.hypot(m.x - 30, m.y - 30) <= 8, 'defensive chased beyond its leash, now at ' + m.x.toFixed(1) + ',' + m.y.toFixed(1));
+    assert(Math.hypot(m.x - 45, m.y - 30) > 2, 'defensive marched all the way to a foe far past its leash');
+  });
+
+  T('stance stand-ground: holds position (no chase) for a STATIONARY foe out of weapon range', () => {
+    stage();
+    const m = createUnit('militia', 30, 30, 0); m.stance = 'standground';
+    createUnit('militia', 34, 30, 1).stance = 'passive'; // dist 4, won't approach
+    step(120);
+    assert(Math.hypot(m.x - 30, m.y - 30) < 0.6, 'stand-ground moved to engage: at ' + m.x.toFixed(1) + ',' + m.y.toFixed(1));
+    assert(m.target == null, 'stand-ground acquired an out-of-range foe: target=' + m.target);
+  });
+
+  T('stance stand-ground: still attacks a foe that walks INTO weapon range', () => {
+    stage();
+    const m = createUnit('militia', 30, 30, 0); m.stance = 'standground';
+    createUnit('militia', 31, 30, 1); // adjacent — inside melee range
+    step(9);
+    assert(m.target != null, 'stand-ground did not attack an adjacent foe');
+    assert(Math.hypot(m.x - 30, m.y - 30) < 0.6, 'stand-ground chased instead of holding: at ' + m.x.toFixed(1) + ',' + m.y.toFixed(1));
+  });
+
+  T('stance passive: never auto-acquires even with an enemy point-blank', () => {
+    stage();
+    const m = createUnit('militia', 30, 30, 0); m.stance = 'passive';
+    createUnit('militia', 31, 30, 1); // adjacent
+    step(30);
+    assert(m.target == null, 'passive auto-acquired an adjacent enemy: target=' + m.target);
+  });
+
+  T('stance passive: setting it on a WALKING unit keeps the move order (only the fight is cancelled)', () => {
+    stage();
+    const m = createUnit('militia', 30, 30, 0);
+    execCommand({ kind: 'command', unitIds: [m.id], tileX: 45, tileY: 30 }, 0); // plain walk, no target
+    assert(m.path.length > 0, 'precondition: unit should be walking');
+    execCommand({ kind: 'set-stance', unitIds: [m.id], stance: 'passive' }, 0);
+    assert(m.path.length > 0, 'No Attack cancelled a plain walk order (should only cancel attacks)');
+    const xAtStance = m.x; // where the unit was when we switched to No Attack
+    step(300);
+    assert(m.x > xAtStance + 3, 'passive unit stopped walking after the stance change: ' + xAtStance.toFixed(1) + ' -> ' + m.x.toFixed(1));
   });
 
   T('villager sent to an UNSEEN resource just walks (no auto-gather); an explored one gathers', () => {
@@ -248,14 +344,66 @@ function pageSuite() {
     assert(!document.querySelector('#actions .queue-slot'), 'mobile skin must not render queue slots');
   });
 
+  T('hud: action strip rebuilds when a selected foundation finishes (Cancel Build -> train actions)', () => {
+    stage();
+    resourceStore(0).food = 500; resourceStore(0).wood = 500;
+    const b = createBuilding('BARRACKS', 14, 14, 0);
+    b.complete = false; b.buildProgress = Math.floor(b.buildTime * 0.5); b.hp = Math.floor(b.maxHp * 0.5);
+    selected = [b]; updateUI();
+    const hasCancel = () => [...document.querySelectorAll('#actions .btn-label')].some(l => l.textContent === 'Cancel Build');
+    const hasTrain = () => !!document.querySelector('#actions .act-btn[data-tip-type="unit"]');
+    assert(hasCancel(), 'in-progress foundation shows Cancel Build');
+    assert(!hasTrain(), 'in-progress foundation shows no train actions');
+    // Finish it the way the sim does, then refresh — the strip must rebuild.
+    b.complete = true; b.buildProgress = b.buildTime; b.hp = b.maxHp;
+    updateUI();
+    assert(!hasCancel(), 'finished building must drop the Cancel Build button');
+    assert(hasTrain(), 'finished building must show its train actions');
+  });
+
+  T('hud: Garrison button — HIDDEN for TC/tower, shown for a ram; stays "Garrison" when armed (no Done), hidden when full', () => {
+    stage();
+    const gbtn = () => [...document.querySelectorAll('#actions .act-btn')].find(b => { let l = b.querySelector('.btn-label'); return l && l.textContent === 'Garrison'; }) || null;
+    const label = () => { let b = [...document.querySelectorAll('#actions .btn-label')].find(l => l.textContent === 'Garrison' || l.textContent === 'Done'); return b ? b.textContent : null; };
+    // Deselect before each select so the strip rebuilds — stage() resets
+    // nextId, so a bare select could reuse a prior test's id (selKey collision →
+    // no rebuild); real play never reuses ids.
+    // TC/tower: the button is pulled back (hidden).
+    const tower = createBuilding('TOWER', 14, 14, 0); tower.complete = true; tower.hp = tower.maxHp;
+    selected = []; window.settingGarrison = null; updateUI();
+    selected = [tower]; updateUI();
+    assert(!gbtn(), 'tower must NOT show the Garrison button (hidden)');
+    // Ram: still has the button.
+    const ram = createUnit('ram', 20, 20, 0);
+    selected = []; updateUI();
+    selected = [ram]; updateUI();
+    assert(!!gbtn(), 'empty ram shows the Garrison button');
+    // Armed: NO "Done" state — the button stays "Garrison" and just highlights.
+    window.settingGarrison = ram.id; updateUI();
+    assert(label() !== 'Done', 'armed ram must NOT flip to Done');
+    assert(gbtn() && gbtn().classList.contains('stance-on'), 'armed ram highlights the Garrison button');
+    // Fill it → no free seats → button hidden.
+    window.settingGarrison = null;
+    ram.garrison = [];
+    for (let i = 0; i < garrisonCap(ram); i++) { let u = createUnit('militia', 30 + i, 30, 0); u.garrisonedIn = ram.id; ram.garrison.push(u.id); }
+    updateUI();
+    assert(!gbtn(), 'full ram hides the Garrison button');
+  });
+
   T('hud: game over shows the outcome card even with units selected', () => {
     stage();
     const m = createUnit('militia', 20, 20, 0);
     selected = [m]; updateUI();
     gameOver = true; updateUI();
     const si = document.getElementById('sel-info');
-    assert(!si.classList.contains('multi-select'), 'grid class still on at game over');
-    assert(/VICTORY|DEFEAT/.test(document.getElementById('sel-name').textContent), 'no outcome text');
+    // Mobile (index.html): the outcome renders as the SAME single grid tile as
+    // any selection — the panel KEEPS its multi-select shape so it doesn't
+    // slide/resize into the legacy portrait+stats card. Icon only, no words.
+    assert(si.classList.contains('multi-select'), 'panel dropped its grid shape at game over (would slide)');
+    const gridIcons = document.querySelectorAll('#sel-grid .sel-unit-icon');
+    assert(gridIcons.length === 1, 'expected exactly one outcome tile, got ' + gridIcons.length);
+    assert(/[🏆💀]/u.test(gridIcons[0].textContent), 'outcome tile has no trophy/skull icon');
+    assert(document.getElementById('sel-name').textContent === '', 'mobile should have no outcome text next to the icon');
     gameOver = false;
   });
 
@@ -279,6 +427,55 @@ function pageSuite() {
     teamAge[0] = 1; { let c = iconCls(); assert(/icon-TC-feudal/.test(c), 'Feudal should be TC-feudal, got: ' + c); }
     teamAge[0] = 2; { let c = iconCls(); assert(/icon-TC-castle/.test(c), 'Castle should be TC-castle, got: ' + c); }
     teamAge[0] = 0;
+  });
+
+  T('hud: mobile grid TILE icon upgrades on age advance while the TC stays selected', () => {
+    // The visible mobile element is the #sel-grid tile (a single selection goes
+    // through the grid), NOT #sel-portrait. Its dirty key keys on membership+hp,
+    // which don't change on Advance — so the tile must fold the age in or it
+    // renders the stale previous-age icon until the selection changes.
+    stage();
+    const tc = entities.find(e => e.btype === 'TC' && e.team === 0);
+    selected = [tc];
+    const gridCls = () => { updateUI(); const el = document.querySelector('#sel-grid .sel-unit-icon .tile-sprite-img'); return el ? el.className : ''; };
+    teamAge[0] = 0; { let c = gridCls(); assert(/icon-TC-dark/.test(c), 'Dark grid tile should be TC-dark, got: ' + c); }
+    // advance WITHOUT touching the selection — this is the reported bug
+    teamAge[0] = 1; { let c = gridCls(); assert(/icon-TC-feudal/.test(c), 'grid tile did not upgrade to Feudal on advance, got: ' + c); }
+    teamAge[0] = 2; { let c = gridCls(); assert(/icon-TC-castle/.test(c), 'grid tile did not upgrade to Castle on advance, got: ' + c); }
+    teamAge[0] = 0;
+  });
+
+  // ---- Market (AoE2-accurate: GLOBAL prices + Guilds) ----
+  T('market: prices are GLOBAL — one team\'s trades move the shared price everyone sees', () => {
+    stage();
+    createBuilding('MARKET', 10, 10, 0);
+    createBuilding('MARKET', 50, 50, 1);
+    resourceStore(0).food = 1000; resourceStore(1).food = 1000;
+    const foodPrice = t => marketPricesFor(t).food;
+    const before = foodPrice(0);
+    for (let i = 0; i < 3; i++) execCommand({ kind: 'market-trade', dir: 'sell', resType: 'food' }, 0);
+    assert(foodPrice(0) === before - 3 * MARKET_PRICE_STEP, 'shared food price did not drop from selling');
+    assert(foodPrice(1) === foodPrice(0), 'team 1 must see the same shared price (AoE2 global market)');
+  });
+
+  T('market: Guilds (Castle age) improves the sell return from 70% to 85%', () => {
+    // Feudal: no Guilds → 70% of the price.
+    stage();
+    createBuilding('MARKET', 10, 10, 0);
+    resourceStore(0).food = 1000; resourceStore(0).gold = 0;
+    teamAge[0] = 1;
+    let p1 = marketPricesFor(0).food;
+    execCommand({ kind: 'market-trade', dir: 'sell', resType: 'food' }, 0);
+    assert(resourceStore(0).gold === Math.floor(p1 * 70 / 100), 'pre-Guilds sell should return 70%, got ' + resourceStore(0).gold);
+    // Castle: Guilds → 85%.
+    stage();
+    createBuilding('MARKET', 10, 10, 0);
+    resourceStore(0).food = 1000; resourceStore(0).gold = 0;
+    teamAge[0] = 2; applyTech(0, 'guilds'); // Castle + grant Guilds (techs are researched now, not auto-granted at age)
+    let p2 = marketPricesFor(0).food;
+    execCommand({ kind: 'market-trade', dir: 'sell', resType: 'food' }, 0);
+    assert(resourceStore(0).gold === Math.floor(p2 * 85 / 100), 'Castle-age (Guilds) sell should return 85%, got ' + resourceStore(0).gold);
+    teamAge[0] = 0; teamTechs[0] = 0;
   });
 
   T('hud: Watch Tower icon is age-specific (Feudal variant, Castle keeps base) — portrait + build button', () => {
@@ -325,18 +522,29 @@ function pageSuite() {
     assert(store.wood === 1000 - (BLDGS.PTOWER.cost.w - BLDGS.WALL.cost.w), 'refund math off: ' + store.wood);
   });
 
-  T('ptower: fires 1+garrison arrows at enemies in range', () => {
+  T('ptower: garrison arrows follow the AoE2 DPS model — villagers add, melee adds nothing', () => {
     stage();
+    // Melee garrison: safety only, NO extra firepower (AoE2 garrison.md).
     const pt = createBuilding('PTOWER', 30, 30, 0);
     createUnit('militia', 33, 30, 1); // enemy in range 6
     for (let i = 0; i < 3; i++) enterGarrison(createUnit('militia', 29, 30, 0), pt);
     assert(garrisonCount(pt) === 3, 'garrison cap 3 not honored: ' + garrisonCount(pt));
     projectiles.length = 0;
     step(1);
-    assert(projectiles.length === 4, 'expected 4 arrows (1+3 garrison), got ' + projectiles.length);
+    assert(projectiles.length === 1, 'melee garrison must not add arrows: got ' + projectiles.length);
+    // Villager garrison: 2.5 dps each vs the ptower's 2 dps (atk 4 / 2s) →
+    // floor(7.5/2)=3 extra, capped at maxArrows 3 → 3 arrows total.
+    const pt2 = createBuilding('PTOWER', 40, 30, 0);
+    createUnit('militia', 43, 30, 1);
+    for (let i = 0; i < 3; i++) enterGarrison(createUnit('villager', 39, 30, 0), pt2);
+    projectiles.length = 0;
+    step(1);
+    // Only pt2 fires this step (pt is mid-reload from the melee check above —
+    // towers fire every 2 game-seconds): 3 arrows = villagers at maxArrows(3).
+    assert(projectiles.length === 3, 'expected 3 arrows (villager pt2 at maxArrows), got ' + projectiles.length);
   });
 
-  T('ptower: upgrade = instant swap to a construction site — Dark-age rejected; salvage refunds; committed (no cancel); villagers finish a full TOWER', () => {
+  T('ptower: upgrade = instant swap to a normal construction site — Dark-age rejected; salvage refunds; cancelable; villagers finish a full TOWER', () => {
     stage();
     const store = resourceStore(0);
     store.wood = 1000; store.stone = 1000;
@@ -347,14 +555,14 @@ function pageSuite() {
     pt.hp = Math.round(pt.maxHp / 2); // half-damaged: salvage must halve → floor(110w * 0.5) = 55
     execCommand({ kind: 'upgrade-walls', unitIds: [pt.id] }, 0);
     assert(pt.btype === 'TOWER', 'did not swap to TOWER');
-    assert(!pt.complete && pt.hp === 1 && pt.upgrading, 'not a committed construction site: complete=' + pt.complete + ' hp=' + pt.hp + ' upgrading=' + pt.upgrading);
+    assert(!pt.complete && pt.hp === 1, 'not a construction site: complete=' + pt.complete + ' hp=' + pt.hp);
     // salvage 55 wood credited before the full TOWER cost is charged
     assert(store.wood === 1000 + 55 - BLDGS.TOWER.cost.w, 'wood salvage off: ' + store.wood);
     assert(store.stone === 1000 - BLDGS.TOWER.cost.s, 'stone cost off: ' + store.stone);
-    // committed: deleting the site gives NO refund (can't cancel an upgrade)
+    // it's a NORMAL foundation now: cancelling it refunds its (new) TOWER cost
     const wBefore = store.wood, sBefore = store.stone;
     deleteOwnedEntity(pt);
-    assert(store.wood === wBefore && store.stone === sBefore, 'cancelling a committed upgrade refunded: ' + store.wood + '/' + store.stone);
+    assert(store.wood === wBefore + BLDGS.TOWER.cost.w && store.stone === sBefore + BLDGS.TOWER.cost.s, 'cancel did not refund the upgrade site: ' + store.wood + '/' + store.stone);
     // fresh run: villagers build the swapped site up into a full Watch Tower
     stage();
     const s2 = resourceStore(0); s2.wood = 1000; s2.stone = 1000; teamAge[0] = 1;
@@ -363,9 +571,299 @@ function pageSuite() {
     const v = createUnit('villager', 29.5, 30.5, 0);
     v.task = 'build'; v.buildTarget = pt2.id;
     step(BLDGS.TOWER.buildTime + 600);
-    assert(pt2.complete && !pt2.upgrading, 'villager never finished the upgrade');
+    assert(pt2.complete, 'villager never finished the upgrade');
     assert(pt2.maxHp === buildingMaxHpFor(0, 'TOWER') && pt2.hp === pt2.maxHp, 'not full TOWER hp: ' + pt2.hp + '/' + pt2.maxHp);
     assert(pt2.atk === BLDGS.TOWER.atk, 'atk not refreshed: ' + pt2.atk);
+  });
+
+  // ---- Wood→stone BUILD-OVER / drag: dropping a stone piece on its palisade
+  // counterpart funnels through the SAME salvage-swap as the Upgrade button
+  // (applyStoneUpgrade) — HP-scaled refund, in-place swap, committed. core.js.
+  T('build-over: a stone TOWER on a palisade tower salvage-swaps IN PLACE (same id, HP-scaled refund)', () => {
+    stage();
+    const store = resourceStore(0); store.wood = 1000; store.stone = 1000;
+    teamAge[0] = 1; // Feudal → stone TOWER unlocked
+    const pt = createBuilding('PTOWER', 30, 30, 0); // complete, full HP
+    const v = createUnit('villager', 29, 29, 0);
+    execCommand({ kind: 'build-placement', btype: 'TOWER', tileX: 30, tileY: 30, unitIds: [v.id] }, 0);
+    // in-place: same entity, now a normal TOWER construction site (not delete+recreate)
+    assert(entitiesById.get(pt.id) === pt, 'entity replaced instead of swapped in place');
+    assert(pt.btype === 'TOWER' && !pt.complete && pt.hp === 1, 'not a TOWER construction site: btype=' + pt.btype + ' complete=' + pt.complete + ' hp=' + pt.hp);
+    assert(!entities.some(e => e !== pt && e.type === 'building' && e.x === 30 && e.y === 30), 'a second building was stacked on the tile');
+    // full-HP PTOWER salvages its whole wood, credited before the TOWER charge
+    assert(store.wood === 1000 + BLDGS.PTOWER.cost.w - BLDGS.TOWER.cost.w, 'wood salvage off: ' + store.wood);
+    assert(store.stone === 1000 - BLDGS.TOWER.cost.s, 'stone cost off: ' + store.stone);
+    assert(v.buildTarget === pt.id || (v.buildQueue || []).includes(pt.id), 'villager not sent to the upgrade site');
+    teamAge[0] = 0;
+  });
+
+  T('build-over: a stone SGATE on a palisade gate swaps in place, keeping the 3-wide doorway footprint', () => {
+    stage();
+    const store = resourceStore(0); store.wood = 1000; store.stone = 1000;
+    teamAge[0] = 1; // Feudal → stone gate unlocked
+    const gate = createBuilding('GATE', 30, 30, 0, 3, 1); // complete 3-wide palisade gate
+    const v = createUnit('villager', 29, 29, 0);
+    execCommand({ kind: 'build-placement', btype: 'SGATE', tileX: 31, tileY: 30, unitIds: [v.id] }, 0);
+    assert(entitiesById.get(gate.id) === gate, 'gate replaced instead of swapped in place');
+    assert(gate.btype === 'SGATE' && gate.w === 3 && !gate.complete, 'not a 3-wide SGATE construction site: btype=' + gate.btype + ' w=' + gate.w + ' complete=' + gate.complete);
+    assert(store.wood === 1000 + BLDGS.GATE.cost.w - (BLDGS.SGATE.cost.w || 0), 'wood salvage off: ' + store.wood);
+    assert(store.stone === 1000 - BLDGS.SGATE.cost.s, 'stone cost off: ' + store.stone);
+    teamAge[0] = 0;
+  });
+
+  T('upgrade foundations are open gaps: an unbuilt upgraded gate OR wall passes anyone (owner + enemy)', () => {
+    stage();
+    const store = resourceStore(0); store.wood = 1000; store.stone = 1000;
+    teamAge[0] = 1;
+    const cart = createUnit('tradecart', 5, 20, 0);
+    const enemy = createUnit('tradecart', 55, 20, 1);
+
+    // GATE → stone: whole 3-wide footprint is walkable while unbuilt, everyone.
+    const gate = createBuilding('GATE', 30, 30, 0, 3, 1);
+    const gv = createUnit('villager', 29, 29, 0);
+    execCommand({ kind: 'build-placement', btype: 'SGATE', tileX: 31, tileY: 30, unitIds: [gv.id] }, 0);
+    assert(gate.btype === 'SGATE' && !gate.complete && !gate.buildProgress, 'setup: gate should be an unbuilt upgrade foundation');
+    assert(walkable(31, 30, cart.id), 'owner cannot pass through the unbuilt gate');
+    assert(walkable(30, 30, cart.id), 'owner blocked at a gate post tile while unbuilt');
+    assert(walkable(31, 30, enemy.id), 'enemy cannot pass through the unbuilt gate gap');
+
+    // WALL → stone: same rule — an upgraded wall is just a foundation, so the
+    // tile opens as a walkable gap until construction begins (no wasWall seal).
+    const wall = createBuilding('WALL', 40, 40, 0);
+    const wv = createUnit('villager', 39, 39, 0);
+    execCommand({ kind: 'build-placement', btype: 'SWALL', tileX: 40, tileY: 40, unitIds: [wv.id] }, 0);
+    assert(wall.btype === 'SWALL' && !wall.complete && !wall.buildProgress, 'setup: wall should be an unbuilt upgrade foundation');
+    assert(walkable(40, 40, cart.id), 'owner cannot pass through the unbuilt upgraded wall');
+    assert(walkable(40, 40, enemy.id), 'enemy cannot pass through the unbuilt upgraded wall');
+    teamAge[0] = 0;
+  });
+
+  T('build-over: garrison in a palisade tower is EJECTED (not orphaned) when a stone tower is built over it', () => {
+    stage();
+    const store = resourceStore(0); store.wood = 1000; store.stone = 1000;
+    teamAge[0] = 1;
+    const pt = createBuilding('PTOWER', 30, 30, 0);
+    const g1 = createUnit('militia', 29, 30, 0), g2 = createUnit('militia', 29, 31, 0);
+    enterGarrison(g1, pt); enterGarrison(g2, pt);
+    assert(garrisonCount(pt) === 2, 'setup: 2 units should be garrisoned');
+    const v = createUnit('villager', 29, 29, 0);
+    execCommand({ kind: 'build-placement', btype: 'TOWER', tileX: 30, tileY: 30, unitIds: [v.id] }, 0);
+    assert(garrisonCount(pt) === 0, 'garrison not cleared from the upgraded tower');
+    assert(!g1.garrisonedIn && !g2.garrisonedIn && g1.hp > 0 && g2.hp > 0, 'garrisoned units orphaned instead of ejected');
+    teamAge[0] = 0;
+  });
+
+  T('build-over: the upgrade site is a normal foundation — cancelling it refunds the stone cost', () => {
+    stage();
+    const store = resourceStore(0); store.wood = 1000; store.stone = 1000;
+    teamAge[0] = 1;
+    const pt = createBuilding('PTOWER', 30, 30, 0);
+    const v = createUnit('villager', 29, 29, 0);
+    execCommand({ kind: 'build-placement', btype: 'TOWER', tileX: 30, tileY: 30, unitIds: [v.id] }, 0);
+    assert(pt.btype === 'TOWER' && !pt.complete, 'setup: should be a TOWER construction site');
+    const w = store.wood, s = store.stone;
+    deleteOwnedEntity(pt);
+    assert(store.wood === w + BLDGS.TOWER.cost.w && store.stone === s + BLDGS.TOWER.cost.s, 'cancel did not refund the TOWER cost: ' + store.wood + '/' + store.stone);
+    teamAge[0] = 0;
+  });
+
+  T('wall-drag: dragging a stone wall over a palisade run upgrades each tile IN PLACE (no stacking)', () => {
+    stage();
+    const store = resourceStore(0); store.wood = 1000; store.stone = 1000;
+    teamAge[0] = 1;
+    const walls = [];
+    for (let x = 30; x <= 32; x++) walls.push(createBuilding('WALL', x, 30, 0)); // complete palisades
+    const v = createUnit('villager', 29, 29, 0);
+    execCommand({ kind: 'wall-drag', btype: 'SWALL', start: { x: 30, y: 30 }, corner: { x: 32, y: 30 }, end: { x: 32, y: 30 }, unitIds: [v.id] }, 0);
+    walls.forEach(w => {
+      assert(entitiesById.get(w.id) === w && w.btype === 'SWALL' && !w.complete, 'palisade at ' + w.x + ' not upgraded in place: btype=' + w.btype + ' complete=' + w.complete);
+    });
+    for (let x = 30; x <= 32; x++) {
+      const here = entities.filter(e => e.type === 'building' && e.x === x && e.y === 30);
+      assert(here.length === 1, 'stacked building at x=' + x + ': ' + here.length);
+    }
+    assert(store.wood === 1000 + 3 * BLDGS.WALL.cost.w, 'wall salvage off: ' + store.wood);
+    assert(store.stone === 1000 - 3 * BLDGS.SWALL.cost.s, 'stone cost off: ' + store.stone);
+    teamAge[0] = 0;
+  });
+
+  // Unbuilt counterpart: you can't upgrade a wall that isn't built yet, so the
+  // stone OVERWRITES it — the unbuilt piece is refunded in full, the stone is a
+  // fresh (cancelable) construction site. Complete → salvage-swap (above).
+  T('wall-drag: a stone wall dragged over a still-building palisade overwrites it (refunded, fresh site, no stack)', () => {
+    stage();
+    const store = resourceStore(0); store.wood = 1000; store.stone = 1000;
+    teamAge[0] = 1;
+    const other = createBuilding('WALL', 30, 30, 0); // complete → salvage-swap upgrade
+    const wall = createBuilding('WALL', 31, 30, 0); wall.complete = false; wall.hp = 1; wall.buildProgress = 0;
+    const v = createUnit('villager', 29, 29, 0);
+    execCommand({ kind: 'wall-drag', btype: 'SWALL', start: { x: 30, y: 30 }, corner: { x: 31, y: 30 }, end: { x: 31, y: 30 }, unitIds: [v.id] }, 0);
+    // unbuilt palisade replaced by a fresh, cancelable stone site (NOT the same entity, NOT committed)
+    assert(!entitiesById.get(wall.id), 'unbuilt palisade not removed by the overwrite');
+    const at31 = entities.filter(e => e.type === 'building' && e.x === 31 && e.y === 30);
+    assert(at31.length === 1 && at31[0].btype === 'SWALL' && !at31[0].complete, 'tile 31 not a fresh SWALL site: ' + JSON.stringify(at31.map(e => e.btype)));
+    assert(other.btype === 'SWALL' && !other.complete, 'complete neighbor did not salvage-swap: ' + other.btype);
+    // tile 30: full-HP palisade salvages 2 wood; tile 31: unbuilt palisade refunds its 2 wood; both tiles charge 5 stone
+    assert(store.wood === 1000 + 2 * BLDGS.WALL.cost.w, 'wood refund off: ' + store.wood);
+    assert(store.stone === 1000 - 2 * BLDGS.SWALL.cost.s, 'stone cost off: ' + store.stone);
+    teamAge[0] = 0;
+  });
+
+  T('build-over: placing a stone wall on a still-building palisade overwrites it (unbuilt piece refunded)', () => {
+    stage();
+    const store = resourceStore(0); store.wood = 1000; store.stone = 1000;
+    teamAge[0] = 1;
+    const wall = createBuilding('WALL', 30, 30, 0); wall.complete = false; wall.hp = 1; wall.buildProgress = 0;
+    const v = createUnit('villager', 29, 29, 0);
+    execCommand({ kind: 'build-placement', btype: 'SWALL', tileX: 30, tileY: 30, unitIds: [v.id] }, 0);
+    assert(!entitiesById.get(wall.id), 'unbuilt palisade not removed');
+    const at30 = entities.filter(e => e.type === 'building' && e.x === 30 && e.y === 30);
+    assert(at30.length === 1 && at30[0].btype === 'SWALL' && !at30[0].complete, 'not a single fresh SWALL site: ' + JSON.stringify(at30.map(e => e.btype)));
+    assert(v.buildTarget === at30[0].id || (v.buildQueue || []).includes(at30[0].id), 'villager not queued onto the new stone wall');
+    // unbuilt palisade refunds its 2 wood; new stone wall charges 5 stone
+    assert(store.wood === 1000 + BLDGS.WALL.cost.w, 'wood refund off: ' + store.wood);
+    assert(store.stone === 1000 - BLDGS.SWALL.cost.s, 'stone cost off: ' + store.stone);
+    teamAge[0] = 0;
+  });
+
+  T('build-over: overwriting an unbuilt PTOWER with a stone tower refunds it once (no double credit)', () => {
+    stage();
+    const store = resourceStore(0); store.wood = 1000; store.stone = 1000;
+    teamAge[0] = 1;
+    const pt = createBuilding('PTOWER', 30, 30, 0); pt.complete = false; pt.hp = 1; pt.buildProgress = 0;
+    const v = createUnit('villager', 29, 29, 0);
+    execCommand({ kind: 'build-placement', btype: 'TOWER', tileX: 30, tileY: 30, unitIds: [v.id] }, 0);
+    assert(!entitiesById.get(pt.id), 'unbuilt PTOWER not removed');
+    const at30 = entities.filter(e => e.type === 'building' && e.x === 30 && e.y === 30);
+    assert(at30.length === 1 && at30[0].btype === 'TOWER' && !at30[0].complete, 'not a single fresh TOWER site');
+    // PTOWER (110w) refunded IN FULL, TOWER (25w+125s) charged in full — exactly once each
+    assert(store.wood === 1000 + BLDGS.PTOWER.cost.w - BLDGS.TOWER.cost.w, 'wood off (double-credit?): ' + store.wood);
+    assert(store.stone === 1000 - BLDGS.TOWER.cost.s, 'stone off: ' + store.stone);
+    teamAge[0] = 0;
+  });
+
+  T('wall-run: double-click grabs the whole connected line through gates/towers + both materials; Upgrade hits every wood piece', () => {
+    stage();
+    const store = resourceStore(0); store.wood = 1000; store.stone = 1000;
+    teamAge[0] = 1; // Feudal → all stone upgrades unlocked
+    // one connected E-W line: wood wall, wood tower, wood gate, stone wall, stone tower, stone gate
+    const ww = createBuilding('WALL', 20, 30, 0);
+    const wt = createBuilding('PTOWER', 21, 30, 0);
+    const wg = createBuilding('GATE', 22, 30, 0);
+    const sw = createBuilding('SWALL', 23, 30, 0);
+    const st = createBuilding('TOWER', 24, 30, 0);
+    const sg = createBuilding('SGATE', 25, 30, 0);
+    // the run spans the whole line — passing THROUGH towers and the wood↔stone change
+    const run = collectCompletedWallRun(ww);
+    assert(run.length === 6, 'run did not span the whole line (towers/materials): ' + run.length);
+    // Upgrade the whole run: only the wood pieces convert; stone pieces ride along untouched
+    execCommand({ kind: 'upgrade-walls', unitIds: run.map(e => e.id) }, 0);
+    assert(ww.btype === 'SWALL' && !ww.complete, 'wood wall not upgraded: ' + ww.btype);
+    assert(wt.btype === 'TOWER' && !wt.complete, 'wood tower not upgraded: ' + wt.btype);
+    assert(wg.btype === 'SGATE' && !wg.complete, 'wood gate not upgraded: ' + wg.btype);
+    assert(sw.btype === 'SWALL' && sw.complete, 'stone wall wrongly touched');
+    assert(st.btype === 'TOWER' && st.complete, 'stone tower wrongly touched');
+    assert(sg.btype === 'SGATE' && sg.complete, 'stone gate wrongly touched');
+    teamAge[0] = 0;
+  });
+
+  T('build-path: a builder approaches a wall by nearest WALK-cost contact tile (own side), not routed across it', () => {
+    stage();
+    // vertical stone wall, open ground both sides; builder to the WEST
+    for (let y = 20; y <= 26; y++) createBuilding('SWALL', 25, y, 0);
+    const wall = entities.find(e => e.btype === 'SWALL' && e.x === 25 && e.y === 23);
+    const v = createUnit('villager', 22, 23, 0);
+    // goalBldg A*: stops at the cheapest-to-walk build-contact tile
+    const path = findPath(Math.round(v.x), Math.round(v.y), wall.x, wall.y, v.id, 0, wall);
+    const end = path.length ? path[path.length - 1] : { x: Math.round(v.x), y: Math.round(v.y) };
+    assert(adjToBuilding(end.x, end.y, wall), 'path did not end at a build-contact tile: ' + JSON.stringify(end));
+    assert(end.x < 25, 'builder crossed to the far side instead of approaching from its own: ' + JSON.stringify(end));
+  });
+
+  T('dock: goalBldg reaches the NEAREST edge of a 3x3 market from any side by the shortest path', () => {
+    stage();
+    const m = createBuilding('MARKET', 30, 30, 0); // 3x3, tiles 30..32, walkable plaza
+    const cases = [
+      { from: { x: 25, y: 31 }, side: e => e.x < 30, name: 'west' },
+      { from: { x: 37, y: 31 }, side: e => e.x > 32, name: 'east' },
+      { from: { x: 31, y: 25 }, side: e => e.y < 30, name: 'north' },
+      { from: { x: 31, y: 37 }, side: e => e.y > 32, name: 'south' },
+    ];
+    cases.forEach(c => {
+      const v = createUnit('tradecart', c.from.x, c.from.y, 0);
+      const path = findPath(Math.round(v.x), Math.round(v.y), m.x, m.y, v.id, 0, m);
+      const end = path.length ? path[path.length - 1] : { x: Math.round(v.x), y: Math.round(v.y) };
+      assert(adjToBuilding(end.x, end.y, m), c.name + ': did not dock adjacent: ' + JSON.stringify(end));
+      assert(c.side(end), c.name + ': docked on the far side: ' + JSON.stringify(end));
+      // shortest: straight approach, no detour → path length == chebyshev distance to the dock
+      const cheb = Math.max(Math.abs(Math.round(v.x) - end.x), Math.abs(Math.round(v.y) - end.y));
+      assert(path.length === cheb, c.name + ': not the shortest path: len ' + path.length + ' vs ' + cheb);
+    });
+  });
+
+  T('dock-obstacle: a cart routes through the GATE gap toward the market, not the long way around', () => {
+    stage();
+    // solid vertical wall at x=40 (y 20..40) with ONE gap: a gate at (40,30)
+    for (let y = 20; y <= 40; y++) { if (y === 30) continue; createBuilding('SWALL', 40, y, 0); }
+    createBuilding('SGATE', 40, 30, 0); // own team → the cart may pass the doorway
+    const m = createBuilding('MARKET', 55, 28, 0); // 3x3, east of the wall
+    const v = createUnit('tradecart', 25, 30, 0); // west of the wall, ~30 tiles out
+    const path = findPath(Math.round(v.x), Math.round(v.y), m.x, m.y, v.id, 0, m);
+    assert(path.length > 0, 'no path found at all');
+    const crossing = path.find(p => p.x === 40);
+    assert(crossing, 'path never reaches the wall line (partial/detour path): last=' + JSON.stringify(path[path.length - 1]) + ' len=' + path.length);
+    assert(Math.abs(crossing.y - 30) <= 1, 'cart went AROUND the wall instead of through the gate: crossed at ' + JSON.stringify(crossing) + ' len=' + path.length);
+    assert(path.length <= 40, 'path is a long detour: length ' + path.length);
+  });
+
+  T('gather-contact: a berry forager slides into contact with the node (not standing a tile off)', () => {
+    stage();
+    map[30][30].t = TERRAIN.BERRIES; map[30][30].res = 200; markMapDirty(30, 30);
+    const v = createUnit('villager', 25, 30, 0); // 5 tiles west — must walk over, then press
+    v.task = 'forage'; v.gatherX = 30; v.gatherY = 30;
+    step(300);
+    const dxr = Math.max(29.5 - v.x, 0, v.x - 30.5), dyr = Math.max(29.5 - v.y, 0, v.y - 30.5);
+    const edge = Math.sqrt(dxr * dxr + dyr * dyr);
+    assert(edge <= 0.5, 'forager did NOT slide into contact: edgeDist=' + edge.toFixed(2) + ' at ' + v.x.toFixed(2) + ',' + v.y.toFixed(2));
+    assert(map[30][30].res < 200, 'forager never gathered');
+  });
+
+  T('gather-contact-corner: a forager on a DIAGONAL tile presses into the node corner', () => {
+    stage();
+    map[30][30].t = TERRAIN.BERRIES; map[30][30].res = 200; markMapDirty(30, 30);
+    const v = createUnit('villager', 31, 29, 0); // NE diagonal tile of the berry
+    v.task = 'forage'; v.gatherX = 30; v.gatherY = 30;
+    const startEdge = Math.hypot(Math.max(29.5 - 31, 0, 31 - 30.5), Math.max(29.5 - 29, 0, 29 - 30.5));
+    step(60);
+    const edge = Math.hypot(Math.max(29.5 - v.x, 0, v.x - 30.5), Math.max(29.5 - v.y, 0, v.y - 30.5));
+    assert(edge <= 0.45, 'diagonal forager did not press into the corner: start edge=' + startEdge.toFixed(2) + ' end edge=' + edge.toFixed(2) + ' at ' + v.x.toFixed(2) + ',' + v.y.toFixed(2));
+  });
+
+  T('fan-out: co-gatherers of one node claim DISTINCT contact tiles (goalBldg + contactClaims)', () => {
+    stage();
+    map[30][30].t = TERRAIN.BERRIES; map[30][30].res = 500; markMapDirty(30, 30);
+    const node = { x: 30, y: 30, w: 1, h: 1 };
+    const vs = [];
+    for (let i = 0; i < 4; i++) { const v = createUnit('villager', 25, 28 + i, 0); v.gatherX = 30; v.gatherY = 30; vs.push(v); }
+    // path each in turn — each excludes the tiles peers already claimed
+    vs.forEach(v => pathToContact(v, node, contactClaims(v, p => p.gatherX === 30 && p.gatherY === 30)));
+    const dests = vs.map(v => v.path.length ? (v.path[v.path.length - 1].y * MAP + v.path[v.path.length - 1].x) : (Math.round(v.y) * MAP + Math.round(v.x)));
+    assert(new Set(dests).size === 4, 'gatherers did not fan out to distinct tiles: ' + JSON.stringify(dests.map(d => (d % MAP) + ',' + ((d / MAP) | 0))));
+  });
+
+  T('reinforce: a builder inside the base repairs a perimeter wall from INSIDE, never looping outside', () => {
+    stage();
+    // base wall line at y=30 (x 20..40); interior is SOUTH (y>30); one gate at (30,30)
+    for (let x = 20; x <= 40; x++) { if (x === 30) continue; createBuilding('SWALL', x, 30, 0); }
+    createBuilding('SGATE', 30, 30, 0);
+    const wall = entities.find(e => e.btype === 'SWALL' && e.x === 25 && e.y === 30);
+    wall.hp = wall.maxHp / 2; // damaged → a reinforce/repair
+    const v = createUnit('villager', 25, 35, 0); // INSIDE, south of the target
+    const path = findPath(Math.round(v.x), Math.round(v.y), wall.x, wall.y, v.id, 0, wall);
+    const end = path.length ? path[path.length - 1] : { x: 25, y: 35 };
+    assert(adjToBuilding(end.x, end.y, wall), 'did not reach the wall: ' + JSON.stringify(end));
+    assert(end.y > 30, 'approached from OUTSIDE (north) instead of inside (south): ' + JSON.stringify(end));
+    assert(!path.some(p => p.y < 30), 'path crossed to the outside of the wall: ' + JSON.stringify(path.filter(p => p.y < 30)));
   });
 
   // ---- Building guard covers the WHOLE footprint, not one corner ----
@@ -375,12 +873,12 @@ function pageSuite() {
     const g = createUnit('militia', 19, 19, 0);
     // guard the TC; home post at the NW exterior corner
     execCommand({ kind: 'guard', unitIds: [g.id], x: 19, y: 19, targetId: tc.id }, 0);
-    assert(g.guardTargetId === tc.id, 'not guarding the TC');
+    assert(g.order && g.order.kind === 'guardBuilding' && g.order.id === tc.id, 'not guarding the TC');
     const foe = createUnit('militia', 24.5, 24.5, 1); // SE exterior corner of the TC
     // simulate having chased to the far (SE) corner — ~7 tiles from the NW
     // home post (old point-leash would yank it home) but adjacent to the
     // footprint (new footprint-leash keeps it engaged)
-    g.guardX = 19; g.guardY = 19; g.explicitAttack = false;
+    g.explicitAttack = false;
     g.x = 24; g.y = 24; clearUnitPath(g); g.target = foe.id;
     step(3);
     assert(g.target === foe.id, 'footprint guard was leash-yanked off a threat at the far side of its building');
@@ -395,8 +893,9 @@ function pageSuite() {
     stage();
     const tc = createBuilding('TC', 20, 20, 0); // 4x4 → edges x/y 19.5..23.5
     const g = createUnit('militia', 19, 19, 0);
-    g.stance = 'defensive';
-    g.guardTargetId = tc.id; g.guardX = 19; g.guardY = 19; g.guardFlagged = true; g.explicitAttack = false;
+    execCommand({ kind: 'set-stance', unitIds: [g.id], stance: 'defensive' }, 0);
+    execCommand({ kind: 'guard', unitIds: [g.id], x: 19, y: 19, targetId: tc.id }, 0);
+    g.explicitAttack = false;
     // displace the guard east of the TC (still within its footprint leash),
     // then drop an enemy that is close to the GUARD (~5 tiles) but well
     // outside the building's guard zone (~9 tiles past its east edge)
@@ -417,8 +916,8 @@ function pageSuite() {
     const squad = [createUnit('militia',18,18,0), createUnit('militia',18,19,0),
                    createUnit('militia',18,20,0), createUnit('militia',18,21,0)];
     execCommand({ kind: 'guard', unitIds: squad.map(s=>s.id), x: 19, y: 19, targetId: tc.id }, 0);
-    const posts = new Set(squad.map(s => s.guardX + ',' + s.guardY));
-    assert(squad.every(s => s.guardTargetId === tc.id), 'not all guarding the TC');
+    const posts = new Set(squad.map(s => s.order.x + ',' + s.order.y));
+    assert(squad.every(s => s.order && s.order.kind === 'guardBuilding' && s.order.id === tc.id), 'not all guarding the TC');
     assert(posts.size === squad.length, 'guards piled onto shared posts: ' + [...posts].join(' '));
   });
 
@@ -438,15 +937,15 @@ function pageSuite() {
     const wall = createBuilding('WALL', 50, 50, 1); // beside the team-1 TC at 52,52
     const vil = createUnit('villager', 49, 49, 1);
     vil.task = null; vil.target = null; vil.buildTarget = null; clearUnitPath(vil);
-    // upgrade → instant swap to a committed SWALL construction site
+    // upgrade → instant swap to a normal SWALL construction site
     execCommand({ kind: 'upgrade-walls', unitIds: [wall.id] }, 1);
-    assert(wall.btype === 'SWALL' && !wall.complete && wall.upgrading, 'upgrade did not create a construction site');
+    assert(wall.btype === 'SWALL' && !wall.complete, 'upgrade did not create a construction site');
     // the AI's decision loop should hand the idle villager this build
     assignAIVillagers(AI_STATES[1], [vil], aiProfileFor(1));
     assert(vil.task === 'build' && vil.buildTarget === wall.id, 'AI did not assign a builder to the upgrade site: task=' + vil.task + ' target=' + vil.buildTarget);
     // and it actually finishes into a complete stone wall
     step(BLDGS.SWALL.buildTime + 600);
-    assert(wall.complete && wall.btype === 'SWALL' && !wall.upgrading, 'AI never finished the upgraded wall: complete=' + wall.complete);
+    assert(wall.complete && wall.btype === 'SWALL', 'AI never finished the upgraded wall: complete=' + wall.complete);
   });
 
   T('farm: reseed prepay queues, and cancel refunds 60 wood (soldier-queue parity)', () => {
@@ -476,6 +975,50 @@ function pageSuite() {
     teamAge[0] = 0;
   });
 
+  // A tech/unit/building with no sheet cell silently degrades to an emoji tile
+  // (Bodkin Arrow shipped that way for a while) — assert the registry covers
+  // every key the HUD can ask for, so the gap fails here instead of on screen.
+  T('sprites: every unit, building, age variant and tech has a sheet cell', () => {
+    const cells = window.SPRITE_CELLS;
+    const gaps = [];
+    const check = (key, what) => { if (!cells[key]) gaps.push(what + ' -> ' + key); };
+    for (const u in UNITS) {
+      const v = AGE_ICON_VARIANTS[u];
+      if (!v) check(u, 'unit ' + u);
+      else for (const a of [0, 1, 2]) check(v[a] || u, 'unit ' + u + ' @age' + a);
+    }
+    for (const b in BLDGS) {
+      const v = AGE_ICON_VARIANTS[b];
+      if (!v) check(b, 'building ' + b);
+      // TOWER has no Dark-age look on purpose (that's PTOWER), so skip age 0.
+      else for (const a of (b === 'TOWER' ? [1, 2] : [0, 1, 2])) check(v[a] || b, 'building ' + b + ' @age' + a);
+    }
+    for (const t in UPGRADES) check('up-' + t, 'tech ' + t);
+    assert(!gaps.length, 'missing sprite cells: ' + gaps.join(', '));
+    return { cells: Object.keys(cells).length, techs: Object.keys(UPGRADES).length };
+  });
+
+  // Starting a research must not move the other tiles: the price chips set an
+  // item's width, so the running tile keeps its (invisible) price to hold the
+  // band's geometry. The track proves a 0% research still reads as started.
+  T('research: starting one holds the band geometry and shows a progress track', () => {
+    stage();
+    setTeamAge(0, 1);
+    const store = resourceStore(0);
+    store.food = 900; store.wood = 900; store.gold = 900; store.stone = 900;
+    const b = createBuilding('BARRACKS', 30, 30, 0); b.complete = true; b.hp = b.maxHp;
+    selected.length = 0; selected.push(b); updateUI();
+    const geo = () => [...document.querySelectorAll('.research-item')]
+      .map(el => Math.round(el.getBoundingClientRect().x)).join(',');
+    const before = geo();
+    assert(before, 'setup: no research tiles rendered');
+    execCommand({ kind: 'research', bldgId: b.id, target: 'fletching' }, 0);
+    updateUI();
+    assert(geo() === before, 'tiles shifted on research start: ' + before + ' -> ' + geo());
+    assert(document.querySelector('.research-progress-track'), 'running tile has no progress track');
+    teamAge[0] = 0;
+  });
+
   T('hud: home button icon reflects the age (TC top-half: dark/feudal/castle)', () => {
     stage();
     const homeCls = () => { updateUI(); const el = document.querySelector('#home-btn .sprite-icon'); return el ? el.className : ''; };
@@ -484,6 +1027,8 @@ function pageSuite() {
     teamAge[0] = 2; assert(/icon-home-castle/.test(homeCls()), 'Castle home icon: ' + homeCls());
     teamAge[0] = 0;
   });
+
+
 
   return results;
 }
@@ -495,6 +1040,20 @@ function pageSuite() {
     const base = 'http://127.0.0.1:' + srv.address().port;
     browser = await launchBrowser(chromium);
     const ctx = await browser.newContext({ viewport: { width: 1000, height: 700 } });
+    // Aux pages (classic.html) used to be opened bare, so a JS error there
+    // passed the suite silently — only the index page below had listeners.
+    const auxErrors = [];
+    const newAuxPage = async () => {
+      const p = await ctx.newPage();
+      p.on('pageerror', e => auxErrors.push('pageerror: ' + String(e.message || e)));
+      p.on('console', m => {
+        if (m.type() !== 'error') return;
+        const t = m.text();
+        if (/Failed to load resource|favicon\.ico/i.test(t)) return;
+        auxErrors.push('console.error: ' + t.slice(0, 180));
+      });
+      return p;
+    };
     const page = await ctx.newPage();
     const pageErrors = [];
     page.on('pageerror', e => pageErrors.push(String(e.message || e)));
@@ -548,6 +1107,30 @@ function pageSuite() {
       && popupOk.reopenOnRetap;
     results.push({ name: 'hud: mobile market exchange is a dismissible popup (strip stays clear)', pass: popupPass, detail: popupPass?'':JSON.stringify(popupOk) });
 
+    // Market popup drags by its header (pointer events) and keeps its dragged
+    // position across the innerHTML rebuild that fires on every price tick.
+    const dragOk = await page.evaluate(`(()=>{
+      selected.length=0; window.__mktPopupHidden=false; window.__mktPopupPos=null;
+      const mk=createBuilding('MARKET',26,26,0); selected=[mk]; updateUI();
+      const pop=document.getElementById('mkt-popup');
+      const head=pop.querySelector('#mkt-popup-head');
+      const before=pop.getBoundingClientRect();
+      const sx=before.left+20, sy=before.top+8;
+      head.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,pointerId:1,clientX:sx,clientY:sy}));
+      head.dispatchEvent(new PointerEvent('pointermove',{bubbles:true,pointerId:1,clientX:sx-40,clientY:sy-30}));
+      const after=pop.getBoundingClientRect();
+      head.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:1}));
+      const posSet=!!window.__mktPopupPos;
+      refreshMktPopup(mk); // price-tick rebuild must NOT reset the position
+      const afterRebuild=pop.getBoundingClientRect();
+      selected.length=0; updateUI();
+      return { movedX:Math.round(after.left-before.left), movedY:Math.round(after.top-before.top),
+               posSet, persistX:Math.round(afterRebuild.left-after.left), persistY:Math.round(afterRebuild.top-after.top) };
+    })()`);
+    const dragPass = dragOk.movedX===-40 && dragOk.movedY===-30 && dragOk.posSet
+      && Math.abs(dragOk.persistX)<=1 && Math.abs(dragOk.persistY)<=1;
+    results.push({ name: 'hud: market popup drags by its header + keeps position across rebuilds', pass: dragPass, detail: dragPass?'':JSON.stringify(dragOk) });
+
     // ---- Desktop tap-mode (index.html): REAL mouse events through the
     // mouseup dispatch. submitCommand is stubbed to capture commands (the
     // sim is paused anyway); screen coords derive from the same transform
@@ -594,6 +1177,301 @@ function pageSuite() {
       assertEq(r.sel, 1, 'selection must be KEPT after a walk order');
     });
 
+    await tapT('desktop-tap: villager tapping a HEALTHY own building selects it (villager drops out)', async () => {
+      const pts = await page.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v];
+        const h=createBuilding('HOUSE',35,30,0); h.complete=true; h.hp=h.maxHp;
+        window.__pts=(scr)=>({ b: scr(35.5, 30.5) });`));
+      await page.mouse.click(pts.b.x, pts.b.y);
+      const r = await page.evaluate(`({sel:selected.length, t:selected[0]&&selected[0].btype, cmds:window.__cmds.length})`);
+      assertEq(r.t, 'HOUSE', 'a building with no work to offer becomes the selection');
+      assertEq(r.sel, 1, 'selection size');
+      assertEq(r.cmds, 0, 'no walk order is issued at it');
+    });
+
+    await tapT('desktop-tap: villager tapping a DAMAGED own building repairs it and does NOT select it', async () => {
+      const pts = await page.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v];
+        const h=createBuilding('HOUSE',35,30,0); h.complete=true; h.hp=Math.floor(h.maxHp/2);
+        window.__pts=(scr)=>({ b: scr(35.5, 30.5) });`));
+      await page.mouse.click(pts.b.x, pts.b.y);
+      const r = await page.evaluate(`({selB:selected.some(s=>s.type==='building'), cmd:window.__cmds.find(c=>c.kind==='command')})`);
+      if (!r.cmd) throw new Error('no repair command captured');
+      assertEq(r.selB, false, 'a repair target must NOT steal the selection');
+    });
+
+    await tapT('desktop-tap: SOLDIER tapping an own drop-off selects it (no villager = no work)', async () => {
+      const pts = await page.evaluate(tapStage(`
+        const m=createUnit('militia',30,30,0); selected=[m];
+        const c=createBuilding('LCAMP',35,30,0); c.complete=true; c.hp=c.maxHp;
+        window.__pts=(scr)=>({ b: scr(35.5, 30.5) });`));
+      await page.mouse.click(pts.b.x, pts.b.y);
+      const r = await page.evaluate(`({t:selected[0]&&selected[0].btype, sel:selected.length})`);
+      assertEq(r.t, 'LCAMP', 'a drop-off is work only for villagers; a soldier just selects it');
+      assertEq(r.sel, 1, 'selection size');
+    });
+
+    await tapT('undo: a plain WALK is NOT undoable (the arrow still means deselect)', async () => {
+      const pts = await page.evaluate(tapStage(`
+        const m=createUnit('militia',30,30,0); selected=[m];
+        window.__pts=(scr)=>({ g: scr(38.5, 30.5) });`));
+      await page.mouse.click(pts.g.x, pts.g.y);
+      const r = await page.evaluate(`({sel:selected.length, avail:window.undoAvailable()})`);
+      assertEq(r.sel, 1, 'a walk keeps the selection');
+      assertEq(r.avail, false, 'a walk records no undo — Back must still just deselect');
+    });
+
+    await tapT('undo: a committed TASK sends the villager BACK and re-selects it', async () => {
+      const pts = await page.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v]; window.__vid=v.id;
+        map[30][38].t=TERRAIN.FOREST; map[30][38].res=100; markMapDirty(38,30);
+        window.__pts=(scr)=>({ g: scr(38.5, 30.5) });`));
+      await page.mouse.click(pts.g.x, pts.g.y);
+      const r = await page.evaluate(`(()=>{
+        const avail=window.undoAvailable();
+        window.__cmds.length=0;
+        window.undoLastAction();
+        const back=window.__cmds.find(c=>c.kind==='command');
+        return {avail, back:back&&{x:back.tileX,y:back.tileY}, sel:selected.length,
+                selId:selected[0]&&selected[0].id, vid:window.__vid, still:window.undoAvailable()};
+      })()`);
+      assertEq(r.avail, true, 'a gather task IS undoable');
+      if(!r.back) throw new Error('undo issued no return command');
+      assertEq(r.back.x, 30, 'returns to the ORIGINAL tile x');
+      assertEq(r.back.y, 30, 'returns to the ORIGINAL tile y');
+      assertEq(r.selId, r.vid, 'the villager is re-selected by the undo');
+      assertEq(r.still, false, 'single-level undo is consumed on use');
+    });
+
+    await tapT('undo: selecting is an action — undo restores the PREVIOUS selection', async () => {
+      const pts = await page.evaluate(tapStage(`
+        const a=createUnit('militia',30,30,0); const b=createUnit('militia',34,30,0);
+        selected=[a]; window.__a=a.id; window.__b=b.id;
+        window.__pts=(scr)=>({ b: scr(34.2, 30.2) });`));
+      await page.mouse.click(pts.b.x, pts.b.y);
+      const r = await page.evaluate(`(()=>{
+        const afterTap=selected[0]&&selected[0].id;
+        window.undoLastAction();
+        return {afterTap, restored:selected[0]&&selected[0].id, n:selected.length, a:window.__a, b:window.__b};
+      })()`);
+      assertEq(r.afterTap, r.b, 'tapping the other unit selects it');
+      assertEq(r.n, 1, 'selection size after undo');
+      assertEq(r.restored, r.a, 'undo restores the previously selected unit');
+    });
+
+    await tapT('undo: a placed foundation is cancelled, and undo lapses once it is BUILT', async () => {
+      const r = await page.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v];
+        placing='HOUSE';
+        window.__pts=(scr)=>({ g: scr(36.5,30.5) });`) + `;(()=>{
+        const scr=(x,y)=>{const p=toIso(x,y);return{x:(p.ix-camX)*ZOOM+W/2,y:(p.iy-camY)*ZOOM+H/2+topH};};
+        const g=scr(36.5,30.5); doPlace(g.x,g.y);
+        const armed=window.undoAvailable();
+        const f=createBuilding('HOUSE',36,30,0); f.complete=false; f.hp=1;
+        const withFoundation=window.undoAvailable();
+        f.complete=true;
+        return {armed, withFoundation, afterBuilt:window.undoAvailable()};
+      })()`);
+      assertEq(r.withFoundation, true, 'undo is available while the foundation stands');
+      assertEq(r.afterBuilt, false, 'undo lapses once the building is finished');
+      const c = await page.evaluate(`(()=>{
+        const f=entities.find(e=>e.type==='building'&&e.btype==='HOUSE');
+        if(f) f.complete=false;   // the step above marked it built; put it back
+        window.__cmds.length=0;
+        window.undoLastAction();
+        const del=window.__cmds.find(x=>x.kind==='delete-units');
+        return {del: del&&del.unitIds, fid: f&&f.id};
+      })()`);
+      if(!c.del) throw new Error('undo issued no delete-units for the foundation');
+      assertEq(c.del[0], c.fid, 'cancels the foundation that was placed');
+    });
+
+    await tapT('undo: cancelling a placement also sends the builder back to its prior task', async () => {
+      const r = await page.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v]; window.__vid=v.id;
+        v.task='chop'; v.gatherX=26; v.gatherY=30;      // was chopping before we sent it to build
+        placing='HOUSE';
+        window.__pts=(scr)=>({ g: scr(36.5,30.5) });`) + `;(()=>{
+        const scr=(x,y)=>{const p=toIso(x,y);return{x:(p.ix-camX)*ZOOM+W/2,y:(p.iy-camY)*ZOOM+H/2+topH};};
+        const g=scr(36.5,30.5); doPlace(g.x,g.y);
+        const f=createBuilding('HOUSE',36,30,0); f.complete=false; f.hp=1;
+        window.__cmds.length=0;
+        window.undoLastAction();
+        const del=window.__cmds.find(c=>c.kind==='delete-units');
+        const back=window.__cmds.find(c=>c.kind==='command');
+        return {del:!!del, back:back&&{x:back.tileX,y:back.tileY,ids:back.unitIds},
+                sel:selected.length, selId:selected[0]&&selected[0].id, vid:window.__vid};
+      })()`);
+      assertEq(r.del, true, 'the foundation is cancelled');
+      if(!r.back) throw new Error('builder was left standing at the cancelled site');
+      assertEq(r.back.x, 26, 'villager is sent back to its PRIOR GATHER tile x');
+      assertEq(r.back.y, 30, 'villager is sent back to its PRIOR GATHER tile y');
+      assertEq(r.selId, r.vid, 'and is re-selected');
+    });
+
+    await tapT('undo: a GROUP task returns every unit to its OWN tile (shape kept)', async () => {
+      const pts = await page.evaluate(tapStage(`
+        const a=createUnit('villager',28,28,0), b=createUnit('villager',31,29,0), c=createUnit('villager',29,32,0);
+        selected=[a,b,c]; window.__ids=[a.id,b.id,c.id];
+        map[30][38].t=TERRAIN.FOREST; map[30][38].res=100; markMapDirty(38,30);
+        window.__pts=(scr)=>({ g: scr(38.5,30.5) });`));
+      await page.mouse.click(pts.g.x, pts.g.y);
+      const r = await page.evaluate(`(()=>{
+        window.__cmds.length=0;
+        window.undoLastAction();
+        const cs=window.__cmds.filter(c=>c.kind==='command');
+        return {n:cs.length, at:cs.map(c=>c.unitIds[0]+'@'+c.tileX+','+c.tileY).sort(),
+                ids:window.__ids, sel:selected.length};
+      })()`);
+      assertEq(r.n, 3, 'one command PER UNIT, not one group order');
+      const want = [r.ids[0]+'@28,28', r.ids[1]+'@31,29', r.ids[2]+'@29,32'].sort();
+      assertEq(JSON.stringify(r.at), JSON.stringify(want), 'each unit returns to its own original tile');
+      assertEq(r.sel, 3, 'the whole group is re-selected');
+    });
+
+    await tapT('undo: a GROUP selection is restored whole', async () => {
+      const pts = await page.evaluate(tapStage(`
+        const a=createUnit('militia',28,28,0), b=createUnit('militia',31,29,0);
+        const c=createUnit('militia',34,30,0);
+        selected=[a,b]; window.__ab=[a.id,b.id];
+        window.__pts=(scr)=>({ c: scr(34.2,30.2) });`));
+      await page.mouse.click(pts.c.x, pts.c.y);
+      const r = await page.evaluate(`(()=>{
+        const afterTap=selected.length;
+        window.undoLastAction();
+        return {afterTap, ids:selected.map(s=>s.id).sort(), ab:window.__ab.slice().sort()};
+      })()`);
+      assertEq(r.afterTap, 1, 'tapping one unit collapses the selection to it');
+      assertEq(JSON.stringify(r.ids), JSON.stringify(r.ab), 'undo restores BOTH previously selected units');
+    });
+
+    await tapT('undo: a new match does not inherit the previous one\'s undo', async () => {
+      const r = await page.evaluate(tapStage(`
+        const a=createUnit('militia',28,28,0), b=createUnit('militia',31,29,0);
+        selected=[a]; window.__pts=(scr)=>({ b: scr(31.2,29.2) });`) + `;(()=>{
+        const scr=(x,y)=>{const p=toIso(x,y);return{x:(p.ix-camX)*ZOOM+W/2,y:(p.iy-camY)*ZOOM+H/2+topH};};
+        const g=scr(31.2,29.2); handleTap(g.x,g.y,false);   // a selection change = an undoable action
+        const before = window.undoAvailable();
+        restartGame('standard');
+        return { before, after: window.undoAvailable() };
+      })()`);
+      assertEq(r.before, true, 'a selection change arms the undo');
+      assertEq(r.after, false, 'restarting the match clears it (no stale entry from last game)');
+    });
+
+    await tapT('undo: a wall DRAG cancels every foundation it laid', async () => {
+      const r = await page.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v]; window.__vid=v.id;
+        v.task='chop'; v.gatherX=24; v.gatherY=30;
+        window.wallDragBtype='WALL'; window.wallDragStart={x:34,y:30};
+        window.wallDragEnd={x:38,y:30}; window.wallDragCorner={x:38,y:30};
+        window.isDraggingWall=true; placing='WALL';
+        window.__pts=(scr)=>({ g: scr(30.5,30.5) });`) + `;(()=>{
+        finalizeWallDrag();
+        const armedBeforeExec = window.undoAvailable();
+        // the run of foundations lands a few ticks later (lockstep)
+        const tiles=getWallElbowTiles({x:34,y:30},{x:38,y:30},{x:38,y:30});
+        tiles.forEach(t=>{ const b=createBuilding('WALL',t.x,t.y,0); b.complete=false; b.hp=1; });
+        const armed = window.undoAvailable();
+        window.__cmds.length=0;
+        window.undoLastAction();
+        const del=window.__cmds.find(c=>c.kind==='delete-units');
+        const back=window.__cmds.find(c=>c.kind==='command');
+        return { n:tiles.length, armedBeforeExec, armed, deleted: del && del.unitIds.length,
+                 back: back && {x:back.tileX,y:back.tileY},
+                 selId: selected[0] && selected[0].id, vid: window.__vid,
+                 after: window.undoAvailable() };
+      })()`);
+      assertEq(r.armed, true, 'a wall drag is undoable once its foundations exist');
+      assertEq(r.deleted, r.n, 'EVERY segment the drag laid is cancelled');
+      if(!r.back) throw new Error('builder was left at the cancelled wall');
+      assertEq(r.back.x, 24, 'villager returns to its prior gather tile');
+      assertEq(r.selId, r.vid, 'and is re-selected');
+      assertEq(r.after, false, 'undo is consumed');
+    });
+
+    await tapT('undo: a drag over our OWN walls records nothing (upgrades are not cancellable)', async () => {
+      const r = await page.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v];
+        // the whole run already holds our palisade — a stone drag here is an
+        // in-place UPGRADE (salvage-swap), never a fresh foundation
+        for(let x=34;x<=38;x++){ const b=createBuilding('WALL',x,30,0); b.complete=true; b.hp=b.maxHp; }
+        window.wallDragBtype='SWALL'; window.wallDragStart={x:34,y:30};
+        window.wallDragEnd={x:38,y:30}; window.wallDragCorner={x:38,y:30};
+        window.isDraggingWall=true; placing='SWALL';
+        window.__pts=(scr)=>({ g: scr(30.5,30.5) });`) + `;(()=>{
+        finalizeWallDrag();
+        return { armed: window.undoAvailable() };
+      })()`);
+      assertEq(r.armed, false, 'an upgrade-only drag arms no undo — cancelling it would refund a consumed palisade');
+    });
+
+    await tapT('undo: a wall drag DESELECTS the villager (build is a task)', async () => {
+      const r = await page.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v];
+        window.wallDragBtype='WALL'; window.wallDragStart={x:34,y:30};
+        window.wallDragEnd={x:36,y:30}; window.wallDragCorner={x:36,y:30};
+        window.isDraggingWall=true; placing='WALL';
+        window.__pts=(scr)=>({ g: scr(30.5,30.5) });`) + `;(()=>{
+        finalizeWallDrag();
+        return { sel: selected.length };
+      })()`);
+      assertEq(r.sel, 0, 'a dragged wall run deselects, same as placing a single foundation');
+    });
+
+    await tapT('undo: hunting a SHEEP is restored by the undo (target, not gather tile)', async () => {
+      const pts = await page.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v];
+        const sh=createUnit('sheep',26,30,4); window.__sheep=sh.id;
+        v.target=sh.id; v.task=null;              // hunting: target set, task null
+        map[30][38].t=TERRAIN.FOREST; map[30][38].res=100; markMapDirty(38,30);
+        window.__pts=(scr)=>({ g: scr(38.5,30.5) });`));
+      await page.mouse.click(pts.g.x, pts.g.y);   // send it to chop instead
+      const r = await page.evaluate(`(()=>{
+        window.__cmds.length=0;
+        window.undoLastAction();
+        const back=window.__cmds.find(c=>c.kind==='command');
+        return { tid: back && back.targetId, sheep: window.__sheep };
+      })()`);
+      assertEq(r.tid, r.sheep, 'undo re-targets the SHEEP it was hunting');
+    });
+
+    await tapT('undo: the arrow DISAPPEARS once the action stops being undoable', async () => {
+      const r = await page.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v]; placing='HOUSE';
+        window.__pts=(scr)=>({ g: scr(36.5,30.5) });`) + `;(()=>{
+        const scr=(x,y)=>{const p=toIso(x,y);return{x:(p.ix-camX)*ZOOM+W/2,y:(p.iy-camY)*ZOOM+H/2+topH};};
+        const g=scr(36.5,30.5); doPlace(g.x,g.y);
+        const f=createBuilding('HOUSE',36,30,0); f.complete=false; f.hp=1;
+        updateUI();
+        const whileFoundation = !!document.querySelector('#actions .act-btn.back-btn');
+        f.complete=true; f.hp=f.maxHp;            // it finished building
+        updateUI();
+        return { whileFoundation, afterBuilt: !!document.querySelector('#actions .act-btn.back-btn') };
+      })()`);
+      assertEq(r.whileFoundation, true, 'arrow shows while the foundation stands');
+      assertEq(r.afterBuilt, false, 'arrow is GONE once the building finished — nothing left to undo');
+    });
+
+    await tapT('undo: the arrow APPEARS in the HUD once a placed foundation exists', async () => {
+      const r = await page.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v]; placing='HOUSE';
+        window.__pts=(scr)=>({ g: scr(36.5,30.5) });`) + `;(()=>{
+        const scr=(x,y)=>{const p=toIso(x,y);return{x:(p.ix-camX)*ZOOM+W/2,y:(p.iy-camY)*ZOOM+H/2+topH};};
+        const g=scr(36.5,30.5); doPlace(g.x,g.y);      // build is a task -> deselects
+        updateUI();
+        const beforeExec = !!document.querySelector('#actions .back-btn');
+        // the foundation lands a few ticks later (lockstep delay)
+        const f=createBuilding('HOUSE',36,30,0); f.complete=false; f.hp=1;
+        updateUI();
+        return { sel:selected.length, beforeExec, shown: !!document.querySelector('#actions .back-btn'),
+                 label:(document.querySelector('#actions .back-btn .btn-label')||{}).textContent||'' };
+      })()`);
+      assertEq(r.sel, 0, 'placing a building deselects (index model)');
+      assertEq(r.shown, true, 'the Undo arrow must render once the foundation exists, with nothing selected');
+      assertEq(r.label, 'Undo', 'and it reads as Undo, not Back');
+    });
+
     await tapT('walk into UNEXPLORED territory KEEPS selection (even over a fogged resource — no task committed)', async () => {
       const pts = await page.evaluate(tapStage(`
         const v=createUnit('villager',30,30,0); selected=[v];
@@ -618,7 +1496,7 @@ function pageSuite() {
       assertEq(r.sel, 0, 'placing a building deselects the villager');
     });
 
-    await tapT('auto-scout button deselects the scout (auto-scout is a task)', async () => {
+    await tapT('auto-scout button deselects the scout (auto-scout is a dispatch task)', async () => {
       await page.evaluate(tapStage(`
         const sc=createUnit('scout',30,30,0); selected=[sc]; window.__pts=()=>({});`));
       const r = await page.evaluate(`(()=>{ updateUI();
@@ -629,6 +1507,119 @@ function pageSuite() {
       if (!r.found) throw new Error('Auto Scout button not found');
       if (!r.cmd) throw new Error('no auto-scout command issued');
       assertEq(r.sel, 0, 'enabling auto-scout deselects the scout');
+    });
+
+    await tapT('game over: See Map is view-only — no select, box-select or command over the frozen map', async () => {
+      const r = await page.evaluate(tapStage(`
+        const m=createUnit('militia',30,30,0);
+        window.__pts=()=>({});`) + `;(()=>{
+        gameOver = true; window.seeMapMode = true;
+        selected = [];
+        doSelect(500, 400, false);                 const selAfterSelect = selected.length;
+        doBoxSelect(0, 0, 2000, 2000);             const selAfterBox = selected.length;
+        handleTap(500, 400, false);                const selAfterTap = selected.length;
+        // command paths must also no-op even if something is (was) selected
+        const m = entities.find(e=>e.utype==='militia'); selected = [m];
+        window.__cmds = [];
+        doCommand(500, 400);
+        handleTap(600, 400, false);
+        const cmds = window.__cmds.length;
+        gameOver = false; window.seeMapMode = false;
+        return { selAfterSelect, selAfterBox, selAfterTap, cmds };
+      })()`);
+      assertEq(r.selAfterSelect, 0, 'doSelect selected a unit after game over');
+      assertEq(r.selAfterBox, 0, 'doBoxSelect selected units after game over');
+      assertEq(r.selAfterTap, 0, 'handleTap selected a unit after game over');
+      assertEq(r.cmds, 0, 'a command was issued over the frozen map');
+    });
+
+    await tapT('game over: dragging on the map paints NO selection box (See Map view-only)', async () => {
+      await page.evaluate(tapStage(`
+        createUnit('militia',30,30,0);
+        gameOver=true; window.seeMapMode=true;
+        window.__pts=()=>({});`));
+      // A real left-drag across the canvas — the box-select must never arm.
+      await page.mouse.move(400, 400);
+      await page.mouse.down();
+      await page.mouse.move(620, 520);
+      const during = await page.evaluate(`!!document.getElementById('minimap-wrap') && document.getElementById('minimap-wrap').classList.contains('drag-select-active')`);
+      await page.mouse.up();
+      await page.evaluate(`gameOver=false; window.seeMapMode=false;`);
+      assertEq(during, false, 'a selection box armed (drag-select-active) over the frozen map');
+    });
+
+    await tapT('posture row: soldiers show NO Guard tile; a guard post folds into the stance highlight', async () => {
+      const r = await page.evaluate(tapStage(`
+        const sc=createUnit('scout',30,30,0); selected=[sc];
+        window.__pts=()=>({});`) + `;(()=>{
+        const lit=()=>[...document.querySelectorAll('#actions .act-btn.stance-on')].map(b=>b.dataset.tipLabel);
+        const has=(l)=>[...document.querySelectorAll('#actions .act-btn')].some(b=>b.dataset.tipLabel===l);
+        const sc=selected[0];
+        updateUI(); const dflt=lit(); const guardShown=has('Guard');
+        sc.stance='standground'; updateUI(); const st=lit();
+        sc.guardX=20; sc.guardY=20; updateUI(); const gd=lit();   // guard hidden → folds to stance
+        sc.order={kind:'scout'}; updateUI(); const au=lit();            // auto overrides everything
+        return {dflt, st, gd, au, guardShown};
+      })()`);
+      assertEq(r.guardShown, false, 'Guard tile is hidden for soldiers');
+      assertEq(JSON.stringify(r.dflt), JSON.stringify(['Aggressive']), 'default lit = Aggressive only');
+      assertEq(JSON.stringify(r.st), JSON.stringify(['Stand Ground']), 'stance lit follows stance');
+      assertEq(JSON.stringify(r.gd), JSON.stringify(['Stand Ground']), 'a guarding soldier stays lit on its stance (guard hidden)');
+      assertEq(JSON.stringify(r.au), JSON.stringify(['Auto Scout']), 'auto-scout overrides everything in the highlight');
+    });
+
+    await tapT('posture row: rams show NO Guard tile (guard = soldiers only; garrison confusion)', async () => {
+      const r = await page.evaluate(tapStage(`
+        const ram=createUnit('ram',30,30,0); selected=[ram];
+        window.__pts=()=>({});`) + `;(()=>{
+        const has=(l)=>[...document.querySelectorAll('#actions .act-btn')].some(b=>b.dataset.tipLabel===l);
+        updateUI();
+        return {guardShown:has('Guard'), stanceShown:has('Aggressive')};
+      })()`);
+      assertEq(r.guardShown, false, 'Guard tile must be hidden for rams (a ram holds position by nature; the tile read as a second garrison button)');
+      assertEq(r.stanceShown, false, 'rams get no stance tiles');
+    });
+
+    await tapT('No Attack (passive) DISENGAGES an in-progress attack, not just future ones', async () => {
+      const r = await page.evaluate(tapStage(`
+        const m=createUnit('militia',30,30,0); const b=createBuilding('HOUSE',34,34,1);
+        m.target=b.id; m.explicitAttack=true; selected=[m];
+        window.__pts=()=>({});`) + `;(()=>{
+        const m=selected[0];
+        const before={target:m.target, explicit:m.explicitAttack};
+        execCommand({kind:'set-stance', unitIds:[m.id], stance:'passive'}, 0);
+        return {before, target:m.target, explicit:m.explicitAttack, stance:m.stance};
+      })()`);
+      assertEq(!!r.before.target, true, 'precondition: unit was attacking a building');
+      assertEq(r.target, null, 'passive clears the current attack target');
+      assertEq(r.explicit, false, 'passive clears the explicit-attack flag');
+      assertEq(r.stance, 'passive', 'stance applied');
+    });
+
+    await tapT('No Attack (passive) does NOT retaliate when shot by an enemy building', async () => {
+      const r = await page.evaluate(tapStage(`
+        const m=createUnit('militia',30,30,1); m.stance='passive';
+        const tc=createBuilding('TC',33,33,0);   // enemy building "attacker"
+        window.__pts=()=>({});`) + `;(()=>{
+        const m=entities.find(e=>e.utype==='militia');
+        const tc=entities.find(e=>e.btype==='TC'&&e.team===0);
+        damageEntity(tc, m);   // building shoots the passive soldier
+        return {target:m.target||null, task:m.task||null, hp:m.hp};
+      })()`);
+      assertEq(r.target, null, 'passive soldier does not acquire the building that shot it');
+    });
+
+    await tapT('posture: picking a stance is the off-switch for an active guard + auto-scout', async () => {
+      const r = await page.evaluate(tapStage(`
+        const m=createUnit('scout',30,30,0); selected=[m]; m.order={kind:'scout'};
+        window.__pts=()=>({});`) + `;(()=>{
+        const m=selected[0];
+        execCommand({kind:'set-stance', unitIds:[m.id], stance:'defensive'}, 0);
+        return {order:m.order, scoutOrder:!!(m.order&&m.order.kind==='scout'), stance:m.stance};
+      })()`);
+      assertEq(r.order, null, 'set-stance clears the standing order');
+      assertEq(r.scoutOrder, false, 'set-stance clears auto-scout');
+      assertEq(r.stance, 'defensive', 'stance applied');
     });
 
     await tapT('desktop-tap: resource click assigns villagers and RELEASES them', async () => {
@@ -653,37 +1644,68 @@ function pageSuite() {
       assertEq(r.sel, 0, 'right-click gather order must RELEASE the selection on index.html');
     });
 
-    // ---- Right-click to plant a Guard/Escort flag (index.html) ----
-    // Right-clicking a friendly BUILDING guards it, a friendly UNIT escorts
-    // it; GROUND/ENEMY stay a normal walk/attack; and a villager selection
-    // never intercepts (repair-on-right-click is preserved). Building/unit
-    // click points are self-calibrated against the real hit-tests so the
-    // pixel geometry can't make the test flaky.
-    await tapT('right-click own building = Guard flag (military selected, deselects after tasking)', async () => {
+    // ---- Click-to-guard / click-to-escort is DISABLED (index.html) ----
+    // Right-clicking a friendly BUILDING or UNIT no longer guards/escorts — it
+    // falls through to a plain command (rally/repair/move). GROUND/ENEMY stay a
+    // normal walk/attack. Click points are self-calibrated against the real
+    // hit-tests so the pixel geometry can't make the test flaky.
+    await tapT('right-click own building does NOT guard (click-guard disabled)', async () => {
       const pts = await page.evaluate(tapStage(`
         const b=createBuilding('BARRACKS',29,29,0);
         const m=createUnit('militia',25,25,0); selected=[m];
         window.__pts=(scr)=>{ const base=scr(b.x+b.w/2,b.y+b.h/2); let pt=base;
           for(let dy=0;dy<=100;dy+=3){const c={x:base.x,y:base.y-dy}; if(getBuildingUnderCursor(c.x,c.y)===b){pt=c;break;}}
-          return { p: pt, bId: b.id }; };`));
+          return { p: pt }; };`));
       await page.mouse.click(pts.p.x, pts.p.y, { button: 'right' });
-      const r = await page.evaluate(`({g:window.__cmds.find(c=>c.kind==='guard')||null, other:window.__cmds.some(c=>c.kind==='command'), sel:selected.length})`);
-      if (!r.g) throw new Error('no guard command issued for own-building right-click');
-      assertEq(r.g.targetId, pts.bId, 'guard targetId = the building');
-      if (r.other) throw new Error('should NOT also issue a normal command');
-      assertEq(r.sel, 0, 'guard is a task → deselects');
+      const r = await page.evaluate(`({g:window.__cmds.some(c=>c.kind==='guard'), move:window.__cmds.some(c=>c.kind==='command')})`);
+      if (r.g) throw new Error('click-guard is disabled — own-building right-click must NOT guard');
+      if (!r.move) throw new Error('own-building right-click should fall through to a plain command');
     });
 
-    await tapT('right-click friendly unit = Escort flag', async () => {
+    await tapT('wall hit-test: link selects its N/W owner (not the other tile), pillar selects its own wall', async () => {
+      // A(30,30) draws the East link toward B(31,30), so A OWNS that link.
+      // Clicking the link must select A; clicking B's pillar must select B.
+      // Routing is derived from the REAL drawn pixels (drawBuilding part mask),
+      // so this guards against the hit-test drifting from the render.
+      const r = await page.evaluate(tapStage(`
+        ZOOM=1;
+        const A=createBuilding('WALL',30,30,0), B=createBuilding('WALL',31,30,0);
+        window.__pts=(scr)=>{
+          const hit=(en,c)=>wallGateHitPart(en,c.x,c.y);
+          const gid=(c)=>{const g=getBuildingUnderCursor(c.x,c.y);return g?g.id:null;};
+          // B's own pillar (scan up from its tile centre)
+          let bBody=null; { const base=scr(31.5,30.5);
+            for(let d=0;d<=60&&bBody===null;d++){const c={x:base.x,y:base.y-d}; if(hit(B,c)==='body') bBody=gid(c);} }
+          // a point on A's East link slab that is NOT anyone's pillar body
+          let linkOwner='none', ab=scr(30.5,30.5);
+          outer: for(let dx=8;dx<=26;dx+=2) for(let dy=-16;dy<=10;dy+=2){
+            const c={x:ab.x+dx,y:ab.y+dy};
+            if(hit(A,c)==='link' && hit(A,c)!=='body' && hit(B,c)!=='body'){ linkOwner=gid(c); break outer; }
+          }
+          return { aId:A.id, bId:B.id, bBody, linkOwner };
+        };`));
+      assertEq(r.bBody, r.bId, "B's pillar selects B");
+      assertEq(r.linkOwner, r.aId, 'the A→B link selects its owner A, not the neighbour');
+    });
+
+    await tapT('right-click friendly unit does NOT escort (click-escort disabled)', async () => {
+      // No click-to-escort: right-clicking ANY friendly unit (support cart OR
+      // soldier) issues a plain move command, never a guard/escort flag.
       const pts = await page.evaluate(tapStage(`
-        const ally=createUnit('militia',30,30,0); const m=createUnit('militia',25,25,0); selected=[m];
-        window.__pts=(scr)=>{ const base=scr(ally.x,ally.y); let pt={x:base.x,y:base.y-8};
-          for(let dy=0;dy<=24;dy+=2){const c={x:base.x,y:base.y-dy}; if(getUnitUnderCursor(c.x,c.y)===ally){pt=c;break;}}
-          return { p: pt, aId: ally.id }; };`));
-      await page.mouse.click(pts.p.x, pts.p.y, { button: 'right' });
-      const g = await page.evaluate(`window.__cmds.find(c=>c.kind==='guard')||null`);
-      if (!g) throw new Error('no guard/escort command issued for friendly-unit right-click');
-      assertEq(g.targetId, pts.aId, 'escort targetId = the friendly unit');
+        const cart=createUnit('tradecart',30,30,0); const sol=createUnit('militia',34,30,0);
+        const m=createUnit('militia',25,25,0); selected=[m];
+        window.__pts=(scr)=>{
+          const find=(u)=>{ const base=scr(u.x,u.y); let pt={x:base.x,y:base.y-8};
+            for(let dy=0;dy<=24;dy+=2){const c={x:base.x,y:base.y-dy}; if(getUnitUnderCursor(c.x,c.y)===u){pt=c;break;}}
+            return pt; };
+          return { cart: find(cart), sol: find(sol) }; };`));
+      for (const key of ['cart', 'sol']) {
+        await page.evaluate(`window.__cmds.length = 0; selected=[entities.find(e=>e.utype==='militia'&&e.x<28)];`);
+        await page.mouse.click(pts[key].x, pts[key].y, { button: 'right' });
+        const r = await page.evaluate(`({g:window.__cmds.some(c=>c.kind==='guard'), move:window.__cmds.some(c=>c.kind==='command')})`);
+        if (r.g) throw new Error(key + ' right-click must NOT escort (click-escort disabled)');
+        if (!r.move) throw new Error(key + ' right-click should issue a plain move');
+      }
     });
 
     await tapT('right-click ground = normal walk (NOT a guard flag)', async () => {
@@ -798,7 +1820,7 @@ function pageSuite() {
     });
 
     await tapT('classic-guard: right-click DOES set the rally on classic.html (AoE2 standard)', async () => {
-      const cpage = await ctx.newPage();
+      const cpage = await newAuxPage();
       await cpage.goto(base + '/classic.html', { waitUntil: 'load' });
       await cpage.waitForFunction(() => {
         const b = document.getElementById('start-game-btn');
@@ -815,8 +1837,53 @@ function pageSuite() {
       await cpage.close();
     });
 
+    await tapT('classic: right-click repairs a DAMAGED own building (shared work-target rule)', async () => {
+      const cpage = await newAuxPage();
+      await cpage.goto(base + '/classic.html', { waitUntil: 'load' });
+      await cpage.waitForFunction(() => {
+        const b = document.getElementById('start-game-btn');
+        return b && !b.disabled;
+      }, { timeout: 15000 });
+      const pts = await cpage.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v];
+        const dmg=createBuilding('HOUSE',35,30,0); dmg.complete=true; dmg.hp=Math.floor(dmg.maxHp/2);
+        window.__dmg=dmg.id;
+        window.__pts=(scr)=>({ b: scr(35.5,30.5) });`));
+      await cpage.mouse.click(pts.b.x, pts.b.y, { button: 'right' });
+      const r = await cpage.evaluate(`(()=>{
+        const c=window.__cmds.find(x=>x.kind==='command');
+        return {bt:c&&c.buildTargetId, dmg:window.__dmg, sel:selected.length};
+      })()`);
+      assertEq(r.bt, r.dmg, 'classic right-click still resolves the damaged building as a repair target');
+      assertEq(r.sel, 1, 'classic stays AoE2-sticky — the villager keeps its selection');
+      await cpage.close();
+    });
+
+    await tapT('classic: right-click a HEALTHY own building is a MOVE, not a selection (index rule must not leak)', async () => {
+      const cpage = await newAuxPage();
+      await cpage.goto(base + '/classic.html', { waitUntil: 'load' });
+      await cpage.waitForFunction(() => {
+        const b = document.getElementById('start-game-btn');
+        return b && !b.disabled;
+      }, { timeout: 15000 });
+      const pts = await cpage.evaluate(tapStage(`
+        const v=createUnit('villager',30,30,0); selected=[v]; window.__vid=v.id;
+        const h=createBuilding('HOUSE',35,30,0); h.complete=true; h.hp=h.maxHp;
+        window.__pts=(scr)=>({ b: scr(35.5,30.5) });`));
+      await cpage.mouse.click(pts.b.x, pts.b.y, { button: 'right' });
+      const r = await cpage.evaluate(`(()=>{
+        const c=window.__cmds.find(x=>x.kind==='command');
+        return {have:!!c, bt:c&&c.buildTargetId, selType:selected[0]&&selected[0].type, selId:selected[0]&&selected[0].id, vid:window.__vid};
+      })()`);
+      assertEq(r.have, true, 'classic issues a command, not a selection change');
+      assertEq(r.bt, null, 'a healthy building offers no work');
+      assertEq(r.selType, 'unit', 'the villager is still selected — classic did NOT adopt the index select-the-building rule');
+      assertEq(r.selId, r.vid, 'same villager');
+      await cpage.close();
+    });
+
     await tapT('classic: right-click move KEEPS the selection (AoE2-sticky, no deselect)', async () => {
-      const cpage = await ctx.newPage();
+      const cpage = await newAuxPage();
       await cpage.goto(base + '/classic.html', { waitUntil: 'load' });
       await cpage.waitForFunction(() => {
         const b = document.getElementById('start-game-btn');
@@ -833,7 +1900,7 @@ function pageSuite() {
     });
 
     await tapT('classic: Guard button + click guards a building and KEEPS selection (shared guard, sticky)', async () => {
-      const cpage = await ctx.newPage();
+      const cpage = await newAuxPage();
       await cpage.goto(base + '/classic.html', { waitUntil: 'load' });
       await cpage.waitForFunction(() => {
         const b = document.getElementById('start-game-btn');
@@ -855,7 +1922,7 @@ function pageSuite() {
     });
 
     await tapT('classic-guard: left ground click never commands on classic.html', async () => {
-      const cpage = await ctx.newPage();
+      const cpage = await newAuxPage();
       await cpage.goto(base + '/classic.html', { waitUntil: 'load' });
       await cpage.waitForFunction(() => {
         const b = document.getElementById('start-game-btn');
@@ -872,7 +1939,7 @@ function pageSuite() {
     });
 
     await tapT('classic-guard: queue renders as AoE2 slot buttons and clicking one cancels it', async () => {
-      const cpage = await ctx.newPage();
+      const cpage = await newAuxPage();
       await cpage.goto(base + '/classic.html', { waitUntil: 'load' });
       await cpage.waitForFunction(() => {
         const b = document.getElementById('start-game-btn');
@@ -911,7 +1978,7 @@ function pageSuite() {
     });
 
     await tapT('classic: prepaid reseeds are cancellable queue slots (parity) + reseed button keeps its border', async () => {
-      const cpage = await ctx.newPage();
+      const cpage = await newAuxPage();
       await cpage.goto(base + '/classic.html', { waitUntil: 'load' });
       await cpage.waitForFunction(() => {
         const b = document.getElementById('start-game-btn');
@@ -948,6 +2015,13 @@ function pageSuite() {
     }
     if (pageErrors.length) {
       console.error('JS ERRORS:\n  ' + pageErrors.join('\n  '));
+      failed++;
+    }
+    // Same gate for the AUX (classic.html) pages, which newAuxPage listens on.
+    // Must be checked HERE, after every test has run — pushed earlier it reads
+    // an empty array and passes even when classic is throwing.
+    if (auxErrors.length) {
+      console.error('CLASSIC.HTML JS ERRORS:\n  ' + auxErrors.join('\n  '));
       failed++;
     }
     console.log(`\n${results.length - failed}/${results.length} passed`);

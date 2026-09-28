@@ -25,9 +25,8 @@
 // better than anything a hand-rolled key-shortening scheme would realistic-
 // ally achieve, for zero ongoing maintenance cost. Applied uniformly to
 // 'cmd' messages too (not just 'sync') for one code path — they're tiny
-// enough that compression overhead is negligible either way. (The 13KB
-// figure is from the deleted snapshot-sync mode; resync/recovery state
-// payloads are far larger and benefit even more.)
+// enough that compression overhead is negligible either way. (Resync/
+// recovery state payloads are far larger and benefit even more.)
 //
 // Since every send is already fully-encoded bytes, the connection uses
 // PeerJS's serialization:'none' — sending the ArrayBuffer/Uint8Array
@@ -60,6 +59,24 @@ function netConnectedGuestSeats(){
   let seats = [];
   for (const r of netGuests.values()) if (r.connected) seats.push(r.seat);
   return seats;
+}
+// Honor-system reclaim: seats a returning guest with an UNKNOWN identity may
+// pick from — a human seat whose guest is currently disconnected and not kicked.
+// (Loading a saved MP game seeds every human seat as disconnected, so all of
+// them are offerable.) The host still binds the claim, so it stays authoritative.
+function reclaimableSeats(){
+  let out = [];
+  for (const r of netGuests.values()) {
+    if (r.connected || r.kicked) continue;
+    if (typeof teamControllers !== 'undefined' && teamControllers[r.seat] && !seatHasPerson(r.seat)) continue;
+    out.push({
+      seat: r.seat,
+      name: r.name || ((typeof teamNames !== 'undefined' && teamNames && teamNames[r.seat]) || ('Player ' + (r.seat + 1))),
+      color: (typeof teamColorMap !== 'undefined' && teamColorMap && teamColorMap[r.seat]) || null,
+    });
+  }
+  out.sort((a, b) => a.seat - b.seat);
+  return out;
 }
 // On the host, the netConnected global means "at least one guest is
 // connected" — kept true/false here so the many existing role-agnostic
@@ -114,7 +131,7 @@ function mpTabId(){
 // stale cached build while the other has today's is a very real failure
 // mode that otherwise surfaces as inexplicable desync instead of a clear
 // "refresh your page".
-const NET_PROTOCOL_VERSION = 12; // v12: host-relay star for up to 4 players — 'hello'/'welcome' seat binding, relayed cmd-ls/tick/chat carry `from`, per-recipient yourSeat/yourTeam in lobby-sync/lockstep-start/lockstep-resume, match-pause/set-controller; v11: pre-match lobby handshake (lobby-open/lobby-sync/lobby-seat, js/lobby.js) + names/colors in lockstep-start/lockstep-resume; ALSO genMap main-stone/gold placement search widened (js/map.js) — same seed yields a different map than v10, so mixed versions would desync; v10: battering ram is a trainable sim unit (js/core.js UNITS.ram); v9: age-up upgrade cards change sim math (js/core.js UPGRADES); v8: age system — teamAge + TC research in snapshots and simChecksum (js/core.js AGES)
+const NET_PROTOCOL_VERSION = 18; // v18: character mode — autopilot + possess commands (e.possessed hashed, the AI skips it); v17: Ballistics (projectiles lead a moving target) plus footprint-aware attack approach/acquire and closest-approach walks — sim trajectories differ, so mixed versions would desync; v16: manual research — per-team teamTechs bitmask replaces auto-applied age-up upgrades (techs researched at their owning buildings, age-up at the TC), folded into simChecksum + snapshots, so mixed versions would desync; v15: honor-system seat reclaim — host offers a 'seat-list' of reclaimable (disconnected human) seats to an unknown-identity mid-match/save-load joiner instead of a flat denial, guest answers 'claim-seat'; ALSO the checksum now folds 6 more entity fields (atkCooldown/gatherCooldown/range/speed/carryMax/maxHp), so mixed versions would desync; v14: AI information parity — vision-grid AI spotting (aiVisibleEnemies via entityVisibleToTeam), phase-anchored vision refresh cadence (VISION_REFRESH_PERIOD), intel memory (dense decaying strengthByTeam, contact + remembered-TC marches, ghost-clearing) and tileHiddenForTeam applying to AI teams: sim semantics changed, mixed versions would desync; v13: the exclusive order slot (e.order replaces guard*/followId/autoScout/moveGoal on entities; sim leash/acquire/order semantics changed — mixed versions would desync); v12: host-relay star for up to 4 players — 'hello'/'welcome' seat binding, relayed cmd-ls/tick/chat carry `from`, per-recipient yourSeat/yourTeam in lobby-sync/lockstep-start/lockstep-resume, match-pause/set-controller; v11: pre-match lobby handshake (lobby-open/lobby-sync/lobby-seat, js/lobby.js) + names/colors in lockstep-start/lockstep-resume; ALSO genMap main-stone/gold placement search widened (js/map.js) — same seed yields a different map than v10, so mixed versions would desync; v10: battering ram is a trainable sim unit (js/core.js UNITS.ram); v9: age-up upgrade cards change sim math (js/core.js UPGRADES); v8: age system — teamAge + TC research in snapshots and simChecksum (js/core.js AGES)
 
 // CompressionStream/DecompressionStream are stream-based (write in, read
 // chunks out), so both directions are inherently async. A single already-
@@ -186,7 +203,7 @@ let netBytesReceived = 0;
     ? (bps / (1024 * 1024)).toFixed(2) + ' MB/s'
     : (bps / 1024).toFixed(1) + ' KB/s';
   setInterval(() => {
-    const el = document.getElementById('net-stats');
+    const el = byId('net-stats');
     if (!el) return;
     const ls = typeof lockstepEnabled === 'function' && lockstepEnabled();
     // The net/sim readout is a CLASSIC-skin feature only. The modern skin
@@ -202,7 +219,7 @@ let netBytesReceived = 0;
     const up = (netBytesSent - lastSent) / dt;
     const down = (netBytesReceived - lastRecv) / dt;
     // Sim pace: ticks actually produced per real second. Full rate is
-    // 30*GAME_SPEED (60 at the default 2x); lower means the lockstep gate
+    // TPS*GAME_SPEED (40 at the default 2x, TPS=20); lower means the lockstep gate
     // (connection) or the device itself can't keep up. d = current input
     // delay in ticks (the adaptive buffer, js/lockstep.js).
     const t = Math.floor(tick);
@@ -220,7 +237,7 @@ let netBytesReceived = 0;
   // The 1s cadence would leave the box overlapping the resource bar for up
   // to a second after a shrink — hide immediately on resize instead.
   window.addEventListener('resize', () => {
-    const el = document.getElementById('net-stats');
+    const el = byId('net-stats');
     if (el && window.innerWidth < 700) el.style.display = 'none';
   });
 })();
@@ -272,11 +289,18 @@ function queueReceive(data, conn){
       if (netRole === 'host' && conn) {
         if (!msg || typeof msg !== 'object') return;
         if (msg.type === 'hello') { hostHandleHello(msg, conn); return; }
+        // A seat-picker answer arrives on a still-unbound conn (the joiner was
+        // offered a list, never seated) — handle it before the rec lookup.
+        if (msg.type === 'claim-seat') { hostHandleClaimSeat(msg, conn); return; }
         let rec = netGuestByConn(conn);
         if (!rec) {
           // Unbound connection: nothing but proto is meaningful before
           // its hello arrives — drop everything else unattributed.
-          if (msg.type === 'proto') dispatchNetMessage(msg, { conn });
+          if (msg.type === 'proto') {
+            let pend = netPendingConns.find(p => p.conn === conn);
+            if (pend) pend.protoV = msg.v; // gate seating on it in hostHandleHello
+            dispatchNetMessage(msg, { conn });
+          }
           return;
         }
         dispatchNetMessage(msg, { seat: rec.seat });
@@ -321,8 +345,7 @@ function dispatchNetMessage(msg, src){
 // pipeline) so a fast interval costs nothing bandwidth-wise — the real
 // constraint is keeping enough margin over it that a single delayed/
 // dropped packet, or a backgrounded tab's setInterval throttling, doesn't
-// misfire as a false "disconnected". 4x margin, same ratio as the initial
-// (slower) values this replaced.
+// misfire as a false "disconnected" — hence the 4x margin.
 const NET_HEARTBEAT_MS = 1000;
 const NET_TIMEOUT_MS = 4000;
 let lastNetRecvAt = 0;
@@ -356,8 +379,11 @@ setInterval(() => {
       queueSend(rec.conn, { type: 'ping' });
       if (now - rec.lastRecvAt > NET_TIMEOUT_MS) handleGuestConnectionLost(rec.seat);
     }
-    // Sweep connections that opened but never sent their hello.
+    // Sweep connections that opened but never sent their hello. A conn parked
+    // on the seat-picker (awaitingClaim) has sent its hello and is waiting on a
+    // human — spare it.
     netPendingConns = netPendingConns.filter(p => {
+      if (p.awaitingClaim) return true;
       if (now - p.openedAt > NET_HELLO_DEADLINE_MS) {
         try { p.conn.close(); } catch (e) {}
         return false;
@@ -427,6 +453,15 @@ function wireHostConnection(conn){
 // ask the session layer (js/init.js / js/lobby.js own the seating rules)
 // for a fresh seat; null means denied.
 function hostHandleHello(msg, conn){
+  // A guest on a different protocol version would desync — turn it away at the
+  // seating gate rather than seat it into a doomed match. proto is FIFO-ordered
+  // ahead of hello, so its version is already recorded on the pending conn
+  // (queueReceive). A client that never announced proto falls through as before.
+  let pend = netPendingConns.find(p => p.conn === conn);
+  if (pend && pend.protoV != null && pend.protoV !== NET_PROTOCOL_VERSION) {
+    denyGuestConn(conn, 'version');
+    return;
+  }
   // Exact same tab (reload) → its record, even if still marked connected.
   // Same browser, different/new tab → only a DISCONNECTED record (a live
   // record with that token is a second local tab, which is a new client).
@@ -449,6 +484,17 @@ function hostHandleHello(msg, conn){
   } else {
     let seat = (typeof window.assignGuestSeat === 'function') ? window.assignGuestSeat(msg) : null;
     if (seat == null) {
+      // Mid-match unknown identity (cross-device / cleared storage / a fresh
+      // page after a save-load): offer the honor-system reclaim list instead of
+      // a flat denial. The conn stays pending (awaitingClaim spares it from the
+      // hello-deadline sweep) until it answers with claim-seat.
+      let seats = reclaimableSeats();
+      if (seats.length) {
+        let pend = netPendingConns.find(p => p.conn === conn);
+        if (pend) pend.awaitingClaim = true;
+        queueSend(conn, { type: 'seat-list', seats });
+        return;
+      }
       denyGuestConn(conn, (typeof mpMatchStarted !== 'undefined' && mpMatchStarted) ? 'in-progress' : 'full');
       return;
     }
@@ -470,12 +516,116 @@ function hostHandleHello(msg, conn){
   if (window.onNetConnectionOpen) window.onNetConnectionOpen(rec.seat);
 }
 
+// Honor-system reclaim answer: the joiner picked a seat from the offered list.
+// Re-validate it's still open (another returning guest may have grabbed it in
+// the race — first claim wins), then bind THIS connection to the seat's record,
+// rebinding its token so the device auto-rejoins on a later plain refresh.
+function hostHandleClaimSeat(msg, conn){
+  let seat = msg.seat;
+  let rec = netGuestBySeat(seat);
+  let stillOpen = rec && !rec.connected && !rec.kicked &&
+    !(typeof teamControllers !== 'undefined' && teamControllers[seat] && !seatHasPerson(seat));
+  if (!stillOpen) {
+    // Taken or invalid — re-offer the updated list, or deny if nothing's left.
+    let seats = reclaimableSeats();
+    if (seats.length) queueSend(conn, { type: 'seat-list', seats });
+    else denyGuestConn(conn, (typeof mpMatchStarted !== 'undefined' && mpMatchStarted) ? 'in-progress' : 'full');
+    return;
+  }
+  if (rec.conn && rec.conn !== conn) { try { rec.conn.close(); } catch (e) {} }
+  rec.conn = conn;
+  rec.token = msg.token || rec.token; // honor-system rebind: later refreshes on this device auto-rejoin
+  rec.tab = msg.tab || rec.tab;
+  rec.connected = true;
+  rec.lastRecvAt = performance.now();
+  if (msg.name) rec.name = msg.name;
+  netPendingConns = netPendingConns.filter(p => p.conn !== conn);
+  updateHostConnected();
+  if (typeof mpMatchStarted !== 'undefined' && mpMatchStarted) persistMpSessionMap();
+  queueSend(conn, { type: 'welcome', seat: rec.seat });
+  if (window.onNetConnectionOpen) window.onNetConnectionOpen(rec.seat);
+}
+
 function denyGuestConn(conn, reason){
   queueSend(conn, { type: 'join-denied', reason });
   netPendingConns = netPendingConns.filter(p => p.conn !== conn);
   // Give the denial a moment to flush through the async send queue before
   // closing — close() drops anything still buffered.
   setTimeout(() => { try { conn.close(); } catch (e) {} }, 500);
+}
+
+// ---- ICE: how two browsers find a route ----
+// STUN from two providers (one blocked still leaves the other), plus
+// Cloudflare TURN for pairs with no direct route (cellular, client-isolated
+// Wi-Fi, strict NAT). PeerJS's own default TURN hosts no longer resolve.
+// Credentials are minted by worker/ (aoe-turn). ?relay=1 forces relay-only on
+// that page (a debug switch; one side forcing it routes the whole link).
+const NET_TURN_ENDPOINT = 'https://aoe-turn.sokrypton.workers.dev/';
+const NET_TURN_WAIT_MS = 5000;
+const NET_STUN = { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] };
+// One object shared by every Peer: PeerJS reads it at each negotiation, so
+// credentials that land late still serve the next connection.
+const NET_ICE = { iceServers: [NET_STUN] };
+if (typeof location !== 'undefined' && new URLSearchParams(location.search).get('relay')) NET_ICE.iceTransportPolicy = 'relay';
+let netRelay = null; // the TURN server in use, if any
+
+// Fetched on the first connect, not at page load (solo play never needs it).
+// A failed fetch is retried on the next connect.
+let netTurnFetch = null;
+function netFetchTurn(){
+  if (!netTurnFetch) {
+    netTurnFetch = fetch(NET_TURN_ENDPOINT)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+      .then(data => {
+        let servers = Array.isArray(data.iceServers) ? data.iceServers : data.iceServers ? [data.iceServers] : [];
+        let turn = servers.find(s => s && s.username && s.credential);
+        if (!turn) throw new Error('no TURN in the answer');
+        netRelay = turn;
+        NET_ICE.iceServers = [NET_STUN, ...servers];
+      })
+      .catch(e => { console.warn('TURN credentials:', e); netTurnFetch = null; });
+  }
+  return netTurnFetch;
+}
+// The wait is measured from the fetch, never from page load: a race from load
+// loses to boot on a slow device and leaves the host with no relay at all.
+function netTurnReady(){
+  return Promise.race([netFetchTurn(), new Promise(r => setTimeout(r, NET_TURN_WAIT_MS))]);
+}
+function netNewPeer(id){ return id ? new Peer(id, { config: NET_ICE }) : new Peer({ config: NET_ICE }); }
+// Bumped by teardownNet: a session begun before a teardown never creates its
+// Peer once the TURN wait ends (its promise just stays pending).
+let netSessionEpoch = 0;
+
+// Keep the HOST's signaling registration alive. Losing the signaling socket
+// (sleep, backgrounded tab, server hiccup) doesn't touch live DataConnections,
+// but the host's id dies with it, so a later (re)join would target a dead id.
+// reconnect() re-registers the same id; a failed attempt surfaces as another
+// 'disconnected'/'error', retried with backoff 1s→15s. PeerJS re-emits 'open'
+// after every reconnect, so session setup on 'open' must run once.
+let netSignalTimer = 0, netSignalBackoff = 1000;
+function netClearSignalRetry(){ clearTimeout(netSignalTimer); netSignalTimer = 0; netSignalBackoff = 1000; }
+function netKeepSignaling(p){
+  // Checked when the timer fires, not when scheduled: PeerJS's destroy()
+  // emits 'disconnected' before it marks itself destroyed.
+  let retry = () => {
+    if (netSignalTimer) return;
+    netSignalTimer = setTimeout(() => {
+      netSignalTimer = 0;
+      if (p === netPeer && !p.destroyed && p.disconnected) p.reconnect();
+    }, netSignalBackoff);
+    netSignalBackoff = Math.min(15000, netSignalBackoff * 2);
+  };
+  p.on('disconnected', retry);
+  p.on('error', () => { if (p.disconnected) retry(); });
+  p.on('open', () => { if (p === netPeer) netClearSignalRetry(); });
+}
+
+// Why a DataConnection didn't open, from its RTCPeerConnection.
+function netIceWhy(conn){
+  let pc = conn && conn.peerConnection;
+  if (!pc) return 'no connection attempted';
+  return 'ICE ' + pc.iceConnectionState + ', connection ' + pc.connectionState + (netRelay ? '' : ', no relay');
 }
 
 // Host side: create a Peer, wait for a guest to connect to it.
@@ -504,22 +654,17 @@ function denyGuestConn(conn, reason){
 // to release a dead session's id). The save-file re-host flow keeps the
 // non-strict fallback: a brand-new guest just uses whatever link is shown.
 function hostSession(desiredId, strict){
-  return new Promise((resolve, reject) => {
+  let epoch = netSessionEpoch;
+  if (typeof Peer !== 'undefined') netRole = 'host';
+  return netTurnReady().then(() => new Promise((resolve, reject) => {
+    if (epoch !== netSessionEpoch) return; // torn down during the TURN wait
     if (typeof Peer === 'undefined') { reject(new Error('PeerJS library not loaded')); return; }
     netRole = 'host';
 
     let finish = (peer) => {
       netPeer = peer;
-      // 'disconnected' = lost the SIGNALING server (PeerJS cloud), not the
-      // game DataConnection — laptop sleep or a wifi blip is enough. An
-      // established match keeps playing without signaling, but this host's
-      // peer id dies with the socket, so any FUTURE (re)join attempt from
-      // the guest would retry against an id that no longer exists, forever.
-      // reconnect() re-registers the same id on the same Peer object; no-op
-      // guard on destroyed covers a deliberate teardown racing the event.
-      peer.on('disconnected', () => {
-        if (!peer.destroyed) { try { peer.reconnect(); } catch (e) {} }
-      });
+      netClearSignalRetry();
+      netKeepSignaling(peer);
       netPeer.on('connection', (conn) => {
         // Star topology: every incoming connection is wired as pending and
         // earns a seat via its 'hello' (token → same seat on reconnect,
@@ -530,8 +675,8 @@ function hostSession(desiredId, strict){
     };
 
     let settled = false;
-    let peer = desiredId ? new Peer(desiredId) : new Peer();
-    peer.on('open', () => { settled = true; finish(peer); });
+    let peer = netNewPeer(desiredId);
+    peer.on('open', () => { if (settled) return; settled = true; finish(peer); });
     peer.on('error', (err) => {
       if (settled) return;
       if (desiredId && err.type === 'unavailable-id') {
@@ -546,8 +691,8 @@ function hostSession(desiredId, strict){
         // random one instead of failing hosting outright. Only the
         // ORIGINAL guest's reconnect benefits from the exact id match; a
         // brand-new guest just uses whatever link is shown regardless.
-        let fallback = new Peer();
-        fallback.on('open', () => { settled = true; finish(fallback); });
+        let fallback = netNewPeer();
+        fallback.on('open', () => { if (settled) return; settled = true; finish(fallback); });
         fallback.on('error', (err2) => {
           console.error('PeerJS host error (fallback):', err2);
           reject(err2);
@@ -557,20 +702,23 @@ function hostSession(desiredId, strict){
       console.error('PeerJS host error:', err);
       reject(err);
     });
-  });
+  }));
 }
 
 // Guest side: create our own Peer, then connect directly to the host's id
 // (obtained from the ?join= URL param — see autoJoinFromUrl in init.js).
 function joinSession(hostPeerId){
-  return new Promise((resolve, reject) => {
+  let epoch = netSessionEpoch;
+  if (typeof Peer !== 'undefined') netRole = 'guest';
+  return netTurnReady().then(() => new Promise((resolve, reject) => {
+    if (epoch !== netSessionEpoch) return; // torn down during the TURN wait
     if (typeof Peer === 'undefined') { reject(new Error('PeerJS library not loaded')); return; }
     netRole = 'guest';
     // A reconnect attempt calls this again with a previous (now-dead) Peer
     // still sitting in netPeer — destroy it first so its signaling socket
     // doesn't linger, rather than just silently orphaning it.
     if (netPeer) { try { netPeer.destroy(); } catch (e) {} }
-    netPeer = new Peer();
+    netPeer = netNewPeer();
     // The promise otherwise only settles on the DataConnection's 'open' or a
     // Peer-level 'error'. An ICE/connection failure where neither ever fires
     // (host id alive but the connection hangs) would leave attemptReconnect's
@@ -579,11 +727,16 @@ function joinSession(hostPeerId){
     // deadline covering both the signaling handshake and the connect.
     let settled = false;
     const settle = (fn, arg) => { if (!settled) { settled = true; clearTimeout(joinDeadline); fn(arg); } };
+    // 15s: a relayed (TURN over TCP/TLS) route can take several seconds to open.
+    let conn = null;
     const joinDeadline = setTimeout(() => {
+      let why = netIceWhy(conn);
+      console.error('PeerJS join timed out:', why);
       try { netPeer.destroy(); } catch (e) {}
-      settle(reject, new Error('join timed out'));
-    }, 10000);
+      settle(reject, new Error('join timed out (' + why + ')'));
+    }, 15000);
     netPeer.on('open', () => {
+      if (conn) return; // re-'open' after a signaling reconnect: already connecting
       // serialization:'binary' (PeerJS's bundled BinaryPack/msgpack encoder)
       // — 'none' isn't a constructor this PeerJS build actually registers
       // (confirmed by hitting "this._serializers[t.serialization] is not a
@@ -592,7 +745,7 @@ function joinSession(hostPeerId){
       // not re-inflating it), so this is still nearly all of the deflate
       // win. Host's inbound `connection` listener just inherits whatever
       // mode the connecting peer — us — requested.
-      let conn = netPeer.connect(hostPeerId, { reliable: true, serialization: 'binary' });
+      conn = netPeer.connect(hostPeerId, { reliable: true, serialization: 'binary' });
       wireGuestConnection(conn);
       conn.on('open', () => settle(resolve));
     });
@@ -600,7 +753,7 @@ function joinSession(hostPeerId){
       console.error('PeerJS guest error:', err);
       settle(reject, err);
     });
-  });
+  }));
 }
 
 // Tear the whole transport down: connection, peer, role. The complement of
@@ -610,6 +763,7 @@ function joinSession(hostPeerId){
 // level cleanup (reconnect timer, myTeam, match flags) lives in init.js's
 // leaveMpSession(), which wraps this.
 function teardownNet(){
+  netSessionEpoch++;
   netConnected = false;
   if (netConn) { try { netConn.close(); } catch (e) {} }
   netConn = null;
@@ -620,6 +774,7 @@ function teardownNet(){
   netPendingConns.forEach(p => { try { p.conn.close(); } catch (e) {} });
   netPendingConns = [];
   if (netPeer) { try { netPeer.destroy(); } catch (e) {} netPeer = null; }
+  netClearSignalRetry(); // after destroy: it schedules one via 'disconnected'
   netRole = null;
 }
 

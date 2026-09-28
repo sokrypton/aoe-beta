@@ -13,7 +13,7 @@
 'use strict';
 
 // Units offered in the palette (sheep_carcass is a dead-food node, not authored).
-const EDITOR_UNITS = ['villager','militia','spearman','archer','scout','knight','ram','tradecart','sheep','bear'];
+const EDITOR_UNITS = ['villager','militia','spearman','archer','scout','knight','ram','tradecart','sheep','bear','dragon'];
 // Terrain paints. GRASS doubles as the terrain eraser.
 const EDITOR_TERRAIN = ['GRASS','FOREST','GOLD','STONE','BERRIES','FARM','WATER'];
 // All placeable buildings, in a sensible authoring order.
@@ -163,7 +163,7 @@ function selectToolBtn(btn){
 // used after a palette rebuild (map-size change / Reset / Clear) so the
 // active tool stays visibly selected regardless of kind.
 function selectByTool(){
-  let root = document.getElementById('editor-panel'); if (!root) return;
+  let root = byId('editor-panel'); if (!root) return;
   let want = tool.kind + ':' + (tool.key == null ? '' : tool.key);
   let btn = [...root.querySelectorAll('.ed-btn')].find(b => b.dataset.tool === want);
   selectToolBtn(btn || null);
@@ -255,6 +255,56 @@ function buildPalette(){
       v => { if (resources && resources[et]) resources[et][k] = Math.max(0, v | 0); }));
   });
 
+  // Selected team's STARTING TECHS — toggle buttons grouped by age, applied
+  // LIVE like age/resources. Checking a Castle tech auto-checks its Feudal
+  // prerequisite (TECH_PREREQ); unchecking a prerequisite drops its
+  // dependent. Toggles re-derive existing entity stats (see
+  // rederiveTeamStats) so they're fully reversible, unlike applyTech's
+  // one-time sweeps.
+  const setTeamTech = (key, on) => {
+    if (typeof teamTechs === 'undefined' || !teamTechs) return;
+    let bit = 1 << UPGRADE_BITS[key];
+    if (on){
+      teamTechs[et] |= bit;
+      let pre = TECH_PREREQ[key];
+      if (pre) teamTechs[et] |= (1 << UPGRADE_BITS[pre]);
+    } else {
+      teamTechs[et] &= ~bit;
+      Object.entries(TECH_PREREQ).forEach(([dep, pre]) => {
+        if (pre === key) teamTechs[et] &= ~(1 << UPGRADE_BITS[dep]);
+      });
+    }
+    rederiveTeamStats(et);
+    rebuildPalette();
+  };
+  let hT = document.createElement('h3'); hT.textContent = 'Techs'; p.appendChild(hT);
+  [[1,'Feudal'],[2,'Castle']].forEach(([age, ageName]) => {
+    let sub = document.createElement('div');
+    sub.textContent = ageName;
+    sub.style.cssText = 'font-size:11px;opacity:.6;margin:4px 0 2px;text-transform:uppercase';
+    p.appendChild(sub);
+    let grid = document.createElement('div'); grid.className = 'ed-grid';
+    Object.keys(UPGRADES).filter(k => UPGRADES[k].age === age).forEach(k => {
+      let c = UPGRADES[k];
+      let on = !!(typeof teamTechs !== 'undefined' && teamTechs && (teamTechs[et] & (1 << UPGRADE_BITS[k])));
+      let b = document.createElement('button');
+      b.className = 'ed-spd' + (on ? ' sel' : '');
+      b.textContent = c.name.replace(' Mail Armor','').replace(' Armor','');
+      b.title = c.name + ' — ' + c.desc;
+      b.onclick = () => setTeamTech(k, !on);
+      grid.appendChild(b);
+    });
+    p.appendChild(grid);
+  });
+  let tAll = document.createElement('div'); tAll.className = 'ed-grid';
+  [['All techs', () => { if (teamTechs) { Object.keys(UPGRADES).forEach(k => teamTechs[et] |= (1 << UPGRADE_BITS[k])); rederiveTeamStats(et); rebuildPalette(); } }],
+   ['No techs',  () => { if (teamTechs) { teamTechs[et] = 0; rederiveTeamStats(et); rebuildPalette(); } }]]
+    .forEach(([txt, fn]) => {
+      let b = document.createElement('button'); b.className = 'ed-spd';
+      b.textContent = txt; b.onclick = fn; tAll.appendChild(b);
+    });
+  p.appendChild(tAll);
+
   // Terrain
   addSection(p, 'Terrain', EDITOR_TERRAIN.map(t => {
     let b = mkBtn(t.slice(0,3), t, 'terr', () => { setTool('terrain', t); selectToolBtn(b); });
@@ -313,7 +363,7 @@ function buildPalette(){
 }
 
 function rebuildPalette(){
-  let old = document.getElementById('editor-panel');
+  let old = byId('editor-panel');
   if (old) old.remove();
   selBtn = null;
   buildPalette();
@@ -446,7 +496,7 @@ function editorPlace(btype, tx, ty){
   // resources, no overlap) — only the age gate is bypassed (ignoreAge=true).
   // The ghost uses the same check (drawGhost passes window.__editorMode), so
   // what the green/red preview shows is exactly what places.
-  if (typeof canPlace === 'function' && !canPlace(btype, tx, ty, tool.team, true)) return null;
+  if (typeof canPlace === 'function' && !canPlace(btype, tx, ty, tool.team, true, true)) return null;
   let plan = resolveBuildingPlacement(btype, tx, ty, tool.team);
   return commitBuildingPlacement(btype, plan, tool.team, true);
 }
@@ -528,7 +578,7 @@ function parseController(c){
   return { type:'human' };
 }
 function updatePlayBtn(){
-  let b = document.getElementById('ed-play');
+  let b = byId('ed-play');
   if (!b) return;
   b.textContent = running ? '⏸ Pause' : '▶ Play';
   b.classList.toggle('running', running);
@@ -590,6 +640,14 @@ function buildSpec(){
       ents.push(o);
     }
   });
+  // A team configured (age/techs/non-default controller) but with no placed
+  // entities still counts — deriving numTeams from entities alone silently
+  // dropped its per-team state from the spec.
+  for (let t = maxTeam + 1; t < 4; t++){
+    let hasTech = (typeof teamTechs !== 'undefined' && teamTechs && teamTechs[t]);
+    let hasAge = (typeof teamAge !== 'undefined' && teamAge && teamAge[t]);
+    if (hasTech || hasAge || (controllers[t] && controllers[t] !== 'human')) maxTeam = t;
+  }
   let numTeams = Math.max(2, maxTeam + 1);
   let spec = {
     map: MAP_SIZE_KEYS.find(k => MAP_SIZES[k] === MAP) || MAP,
@@ -616,7 +674,38 @@ function buildSpec(){
   }
   if (anyAge) spec.ages = ages;
   if (anyRes) spec.resources = res;
+  // Per-team starting techs (teamTechs bitmask) — only when any are set.
+  let techs = [], anyTech = false;
+  for (let t = 0; t < numTeams; t++){
+    let m = (typeof teamTechs !== 'undefined' && teamTechs) ? (teamTechs[t]|0) : 0;
+    techs.push(m); if (m) anyTech = true;
+  }
+  if (anyTech) spec.techs = techs;
   return spec;
+}
+
+// Editor tech toggles must be REVERSIBLE, so instead of applyTech's one-time
+// +N sweeps this re-derives every spawn-time stat snapshot from the base
+// tables + the CURRENT teamTechs mask — applyUnitTechStats (entities.js, the
+// same derivation createUnit runs) for units, buildingMaxHpFor + farmFoodFor
+// for buildings. Armor, gather rates and market fees are live hasUpgrade
+// reads: nothing to re-derive for them.
+function rederiveTeamStats(t){
+  entities.forEach(e => {
+    if (e.team !== t || e.hp <= 0) return;
+    if (e.type === 'unit'){
+      if (UNITS[e.utype]) applyUnitTechStats(e);
+    } else if (e.type === 'building' && typeof buildingMaxHpFor === 'function'){
+      let newMax = buildingMaxHpFor(t, e.btype);
+      if (!e.complete) e.maxHp = newMax; // foundation hp IS build progress, not damage — leave it
+      else if (e.hp === e.maxHp) { e.hp = newMax; e.maxHp = newMax; } // undamaged: exact, no rounding drift
+      else { let f = e.hp / e.maxHp; e.maxHp = newMax; e.hp = Math.round(newMax * f); }
+      // Farm food is a spawn-time snapshot too (farmFoodFor at creation);
+      // authored farms start full, so standing crop follows the toggle.
+      if (e.btype === 'FARM' && e.complete && !e.exhausted && map[e.y] && map[e.y][e.x])
+        map[e.y][e.x].res = farmFoodFor(t);
+    }
+  });
 }
 
 function downloadJson(json, name){
@@ -640,7 +729,7 @@ function exportScenario(){
 // files load back through the one loader (loadGame / editor Load).
 function saveGame(){
   if (saveDetail === 'full' && typeof serializeGame === 'function'){
-    downloadJson(JSON.stringify(serializeGame()), 'aoe2-game.json');
+    downloadJson(JSON.stringify(serializeGame()), 'aoe-game.json');
     if (window.showMsg) showMsg('Saved full game (' + entities.length + ' entities)');
   } else {
     exportScenario();
@@ -678,14 +767,15 @@ function syncControllersFromLive(){
 }
 
 // The editor's single Load entry — accepts EITHER detail level (the unification):
-//   - a full v3 snapshot (2D `map` grid) → applySavedGame, then drop back into
-//     EDIT mode so you can tweak the loaded game and re-save;
-//   - a compact scenario spec → loadEditorScenario (constructive, forces 4 teams).
-// Mirrors the game's loadGame() routing so the editor and the game read the
-// same files.
+//   - a full v4 snapshot (carries a `version` stamp) → applySavedGame, then
+//     drop back into EDIT mode so you can tweak the loaded game and re-save;
+//   - a compact scenario spec (no version) → loadEditorScenario (constructive,
+//     forces 4 teams).
+// Mirrors the game's loadGame() routing (version stamp, NOT map shape — the
+// v4 map is a compact object) so the editor and the game read the same files.
 function loadIntoEditor(data){
   data = data || {};
-  if (Array.isArray(data.map)){
+  if (data.version != null){
     // Clamp the selected team to the incoming save's team count BEFORE
     // applySavedGame — it runs updateUI, which reads resources[myTeam]; a stale
     // myTeam/tool.team (e.g. 3, from the picker) past the loaded numTeams would
@@ -730,12 +820,13 @@ function loadEditorScenario(spec){
 // ----------------------------------------------------------------------- cursor
 // Apply render()'s own ZOOM+camera transform, run fn, restore. Lets us reuse
 // engine draw helpers (drawUnit) that expect the in-render transform, from our
-// post-restore overlay. Mirrors render.js:97-100.
+// post-restore overlay. Mirrors render()'s zoom transform (js/render.js).
 function inWorldTransform(fn){
   X.save();
-  X.translate(Math.round(W/2), Math.round(H/2 + topH));
+  const {ax, ay} = zoomAnchor();
+  X.translate(ax, ay);
   X.scale(ZOOM, ZOOM);
-  X.translate(-Math.round(W/2), -Math.round(H/2 + topH));
+  X.translate(-ax, -ay);
   fn();
   X.restore();
 }

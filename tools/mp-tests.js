@@ -2,7 +2,7 @@
 // ---- MULTIPLAYER tests (Playwright driver) ----
 // Drives REAL multi-tab matches through the host-relay star: one host page
 // plus 1-3 guest pages in the same browser context, connected through the
-// live PeerJS cloud signaling server (index.html loads PeerJS from a CDN,
+// live PeerJS cloud signaling server and the aoe-turn credential worker,
 // so these tests need network access — they'll fail fast without it).
 // Complements tools/hud-tests.js (single-page HUD/command probes) and
 // tools/simulate.sh (headless whole-match health).
@@ -161,11 +161,64 @@ async function assertChecksumsAgree(pages){
       await host.waitForTimeout(1500);
     }
     // let checksums (lagged by ~300 ticks) accumulate
-    await host.waitForTimeout(8000);
+    await host.waitForTimeout(12000);
     const h = await assertHealthy(host, 'host');
     const g = await assertHealthy(guest, 'guest');
     if (h.myTeam !== 0 || g.myTeam !== 1) throw new Error(`teams ${h.myTeam}/${g.myTeam}`);
     await assertChecksumsAgree([host, guest]);
+    await host.close(); await guest.close();
+  });
+
+  await scenario('1v1 character mode: guest on Town AI steers a unit -> paced, agree -> drop pauses -> rejoin', async () => {
+    const { host, joinQuery } = await hostGame();
+    let guest = await newGamePage(joinQuery);
+    await waitInLobby(host);
+    await waitInLobby(guest);
+    await readyUp(guest);
+    await startMatch(host);
+    await waitMatchRunning(host);
+    await waitMatchRunning(guest);
+    // The same commands the character-mode buttons send (js/pov3d.js).
+    const vid = await guest.evaluate(() => {
+      const v = entities.filter(e => e.team === myTeam && e.utype === 'villager').sort((a, b) => a.id - b.id)[0];
+      submitCommand({ kind: 'autopilot', on: true });
+      submitCommand({ kind: 'possess', unitId: v.id, on: true });
+      return v.id;
+    });
+    for (const p of [host, guest]) {
+      await p.waitForFunction(id => teamControllers[1].type === 'ai' && teamControllers[1].autopilot && entitiesById.get(id).possessed === true, vid, { timeout: 10000 });
+    }
+    for (let i = 0; i < 5; i++) { // steering: short hops, like held W
+      await guest.evaluate(id => {
+        const v = entitiesById.get(id);
+        submitCommand({ kind: 'command', unitIds: [id], tileX: Math.round(v.x) + (i => i % 2 ? 1 : -1)(Math.floor(tick / 40)), tileY: Math.round(v.y) });
+      }, vid);
+      await guest.waitForTimeout(700);
+    }
+    const paced = await host.evaluate(() => lockstepExpectedSeats().includes(1));
+    if (!paced) throw new Error('host stopped pacing against the autopilot guest');
+    await host.waitForTimeout(12000);
+    for (const [p, label] of [[host, 'host'], [guest, 'guest']]) {
+      await assertHealthy(p, label);
+      const s = await p.evaluate(id => ({ task: entitiesById.get(id).task,
+        aiWorking: entities.some(e => e.team === 1 && e.utype === 'villager' && e.id !== id && e.task) }), vid);
+      if (s.task) throw new Error(`${label}: the AI retasked the steered villager (${s.task})`);
+      if (!s.aiWorking) throw new Error(`${label}: the AI is not running the guest's town`);
+    }
+    await assertChecksumsAgree([host, guest]);
+    // A person is still at an autopilot seat: dropping it pauses for them.
+    await guest.close();
+    await host.waitForFunction(() => disconnectedPause === true, { timeout: 15000 });
+    guest = await newGamePage(joinQuery);
+    await guest.waitForFunction(() => typeof lockstepActive !== 'undefined' && lockstepActive && gameStarted, { timeout: 30000 });
+    await host.waitForFunction(() => disconnectedPause === false, { timeout: 15000 });
+    const back = await guest.evaluate(() => ({ team: myTeam, auto: !!teamControllers[1].autopilot }));
+    if (back.team !== 1 || !back.auto) throw new Error('rejoin lost the seat or autopilot: ' + JSON.stringify(back));
+    // The fresh page steers nothing, so it hands the villager back to the AI.
+    for (const p of [host, guest]) await p.waitForFunction(id => !entitiesById.get(id).possessed, vid, { timeout: 10000 });
+    await host.waitForTimeout(4000);
+    await assertHealthy(host, 'host');
+    await assertHealthy(guest, 'rejoined guest');
     await host.close(); await guest.close();
   });
 
@@ -196,7 +249,7 @@ async function assertChecksumsAgree(pages){
       for (const p of pages) await issueMove(p);
       await host.waitForTimeout(1500);
     }
-    await host.waitForTimeout(9000); // let lagged checksums accumulate
+    await host.waitForTimeout(12000); // let lagged checksums accumulate
     const teams = [];
     for (const p of pages) teams.push((await assertHealthy(p, 'page')).myTeam);
     if (new Set(teams).size !== 4) throw new Error('teams not distinct: ' + teams.join(','));
@@ -229,6 +282,44 @@ async function assertChecksumsAgree(pages){
     await assertHealthy(host, 'host');
     await assertHealthy(guest, 'rejoined guest');
     await host.close(); await guest.close();
+  });
+
+  await scenario('1v1: unknown-identity rejoin -> honor-system seat picker -> resume', async () => {
+    const { host, joinQuery } = await hostGame();
+    let guest = await newGamePage(joinQuery);
+    await waitInLobby(host); await waitInLobby(guest);
+    await readyUp(guest);
+    await startMatch(host);
+    await waitMatchRunning(host); await waitMatchRunning(guest);
+    await host.waitForTimeout(2000);
+    const seat = await guest.evaluate(() => myTeam);
+    await guest.close();
+    await host.waitForFunction(() => disconnectedPause === true, { timeout: 15000 });
+    // Rejoin as an UNKNOWN identity: clear the shared per-browser token before
+    // the page connects, so the host can't token-rebind and must offer the
+    // honor-system picker (js/net.js reclaimableSeats) instead of denying.
+    const rejoin = await ctx.newPage();
+    rejoin.on('pageerror', err => log(`   [pageerror rejoin] ${err.stack || err.message}`));
+    await rejoin.addInitScript(() => { try { localStorage.removeItem('aoeMpClientId'); } catch (e) {} });
+    await rejoin.goto(base + '/index.html' + joinQuery, { waitUntil: 'load' });
+    await rejoin.evaluate(() => { window.playSound = () => {}; });
+    // The picker appears with the one reclaimable seat — pick it.
+    await rejoin.waitForFunction(() => {
+      const el = document.getElementById('mp-seat-picker');
+      return el && el.style.display === 'flex' && el.querySelectorAll('#mp-seat-picker-list button').length > 0;
+    }, { timeout: 30000 });
+    log('   [honor] picker shown; claiming the open seat');
+    await rejoin.evaluate(() => document.querySelector('#mp-seat-picker-list button').click());
+    // claim-seat -> welcome -> resume into the SAME seat.
+    await rejoin.waitForFunction(() =>
+      typeof lockstepActive !== 'undefined' && lockstepActive && gameStarted, { timeout: 30000 });
+    const seat2 = await rejoin.evaluate(() => myTeam);
+    if (seat2 !== seat) throw new Error(`reclaimed as team ${seat2}, was ${seat}`);
+    await host.waitForFunction(() => disconnectedPause === false, { timeout: 15000 });
+    await host.waitForTimeout(3000);
+    await assertHealthy(host, 'host');
+    await assertHealthy(rejoin, 'reclaimed guest');
+    await host.close(); await rejoin.close();
   });
 
   await scenario('3p: drop pauses everyone -> rejoin resumes -> second drop -> kick hands seat to AI', async () => {
@@ -273,7 +364,7 @@ async function assertChecksumsAgree(pages){
     await gB.waitForFunction(() => disconnectedPause === false, { timeout: 15000 });
     await host.waitForFunction(s => teamControllers[s] && teamControllers[s].type === 'ai', seatA, { timeout: 15000 });
     await gB.waitForFunction(s => teamControllers[s] && teamControllers[s].type === 'ai', seatA, { timeout: 15000 });
-    await host.waitForTimeout(9000); // lagged checksums after the kick
+    await host.waitForTimeout(12000); // lagged checksums after the kick
     await assertHealthy(host, 'host');
     await assertHealthy(gB, 'guest B');
     await assertChecksumsAgree([host, gB]);
@@ -305,7 +396,7 @@ async function assertChecksumsAgree(pages){
 
     // Host banks the match to a (in-memory) save, then the page dies.
     const save = await host.evaluate(() => serializeGameForWire());
-    if (save.version !== 3 || !save.seatTokens || save.seatTokens.length !== 2) {
+    if (save.version !== 9 /* keep in sync with serializeGame, js/save.js */ || !save.seatTokens || save.seatTokens.length !== 2) {
       throw new Error('bad save meta: v' + save.version + ' tokens=' + JSON.stringify(save.seatTokens));
     }
     await host.close();
@@ -315,7 +406,7 @@ async function assertChecksumsAgree(pages){
     // Give the PeerJS cloud time to release the host's peer id, then load
     // the save in a fresh tab — it re-hosts with the SAME id, so the
     // guests' own reconnect loops land without a new link.
-    await gA.waitForTimeout(8000);
+    await gA.waitForTimeout(12000);
     const h2 = await newGamePage();
     await h2.evaluate(s => applySavedGame(s), save);
     for (const g of [gA, gB]) {
@@ -326,8 +417,42 @@ async function assertChecksumsAgree(pages){
     if (teamsAfter.join() !== teamsBefore.join()) {
       throw new Error(`teams changed across reload: ${teamsBefore} -> ${teamsAfter}`);
     }
-    await h2.waitForTimeout(9000);
+    await h2.waitForTimeout(12000);
     await assertHealthy(h2, 'reloaded host');
+    await assertHealthy(gA, 'guest A');
+    await assertHealthy(gB, 'guest B');
+    await assertChecksumsAgree([h2, gA, gB]);
+    await h2.close(); await gA.close(); await gB.close();
+  });
+
+  await scenario('host crash: ?host= resume recovers the world from a guest mirror -> both guests resume', async () => {
+    const { host, joinQuery } = await hostGame();
+    const gA = await newGamePage(joinQuery);
+    const gB = await newGamePage(joinQuery);
+    await waitInLobby(host); await waitInLobby(gA); await waitInLobby(gB);
+    await host.waitForFunction(() => lobbyState.seats.length === 3, { timeout: 20000 });
+    await readyUp(gA); await readyUp(gB);
+    await startMatch(host);
+    for (const p of [host, gA, gB]) await waitMatchRunning(p);
+    await host.waitForTimeout(3000);
+    const resumeUrl = host.url();
+    if (!/\?host=/.test(resumeUrl)) throw new Error('host page has no ?host= resume URL: ' + resumeUrl);
+    const teamsBefore = [await gA.evaluate(() => myTeam), await gB.evaluate(() => myTeam)];
+    await host.close();
+    await gA.waitForFunction(() => disconnectedPause === true, { timeout: 15000 });
+    log('   [crash] host dead, guests waiting');
+    const h2 = await ctx.newPage();
+    h2.on('pageerror', err => log(`   [pageerror resumed host] ${err.stack || err.message}`));
+    await h2.goto(resumeUrl, { waitUntil: 'load' });
+    for (const g of [gA, gB]) {
+      await g.waitForFunction(() => lockstepActive && gameStarted && disconnectedPause === false, { timeout: 90000 });
+    }
+    log('   [crash] guests resumed');
+    const teamsAfter = [await gA.evaluate(() => myTeam), await gB.evaluate(() => myTeam)];
+    if (teamsAfter.join() !== teamsBefore.join()) throw new Error(`teams changed: ${teamsBefore} -> ${teamsAfter}`);
+    await issueMove(gA); await issueMove(gB);
+    await h2.waitForTimeout(12000);
+    await assertHealthy(h2, 'resumed host');
     await assertHealthy(gA, 'guest A');
     await assertHealthy(gB, 'guest B');
     await assertChecksumsAgree([h2, gA, gB]);

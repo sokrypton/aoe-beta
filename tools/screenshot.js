@@ -104,9 +104,9 @@ const SCENES = {
     // already the stone/tower target, complete=false, half-built HP) — the
     // normal foundation render (alpha ramp + cyan HP bar) applies
     const uw = createBuilding('SWALL', 25, 35, 0);
-    uw.complete = false; uw.buildProgress = uw.buildTime / 2; uw.hp = uw.maxHp / 2; uw.upgrading = true;
+    uw.complete = false; uw.buildProgress = uw.buildTime / 2; uw.hp = uw.maxHp / 2;
     const ut = createBuilding('TOWER', 29, 35, 0);
-    ut.complete = false; ut.buildProgress = ut.buildTime / 2; ut.hp = ut.maxHp / 2; ut.upgrading = true;
+    ut.complete = false; ut.buildProgress = ut.buildTime / 2; ut.hp = ut.maxHp / 2;
     (${pageLookAt})(28.5, 31);
     render();`,
   guardbldg: `(${pageStage})();
@@ -118,7 +118,7 @@ const SCENES = {
     const guards = [createUnit('militia', 26, 27, 0), createUnit('militia', 33, 30, 0), createUnit('militia', 29, 33, 0)];
     guards.forEach(g => {
       const pt = nearestBldgPerimeter(g.x, g.y, gtc, g.id);
-      g.guardTargetId = gtc.id; g.guardX = pt.x; g.guardY = pt.y; g.guardFlagged = true;
+      g.order = {kind:'guardBuilding', id: gtc.id, x: pt.x, y: pt.y};
     });
     selected.length = 0; guards.forEach(g => selected.push(g));
     (${pageLookAt})(30, 30);
@@ -129,9 +129,458 @@ const SCENES = {
     // villager (live position), not offset by half a tile
     const vil = createUnit('villager', 31, 29, 0);
     const sol = createUnit('militia', 28, 31, 0);
-    sol.guardTargetId = vil.id; sol.followId = vil.id;
-    sol.guardX = vil.x; sol.guardY = vil.y; sol.guardFlagged = true;
+    sol.order = {kind:'escort', id: vil.id};
     selected.length = 0; selected.push(sol);
+    (${pageLookAt})(29.5, 30);
+    render();`,
+  tcdepth: `(${pageStage})();
+    window.myTeam = 0;
+    // repro of aoe2-game-error.json: scout at (42,42) beside a 4x4 TC at
+    // (41,40). Body should be IN FRONT of the near wall block but BEHIND the
+    // roof — single-anchor sort can't split it.
+    createBuilding('TC', 41, 40, 0);
+    const sc = createUnit('scout', 42, 42, 0); sc.dir = 7;
+    (${pageLookAt})(43, 42);
+    render();`,
+  selbehind: `(${pageStage})();
+    window.myTeam = 0;
+    // a SELECTED unit behind the TC: the white selection ring shows it through
+    // the roof, so the behind-building team outline must be SUPPRESSED (no
+    // doubled team-color + white ring).
+    createBuilding('TC', 41, 40, 0);
+    const sb = createUnit('scout', 42, 42, 0); sb.dir = 7;
+    selected.length = 0; selected.push(sb);
+    (${pageLookAt})(43, 42);
+    render();`,
+  frontcorner: `(${pageStage})();
+    window.myTeam = 0;
+    // units ringed around a HOUSE — only the ones actually BEHIND (up-screen,
+    // lower x+y) should get an outline; front/side units must NOT.
+    createBuilding('HOUSE', 30, 30, 0);
+    [[29.5,30.6,'L-front-corner'],[30.6,29.5,'R-front-corner'],[30.6,30.6,'S-front'],
+     [28.9,30.9,'L-out'],[30.9,28.9,'R-out'],[29.3,29.3,'behind-should-outline']]
+      .forEach(([x,y])=>createUnit('militia',x,y,0));
+    (${pageLookAt})(30, 30);
+    render();`,
+  savescene: `(${pageStage})();
+    window.myTeam = 0;
+    createBuilding('HOUSE', 42, 42, 0);
+    createBuilding('HOUSE', 45, 44, 0);
+    createUnit('villager', 44, 43, 0);
+    createUnit('villager', 43, 42, 0);   // house1 RIGHT edge — the flagged case
+    createUnit('villager', 42, 41, 0);   // behind house1
+    (${pageLookAt})(43.5, 43);
+    render();`,
+  ramload: `(${pageStage})();
+    window.myTeam = 0;
+    const ram = createUnit('ram', 40, 40, 0); ram.dir = 7; ram.garrison = [];
+    for(let i=0;i<3;i++){ let u=createUnit('militia', 44+i, 44, 0); u.garrisonedIn=ram.id; ram.garrison.push(u.id); }
+    (${pageLookAt})(41, 41);
+    render();`,
+  towerload: `(${pageStage})();
+    window.myTeam = 0;
+    const t = createBuilding('TOWER', 40, 40, 0); t.complete = true; t.hp = t.maxHp;
+    [[45,45],[46,43],[43,46]].forEach(([x,y])=>{ let u=createUnit('militia',x,y,0); u.task='garrison'; u.garrisonTarget=t.id; });
+    (${pageLookAt})(43, 43);
+    render();`,
+  ramboard: `(${pageStage})();
+    window.myTeam = 0;
+    const ram = createUnit('ram', 40, 40, 0); ram.dir = 7;
+    [[45,45],[46,43],[44,47]].forEach(([x,y])=>{ let u=createUnit('militia',x,y,0); u.task='garrison'; u.garrisonTarget=ram.id; });
+    (${pageLookAt})(43, 43);
+    render();`,
+  foundoccl: `(${pageStage})();
+    window.myTeam = 0;
+    // partly-built TC (60%) with a scout behind it — the behind-building outline
+    // must show through the (translucent, under-construction) building too.
+    const b = createBuilding('TC', 41, 40, 0);
+    b.complete = false; b.buildProgress = Math.round(b.buildTime*0.6); b.hp = Math.round(b.maxHp*0.6);
+    const sc = createUnit('scout', 42, 42, 0); sc.dir = 7;
+    (${pageLookAt})(43, 42);
+    render();`,
+  treeoccl: `(${pageStage})();
+    window.myTeam = 0;
+    // units behind a stand of trees — team outline shows through the canopy
+    // where trees (in front, higher y+x) hide them, clipped to the tree pixels
+    // (not below/around on open grass). Both a mounted scout and a militia sit
+    // just behind the front trees.
+    for(let ty=30;ty<=35;ty++)for(let tx=30;tx<=35;tx++){ if(ty+tx>=63){ map[ty][tx].t=TERRAIN.FOREST; map[ty][tx].res=100; markMapDirty(tx,ty); } }
+    const ts = createUnit('scout', 31, 31, 0); ts.dir = 7;
+    createUnit('militia', 29, 33, 0);
+    window.fogDisabled = true; updateFog();
+    (${pageLookAt})(32, 33);
+    render();`,
+  tctents: `(${pageStage})();
+    window.myTeam = 0;
+    // units sheltering under both tent canopies + the notch: the whole tent
+    // roof must read as ABOVE them (posts behind, canopy in front), and a
+    // unit clearly OUT in front (beyond the eaves) must still draw over.
+    createBuilding('TC', 28, 28, 0);
+    createUnit('scout', 29.5, 29.5, 0);   // notch / centre
+    createUnit('militia', 30.4, 29.2, 0); // under RIGHT tent
+    createUnit('militia', 29.2, 30.4, 0); // under LEFT tent
+    createUnit('militia', 31.5, 31.5, 0); // clearly out front -> over the roof
+    createUnit('militia', 32.2, 30.3, 0); // just past RIGHT eave -> head must NOT clip
+    createUnit('militia', 30.3, 32.2, 0); // just past LEFT eave -> head must NOT clip
+    (${pageLookAt})(30.5, 31);
+    render();`,
+  parwalls: `(${pageStage})();
+    window.myTeam = 0;
+    // two parallel wall runs one tile apart (each orientation): should read as
+    // two separate lines, NOT a ladder of cross-links between them.
+    for (let x = 22; x <= 28; x++) { createBuilding('WALL', x, 24, 0); createBuilding('WALL', x, 25, 0); }
+    for (let y = 28; y <= 33; y++) { createBuilding('WALL', 22, y, 0); createBuilding('WALL', 23, y, 0); }
+    // regression: an L-corner + T-branch and a closed 4x4 ring must stay fully joined
+    ['L'].forEach(()=>{ for(let x=30;x<=34;x++)createBuilding('WALL',x,24,0); for(let y=25;y<=28;y++)createBuilding('WALL',34,y,0); createBuilding('WALL',32,25,0); createBuilding('WALL',32,26,0); });
+    for (let x = 30; x <= 33; x++) { createBuilding('WALL', x, 31, 0); createBuilding('WALL', x, 34, 0); }
+    for (let y = 32; y <= 33; y++) { createBuilding('WALL', 30, y, 0); createBuilding('WALL', 33, y, 0); }
+    (${pageLookAt})(28, 29);
+    render();`,
+  nestwalls: `(${pageStage})();
+    window.myTeam = 0;
+    const ring = (x0,y0,x1,y1) => {
+      for (let x=x0;x<=x1;x++){ createBuilding('WALL',x,y0,0); createBuilding('WALL',x,y1,0); }
+      for (let y=y0+1;y<y1;y++){ createBuilding('WALL',x0,y,0); createBuilding('WALL',x1,y,0); }
+    };
+    ring(20,20,30,30);        // outer
+    ring(23,23,27,27);        // inner, 2-tile gap -> two clean concentric rings
+    ring(34,22,40,28);        // outer of an ADJACENT pair
+    ring(35,23,39,27);        // inner, 1-tile gap (parallel sides) -> should read as two rings
+    (${pageLookAt})(30, 25);
+    render();`,
+  gatewalls: `(${pageStage})();
+    window.myTeam = 0;
+    // gate in a wall run, with a PARALLEL wall one tile away: the gate must
+    // not rung across to the parallel line (same fix as plain walls).
+    // E–W run row 24 with a 3-wide gate + parallel run row 25.
+    createBuilding('WALL',24,24,0); createBuilding('WALL',25,24,0);
+    createBuilding('GATE',26,24,0,3,1);
+    createBuilding('WALL',29,24,0); createBuilding('WALL',30,24,0);
+    for (let x=24;x<=30;x++) createBuilding('WALL',x,25,0);
+    // N–S run col 33 with a 3-tall gate + parallel run col 34.
+    createBuilding('WALL',33,28,0); createBuilding('WALL',33,29,0);
+    createBuilding('GATE',33,30,0,1,3);
+    createBuilding('WALL',33,33,0); createBuilding('WALL',33,34,0);
+    for (let y=28;y<=34;y++) createBuilding('WALL',34,y,0);
+    (${pageLookAt})(29, 29);
+    render();`,
+  towerwalls: `(${pageStage})();
+    window.myTeam = 0;
+    // towers in wall runs beside a parallel wall must not rung across either.
+    createBuilding('WALL',24,24,0); createBuilding('WALL',25,24,0);
+    createBuilding('TOWER',26,24,0);
+    createBuilding('WALL',27,24,0); createBuilding('WALL',28,24,0);
+    for (let x=24;x<=28;x++) createBuilding('WALL',x,25,0);
+    createBuilding('WALL',33,28,0); createBuilding('WALL',33,29,0);
+    createBuilding('TOWER',33,30,0);
+    createBuilding('WALL',33,31,0); createBuilding('WALL',33,32,0);
+    for (let y=28;y<=32;y++) createBuilding('WALL',34,y,0);
+    // regression: a tower at an L-corner must keep BOTH its wall links
+    createBuilding('TOWER',24,34,0); createBuilding('WALL',25,34,0); createBuilding('WALL',24,35,0);
+    (${pageLookAt})(29, 30);
+    render();`,
+  selwall: `(${pageStage})();
+    window.myTeam = 0;
+    // a SELECTED stone wall mid-run: its outline includes ITS OWN S/E link stubs
+    // (part of the wall — clicking a stub selects it), so the highlight matches
+    // what you clicked (drawsWallStubs).
+    let __sw;
+    for (let x=24;x<=32;x++){ let w=createBuilding('SWALL',x,26,0); if(x===28)__sw=w; }
+    selected.length = 0; selected.push(__sw);
+    (${pageLookAt})(28, 26); render();`,
+  seltower: `(${pageStage})();
+    window.myTeam = 0;
+    // a SELECTED tower in a wall run: outline traces just the tower body — its
+    // wall-link stubs belong to the adjoining run, not the tower (drawsWallStubs).
+    let __st;
+    for (let x=24;x<=32;x++){ if(x===28){__st=createBuilding('TOWER',x,26,0);} else createBuilding('SWALL',x,26,0); }
+    selected.length = 0; selected.push(__st);
+    (${pageLookAt})(28, 26); render();`,
+  ghostgate: `(${pageStage})();
+    window.myTeam = 0;
+    // E–W wall run; the GATE placement cursor hovers one tile NORTH of it (off
+    // the wall) — it must NOT draw a connection stub down to the wall.
+    for (let x=24;x<=32;x++) createBuilding('WALL',x,26,0);
+    (${pageLookAt})(28, 26);
+    mouseX = (toIso(28.5,25.5).ix - camX)*ZOOM + W/2;
+    mouseY = (toIso(28.5,25.5).iy - camY)*ZOOM + H/2 + topH;
+    placing = 'GATE';
+    render();`,
+  ghosttower: `(${pageStage})();
+    window.myTeam = 0;
+    // TOWER placement cursor hovering one tile NORTH of a wall run.
+    for (let x=24;x<=32;x++) createBuilding('WALL',x,26,0);
+    (${pageLookAt})(28, 26);
+    mouseX = (toIso(28.5,25.5).ix - camX)*ZOOM + W/2;
+    mouseY = (toIso(28.5,25.5).iy - camY)*ZOOM + H/2 + topH;
+    placing = 'TOWER';
+    render();`,
+  ghostvalid: `(${pageStage})();
+    window.myTeam = 0;
+    // VALID gate placement (cursor ON the wall run): the gate ghost shows only
+    // its posts + door — no wall-extension stubs into the flanking walls.
+    for (let x=24;x<=32;x++) createBuilding('WALL',x,26,0);
+    (${pageLookAt})(28, 26);
+    mouseX = (toIso(28.5,26.5).ix - camX)*ZOOM + W/2;
+    mouseY = (toIso(28.5,26.5).iy - camY)*ZOOM + H/2 + topH;
+    placing = 'GATE';
+    render();`,
+  dragghost: `(${pageStage})();
+    window.myTeam = 0;
+    // ACTUAL placed wood walls (row 28) vs the wall-DRAG ghost (row 25):
+    // the ghost must match the placed pillar/link size + material.
+    for (let x=24;x<=30;x++) createBuilding('WALL',x,28,0);
+    placing = 'WALL';
+    window.isDraggingWall = true;
+    window.wallDragStart = {x:24,y:25};
+    window.wallDragEnd = {x:30,y:25};
+    window.wallDragCorner = {x:30,y:25};
+    (${pageLookAt})(27, 26.5);
+    render();`,
+  ghostjoin: `(${pageStage})();
+    window.myTeam = 0;
+    // LEFT: two PLACED walls (the reference join). RIGHT: one wall + a ghost
+    // sliding IN FRONT of it (east). The ghost's join must match the placed
+    // reference — before the fix the ghost showed NO connection on that side.
+    createBuilding('WALL',26,26,0); createBuilding('WALL',27,26,0);
+    createBuilding('WALL',34,26,0);
+    (${pageLookAt})(30, 26.5);
+    placing = 'WALL';
+    mouseX = (toIso(35.5,26.5).ix - camX)*ZOOM + W/2;
+    mouseY = (toIso(35.5,26.5).iy - camY)*ZOOM + H/2 + topH;
+    render();`,
+  dragunify: `(${pageStage})();
+    window.myTeam = 0;
+    // existing wall run (row 26) + a collinear wall (23,25) west of the drag.
+    for (let x=24;x<=30;x++) createBuilding('WALL',x,26,0);
+    createBuilding('WALL',23,25,0);
+    // drag ghost along row 25 (parallel to row 26, 1 tile N): must NOT rung
+    // down to row 26, and MUST join the existing wall at (23,25).
+    placing = 'WALL';
+    window.isDraggingWall = true;
+    window.wallDragStart = {x:24,y:25};
+    window.wallDragEnd = {x:30,y:25};
+    window.wallDragCorner = {x:30,y:25};
+    (${pageLookAt})(27, 25.5);
+    render();`,
+  dragelbow: `(${pageStage})();
+    window.myTeam = 0;
+    // L-shaped drag (E then S) must render a connected corner via the unified path.
+    placing = 'WALL';
+    window.isDraggingWall = true;
+    window.wallDragStart = {x:24,y:25};
+    window.wallDragCorner = {x:30,y:25};
+    window.wallDragEnd = {x:30,y:31};
+    (${pageLookAt})(28, 28);
+    render();`,
+  towerjoin: `(${pageStage})();
+    window.myTeam = 0;
+    // PTOWER (dark-age tower, unlocked) ghost IN FRONT of (east of) an existing
+    // wall: must join it, same as TOWER does at Feudal.
+    createBuilding('WALL',28,26,0);
+    (${pageLookAt})(28.5, 26);
+    mouseX = (toIso(29.5,26.5).ix - camX)*ZOOM + W/2;
+    mouseY = (toIso(29.5,26.5).iy - camY)*ZOOM + H/2 + topH;
+    placing = 'PTOWER';
+    render();`,
+  gatejoin: `(${pageStage})();
+    window.myTeam = 0;
+    // gate ghost dropped into a wall run: must join walls on BOTH ends.
+    for (let x=24;x<=34;x++) createBuilding('WALL',x,26,0);
+    (${pageLookAt})(29, 26);
+    mouseX = (toIso(29.5,26.5).ix - camX)*ZOOM + W/2;
+    mouseY = (toIso(29.5,26.5).iy - camY)*ZOOM + H/2 + topH;
+    placing = 'GATE';
+    render();`,
+  gatereplace: `(${pageStage})();
+    window.myTeam = 0;
+    // REAL placement path: full wall run, then drop a gate on it the way the
+    // game does (resolve+commit) — checks the gate REPLACES the walls under it.
+    // top run: click gate on the MIDDLE of the run
+    for (let x=24;x<=34;x++) createBuilding('WALL',x,24,0);
+    { const plan = resolveBuildingPlacement('GATE', 29, 24, 0);
+      window.__log1 = JSON.stringify(plan.replaced.map(w=>w.x+','+w.y))+' fp='+plan.gw+'x'+plan.gh+' @'+plan.ox+','+plan.oy;
+      commitBuildingPlacement('GATE', plan, 0, true); }
+    // bottom run: click gate on the LAST tile of the run (edge case)
+    for (let x=24;x<=34;x++) createBuilding('WALL',x,28,0);
+    { const plan = resolveBuildingPlacement('GATE', 34, 28, 0);
+      window.__log2 = JSON.stringify(plan.replaced.map(w=>w.x+','+w.y))+' fp='+plan.gw+'x'+plan.gh+' @'+plan.ox+','+plan.oy;
+      commitBuildingPlacement('GATE', plan, 0, true); }
+    (${pageLookAt})(29, 26);
+    render();`,
+  gatestone: `(${pageStage})();
+    window.myTeam = 0;
+    // Repro of the user report: long STONE wall run with towers + a stone gate
+    // dropped in via the REAL placement path. Row 24: gate in the middle.
+    for (let x=22;x<=40;x++) createBuilding('SWALL',x,24,0);
+    createBuilding('TOWER',26,24,0); createBuilding('TOWER',36,24,0);
+    { const plan = resolveBuildingPlacement('SGATE', 31, 24, 0);
+      window.__log1 = 'mid: repl='+JSON.stringify(plan.replaced.map(w=>w.btype+w.x+','+w.y))+' fp='+plan.gw+'x'+plan.gh+' @'+plan.ox+','+plan.oy;
+      commitBuildingPlacement('SGATE', plan, 0, true); }
+    // Row 30: gate placed adjacent to a tower (click one tile off the tower)
+    for (let x=22;x<=40;x++) createBuilding('SWALL',x,30,0);
+    createBuilding('TOWER',30,30,0);
+    { const plan = resolveBuildingPlacement('SGATE', 32, 30, 0);
+      window.__log2 = 'nrtwr: repl='+JSON.stringify(plan.replaced.map(w=>w.btype+w.x+','+w.y))+' fp='+plan.gw+'x'+plan.gh+' @'+plan.ox+','+plan.oy;
+      commitBuildingPlacement('SGATE', plan, 0, true); }
+    (${pageLookAt})(31, 27);
+    render();`,
+  gatereal: `
+    NUM_TEAMS = 2;
+    window.__pendingMatchSeed = 7200;
+    setMapSize('medium');
+    restartGame('hard');
+    teamControllers = [{type:'ai',difficulty:'hard'},{type:'ai',difficulty:'hard'}];
+    resetAIStates();
+    gameStarted = true; gamePaused = true;
+    window.__headlessSim = true;
+    window.playSound = () => {}; window.showMsg = () => {}; window.updateUI = () => {};
+    let __gate = null;
+    for (let i = 0; i < 90000 && !gameOver; i++) {
+      update();
+      if (i % 500 === 0) {
+        __gate = entities.find(e => e.type==='building' && e.btype==='SGATE' && e.complete);
+        if (__gate) break;
+      }
+    }
+    __gate = entities.find(e => e.type==='building' && e.btype==='SGATE' && e.complete)
+          || entities.find(e => e.type==='building' && isGateBtype(e.btype) && e.complete)
+          || entities.find(e => e.type==='building' && isGateBtype(e.btype));
+    window.__headlessSim = false;
+    window.myTeam = __gate ? __gate.team : 0;
+    window.fogDisabled = true; updateFog();
+    if (__gate) {
+      window.__log1 = 'gate '+__gate.btype+' @'+__gate.x+','+__gate.y+' '+__gate.w+'x'+__gate.h+' complete='+__gate.complete+' tick='+tick;
+      (${pageLookAt})(__gate.x + __gate.w/2, __gate.y + __gate.h/2);
+    } else { window.__log1 = 'NO GATE built by tick '+tick; (${pageLookAt})(30,30); }
+    render();`,
+  gatefeudal: `(${pageStage})();
+    window.myTeam = 0;
+    teamAge[0] = 1; // Feudal: stone gate posts use blue flat tops (no merlons)
+    const G=(bt,cx,cy)=>{ const p=resolveBuildingPlacement(bt,cx,cy,0); commitBuildingPlacement(bt,p,0,true); return p; };
+    for (let x=22;x<=40;x++) createBuilding('SWALL',x,24,0);
+    createBuilding('TOWER',26,24,0);
+    G('SGATE',31,24);
+    (${pageLookAt})(31, 24.5); render();`,
+  gatecastle: `(${pageStage})();
+    window.myTeam = 0;
+    teamAge[0] = 2; // Castle: merlons on stone gate posts
+    const G=(bt,cx,cy)=>{ const p=resolveBuildingPlacement(bt,cx,cy,0); commitBuildingPlacement(bt,p,0,true); return p; };
+    // STONE wall + stone gate (the user's material), Castle age.
+    for (let x=22;x<=40;x++) createBuilding('SWALL',x,24,0);
+    createBuilding('TOWER',26,24,0);
+    G('SGATE',31,24);
+    // palisade wall + gate directly below for comparison
+    for (let x=22;x<=40;x++) createBuilding('WALL',x,30,0);
+    G('GATE',31,30);
+    (${pageLookAt})(31, 27); render();`,
+  gatejuncA: `(${pageStage})();
+    window.myTeam = 0;
+    const G=(bt,cx,cy)=>{ const p=resolveBuildingPlacement(bt,cx,cy,0); commitBuildingPlacement(bt,p,0,true); return p; };
+    // L-corner: E-W run row 22 + N-S run col 32, gate near the corner.
+    for(let x=24;x<=32;x++)createBuilding('SWALL',x,22,0);
+    for(let y=23;y<=30;y++)createBuilding('SWALL',32,y,0);
+    window.__log1='A '+JSON.stringify(G('SGATE',30,22).replaced.map(w=>w.x+','+w.y));
+    (${pageLookAt})(30, 25); render();`,
+  gatejuncB: `(${pageStage})();
+    window.myTeam = 0;
+    const G=(bt,cx,cy)=>{ const p=resolveBuildingPlacement(bt,cx,cy,0); commitBuildingPlacement(bt,p,0,true); return p; };
+    // parallel double wall (rows 26 & 27), gate on row 26.
+    for(let x=24;x<=34;x++){createBuilding('SWALL',x,26,0);createBuilding('SWALL',x,27,0);}
+    window.__log1='B '+JSON.stringify(G('SGATE',29,26).replaced.map(w=>w.x+','+w.y));
+    (${pageLookAt})(29, 26.5); render();`,
+  gatejuncC: `(${pageStage})();
+    window.myTeam = 0;
+    const G=(bt,cx,cy)=>{ const p=resolveBuildingPlacement(bt,cx,cy,0); commitBuildingPlacement(bt,p,0,true); return p; };
+    // T-junction: E-W run row 32 + perpendicular stub going S at x=29.
+    for(let x=24;x<=34;x++)createBuilding('SWALL',x,32,0);
+    for(let y=33;y<=35;y++)createBuilding('SWALL',29,y,0);
+    window.__log1='C '+JSON.stringify(G('SGATE',30,32).replaced.map(w=>w.x+','+w.y));
+    (${pageLookAt})(30, 33); render();`,
+  gatewalk: `(${pageStage})();
+    window.myTeam = 0;
+    // E–W wall (row 33) with a 3-wide gate; militia walking N->S through the
+    // archway at several depths — check post/door sort vs the unit.
+    for (let x=24;x<=34;x++) if (x<28||x>30) createBuilding('WALL',x,33,0);
+    const g=createBuilding('GATE',28,33,0,3,1); g.gateProgress=1; // OPEN
+    [[29,31.4],[29,32.4],[29,33.0],[29,33.6],[29,34.6]].forEach(([x,y],i)=>{
+      const u=createUnit('militia',x,y,0); u.dir=1; });
+    (${pageLookAt})(29, 33);
+    render();`,
+  gateclosed: `(${pageStage})();
+    window.myTeam = 0;
+    // CLOSED gate; an ENEMY (red) and an OWN (blue) unit fully BEHIND it —
+    // check the behind-building silhouette renders through the gate posts+door.
+    for (let x=24;x<=34;x++) if (x<28||x>30) createBuilding('WALL',x,33,0);
+    createBuilding('GATE',28,33,0,3,1); // gateProgress 0 = closed
+    createUnit('militia',29.7,32.4,1);  // enemy, behind near (E) post
+    createUnit('militia',28.6,32.5,0);  // own, behind W post/door
+    createUnit('militia',29.1,32.6,1);  // enemy, behind door centre
+    (${pageLookAt})(29, 33);
+    render();`,
+  idleq: `(${pageStage})();
+    window.myTeam = 0;
+    // LEFT: a SELECTED idle villager — the gold outline should wrap the "?".
+    const v1=createUnit('villager',24,31,0); selected.length=0; selected.push(v1);
+    // RIGHT: an idle villager BEHIND the TC keep — the silhouette should
+    // include the "?" so you can spot the hidden idle villager.
+    createBuilding('TC',28,28,0);
+    createUnit('villager',29,29,0);
+    (${pageLookAt})(27, 30);
+    render();`,
+  greenA: `(${pageStage})();
+    window.myTeam = 2; // green team's perspective (color index 2)
+    [[25,28],[27,30],[29,28],[26,31],[28,32]].forEach(([x,y])=>createUnit('militia',x,y,2));
+    createUnit('villager',27,28,2); createUnit('scout',30,30,2);
+    (${pageLookAt})(27, 30); render();`,
+  greenB: `(${pageStage})();
+    window.myTeam = 2;
+    PLAYER_TEAM_COLORS[2] = '#35c945'; PLAYER_TEAM_COLORS_DARK[2] = '#1f9433'; // AoE2-style vivid green
+    [[25,28],[27,30],[29,28],[26,31],[28,32]].forEach(([x,y])=>createUnit('militia',x,y,2));
+    createUnit('villager',27,28,2); createUnit('scout',30,30,2);
+    (${pageLookAt})(27, 30); render();`,
+  silcolor: `(${pageStage})();
+    window.myTeam = 0;
+    // blue/red/green units behind the TC keep — silhouettes should be BRIGHT.
+    createBuilding('TC',28,28,0);
+    createUnit('militia',29.4,28.6,0); // blue
+    createUnit('militia',28.6,29.4,1); // red
+    createUnit('militia',29.0,29.0,2); // green
+    (${pageLookAt})(28.5, 29); render();`,
+  frontpunch: `(${pageStage})();
+    window.myTeam = 0;
+    // foreground punch-out: a unit BEHIND a house (silhouette) and a unit
+    // just IN FRONT whose sprite overlaps the silhouette region — the front
+    // unit must stay clean (no ghost painted over it).
+    createBuilding('HOUSE', 30, 30, 0);
+    createUnit('militia', 30, 30, 0);     // dead centre, behind -> silhouette
+    createUnit('militia', 31.2, 31.2, 0); // just in front, overlapping
+    (${pageLookAt})(31, 31);
+    render();`,
+  tcstates: `(${pageStage})();
+    window.myTeam = 0;
+    // regression: selected TC (null-path whole-building gold outline) + a
+    // half-built foundation TC (alpha ramp must cover BOTH split parts).
+    const sel = createBuilding('TC', 26, 27, 0);
+    selected.length = 0; selected.push(sel);
+    const found = createBuilding('TC', 33, 27, 0);
+    found.complete = false; found.buildProgress = found.buildTime / 2; found.hp = found.maxHp / 2;
+    (${pageLookAt})(31, 31);
+    render();`,
+  occlude: `(${pageStage})();
+    window.myTeam = 0;
+    // behind-building silhouettes: own + enemy soldiers whose sortVal loses
+    // to the TC read as flat team-color silhouettes through its art
+    createBuilding('TC', 28, 26, 0);
+    createUnit('militia', 29.5, 27.2, 0);
+    createUnit('archer', 31.0, 26.6, 1);
+    // control: unit IN FRONT of the TC draws normally (no tint)
+    createUnit('militia', 31.5, 30.5, 0);
+    // gate archway: villager on the front tile is occluded ONLY by the near
+    // post — silhouette against it, none against the back post
+    for (let x = 24; x <= 34; x++) if (x < 28 || x > 30) createBuilding('WALL', x, 33, 0);
+    createBuilding('GATE', 28, 33, 0, 3, 1);
+    createUnit('villager', 29.7, 32.3, 0); // sortVal 62.25 < near post's 62.3, overlapping its art at tile (30,33)
     (${pageLookAt})(29.5, 30);
     render();`,
   fog: `(${pageStage})();
@@ -207,6 +656,8 @@ const SCENES = {
         } else {
           await shoot(`${scene}-z${z}`);
         }
+        const logs = await page.evaluate(`[window.__log1||'', window.__log2||'']`);
+        if (logs[0] || logs[1]) console.error('  LOG:', logs.filter(Boolean).join(' | '));
       }
       console.error(`scene ${scene}: done`);
     }

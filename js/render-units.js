@@ -2,11 +2,230 @@
 // coat/rider styling (see the knight accents in the shared branches).
 function isMountedUnit(t){ return t === 'scout' || t === 'knight'; }
 
-// Accent metal by the owner's age: dull iron -> steel -> polished steel.
-// The subtle unit-side 'age look' (shields, helms).
-const AGE_METAL = ['#8f8a7d', '#a8adb3', '#c6cdd8'];
-function ageMetal(team){
-  return AGE_METAL[(teamAge && isPlayerTeam(team)) ? teamAge[team] : 0];
+// Accent metal by the owner's FORGE tier (forging/iron_casting): crude
+// grey -> steel -> polished. Every metal piece a soldier wears (helm,
+// shield metal, scale rows) shows the blacksmith's quality; SHAPES
+// (kettle vs Norman helm) stay age-driven via the unitEquipment tables.
+const FORGE_METAL = ['#8f8a7d', '#a8adb3', '#c6cdd8'];
+
+// ---- equipment loadout ----
+// Cosmetic gear for SOLDIER units, selected from (utype, owner age, owner
+// techs): what this unit visibly wears. Read-only view of sim state
+// (teamAge/teamTechs) — never feeds a sim decision, never written to `e`
+// (entities are wholesale-replaced on MP sync; the outline mask pass
+// re-calls drawUnit and relies on draws being pure).
+const EQUIP_TECHS = ['forging','iron_casting','scale_armor','chain_mail','fletching'];
+const EQUIP_TECH_MASK = techMask(EQUIP_TECHS);
+const equipCache = new Map();
+function unitEquipment(e){
+  if(!MILITARY.has(e.utype)) return null;
+  let age = ageBonus(e.team);
+  let techs = (teamTechs && isPlayerTeam(e.team) ? teamTechs[e.team] : 0) & EQUIP_TECH_MASK;
+  let key = e.utype + '|' + age + '|' + techs; // + future per-unit tier
+  let v = equipCache.get(key);
+  if(v) return v;
+  // Tiers come from the SAME helpers the sim uses (spawn attack / live
+  // armor), so the drawn gear can never drift from the stats it signals.
+  let atk = upgradeAtkBonus(e.team), arm = upgradeArmorBonus(e.team);
+  v = {
+    metal: FORGE_METAL[atk],
+    // Armor line reads on the torso: plain tunic → scale rows → chain mail.
+    torso: arm >= 2 ? 'chain' : arm >= 1 ? 'scale' : null,
+    // Attack line reads on the weapon: base → forged (1) → iron-cast (2).
+    weapon: atk,
+    fletched: hasUpgrade(e.team, 'fletching'),
+    helmet: null, shield: null, quiver: false,
+  };
+  switch(e.utype){
+    case 'militia':
+      // helmetless tiers wear the team cap — ONE bare-head read for all
+      // military (matches archer/scout)
+      v.helmet = age >= 2 ? 'norman' : age === 1 ? 'kettle' : 'hood-team';
+      v.shield = age >= 2 ? 'kite' : age === 1 ? 'round' : null;
+      break;
+    case 'spearman':
+      v.helmet = age >= 2 ? 'norman' : 'kettle';
+      break;
+    case 'archer':
+      v.helmet = 'hood-team'; // team-color cap at every age — the archer's team tell
+      v.feather = v.fletched; // fletching pin, archer only (fletched is team-wide)
+      v.quiver = age >= 2;    // the back quiver is the CASTLE-age mark
+      break;
+    case 'scout':
+    case 'knight':
+      v.helmet = e.utype === 'knight' ? 'greathelm' : age >= 2 ? 'spiked' : 'hood-team';
+      v.shield = e.utype === 'knight' ? 'kite' : age >= 2 ? 'round' : null;
+      break;
+  }
+  equipCache.set(key, v);
+  return v;
+}
+
+// One painter per helmet design, front (face open) and back views. hx/hy are
+// the human offsets, id feeds the feather's flutter phase; assumes
+// strokeStyle '#000' / lineWidth 1 on entry (the torso pass contract) and
+// leaves them that way.
+// hturn = the head's lateral turn on screen (0 face-on, .707 on the
+// diagonals, 1 in profile), from e.facing·RIG[dir].sx — the facing mirror
+// puts the face side at +x, so hturn is never negative here and ONE
+// profile variant serves both W and E. The crown/dome is ~spherical so
+// it stays put; FACE-attached details (nose bar, ridge, eye slit, brim
+// tilt) slide toward the facing by fx — the same rule the eyes follow —
+// and profiles (hturn ≥ .9) get dedicated side reads. Lighting
+// highlights are world-fixed (upper-left) and never shift.
+function drawHelmet(v, hx, hy, back, team, id, hturn = 0){
+  let tc = teamColor(team);
+  let fx = hturn * 2.4;                    // face-detail lateral shift (matches the eyes)
+  let prof = !back && hturn > 0.9;         // true side view (W/E)
+  if (v.helmet === 'kettle') {
+    // Iron kettle hat (chapel-de-fer): dome seated ON the head, brim
+    // tilted BACK so it flares out BEHIND the dome — never a floating
+    // halo over the brow, and the face/eyes stay fully open.
+    X.fillStyle = v.metal;
+    if (back) {
+      // Dome first, brim ON TOP — seen from behind, the near side of the
+      // brim crosses the head.
+      X.beginPath();X.arc(hx,-15.2+hy,4,0,Math.PI*2);X.fill();X.stroke();
+      X.beginPath();X.ellipse(hx,-13.9+hy,5.4,1.5,0,0,Math.PI*2);X.fill();X.stroke();
+    } else if (prof) {
+      // Profile: the brim is a disk seen EDGE-ON at the dome's base —
+      // tilted BACK, so its FRONT rim foreshortens (short raised stub
+      // over the brow) while the back rim trails long and low behind
+      // the head: the board sits shifted rearward with a gentle slope.
+      X.beginPath();X.arc(hx-0.2,-15.4+hy,3.9,Math.PI,0);X.fill();X.stroke();
+      X.beginPath();X.ellipse(hx-0.8,-15.5+hy,5.2,0.85,-0.14,0,Math.PI*2);X.fill();X.stroke();
+    } else {
+      // Front: the BACK RIM (upper half-disk) flares behind the dome —
+      // visible as brim wings past its sides at brow height; the brim
+      // mass eases toward the back of the head as it turns.
+      let bx = hx - fx*0.3;
+      X.beginPath();X.ellipse(bx,-15.4+hy,5.6,1.7,0,Math.PI,0);X.closePath();X.fill();X.stroke();
+      X.beginPath();X.arc(hx,-15.4+hy,3.9,Math.PI,0);X.fill();X.stroke();
+      // hard line at the helm's base so the lower edge reads on the face
+      X.beginPath();X.moveTo(hx-3.9,-15.4+hy);X.lineTo(hx+3.9,-15.4+hy);X.stroke();
+    }
+  } else if (v.helmet === 'norman') {
+    // Norman iron helm: dome with ridge + highlight, riveted gold band,
+    // nose bar (front hemisphere only, turning with the head).
+    let cy0 = -15, bandY = back ? cy0 - 0.5 : cy0; // one crown height in EVERY view
+    X.fillStyle = v.metal;
+    X.beginPath();
+    if (back) X.arc(hx,cy0+hy,4.5,0,Math.PI*2); else X.arc(hx,cy0+hy,4.5,Math.PI,0);
+    X.fill();X.stroke();
+    X.save();
+    X.strokeStyle='rgba(0,0,0,0.22)';X.lineWidth=1/UNIT_SCALE;
+    if (prof) {
+      // side-on the center ridge descends the dome's FRONT curve
+      X.beginPath();X.moveTo(hx+2.6,cy0-3.4+hy);X.quadraticCurveTo(hx+3.8,cy0-1.8+hy,hx+4.1,cy0-0.2+hy);X.stroke();
+    } else {
+      X.beginPath();X.moveTo(hx+fx,cy0-4.4+hy);X.lineTo(hx+fx,cy0+(back?-0.6:-0.2)+hy);X.stroke();
+    }
+    X.strokeStyle='rgba(255,255,255,0.5)';X.lineWidth=1.2/UNIT_SCALE;X.lineCap='round';
+    X.beginPath();X.arc(hx,cy0+hy,3.3,Math.PI*1.15,Math.PI*1.55);X.stroke();
+    X.lineCap='butt';X.restore();
+    X.fillStyle='#daa520';
+    X.beginPath();X.rect(hx-4.5,bandY+hy,9,1.5);X.fill();X.stroke();
+    X.fillStyle='rgba(0,0,0,0.45)';
+    [-3,0,3].forEach(rx=>{X.beginPath();X.arc(hx+rx,bandY+0.75+hy,0.4,0,Math.PI*2);X.fill();});
+    if (!back) {
+      // nose bar rides the head turn; in profile it's the thin guard
+      // hanging edge-on off the helm's leading rim
+      X.fillStyle=v.metal;
+      if (prof) { X.beginPath();X.rect(hx+3.7,cy0+1.2+hy,1.2,2.8);X.fill();X.stroke(); }
+      else { X.beginPath();X.rect(hx+fx-0.75,cy0+hy,1.5,4);X.fill();X.stroke(); }
+    }
+  } else if (v.helmet === 'greathelm') {
+    // Blocky GREAT HELM — flat-topped box covering the whole face:
+    // team-color plume, brighter crown band; front adds the face ridge,
+    // dark eye slit and breath holes (all turning with the head).
+    X.fillStyle=tc;
+    X.beginPath();
+    X.moveTo(hx-1.2,-18.5+hy);
+    X.quadraticCurveTo(hx-2.2,-21.5+hy,hx,-22.3+hy);
+    X.quadraticCurveTo(hx+2.2,-21.5+hy,hx+1.2,-18.5+hy);
+    X.closePath();X.fill();X.stroke();
+    X.fillStyle=v.metal;
+    X.beginPath();X.rect(hx-4,-18.5+hy,8,7.5);X.fill();X.stroke();
+    X.fillStyle='rgba(255,255,255,0.28)';
+    X.fillRect(hx-4,-18.5+hy,8,1.6);
+    if (!back && prof) {
+      // Profile: the face plate is edge-on — a SHORT slit wraps the
+      // leading corner and only the forward breath holes show; the
+      // center ridge vanishes with the plate.
+      X.fillStyle='#1c1c1c';
+      X.fillRect(hx+1.4,-15.4+hy,2.6,1.2);
+      X.fillStyle='rgba(0,0,0,0.45)';
+      X.beginPath();X.arc(hx+2.1,-12.4+hy,0.4,0,Math.PI*2);X.fill();
+      X.beginPath();X.arc(hx+3.3,-12.4+hy,0.4,0,Math.PI*2);X.fill();
+    } else if (!back) {
+      X.strokeStyle='rgba(0,0,0,0.3)';X.lineWidth=1.1/UNIT_SCALE;
+      X.beginPath();X.moveTo(hx+fx,-16.9+hy);X.lineTo(hx+fx,-11+hy);X.stroke();
+      X.strokeStyle='#000000';X.lineWidth=1/UNIT_SCALE;
+      X.fillStyle='#1c1c1c';
+      X.fillRect(hx+fx-2.6,-15.4+hy,5.2,1.2);
+      X.fillStyle='rgba(0,0,0,0.45)';
+      X.beginPath();X.arc(hx+fx-1.6,-12.4+hy,0.4,0,Math.PI*2);X.fill();
+      X.beginPath();X.arc(hx+fx,-12.4+hy,0.4,0,Math.PI*2);X.fill();
+      X.beginPath();X.arc(hx+fx+1.6,-12.4+hy,0.4,0,Math.PI*2);X.fill();
+    }
+  } else if (v.helmet === 'spiked') {
+    // Spiked cavalry helm — open face, small spike on top; distinct from
+    // the knight's flat-topped great helm.
+    let cy0 = -15, sb = -18.6; // one crown height in EVERY view
+    X.fillStyle=v.metal;
+    X.beginPath();
+    X.moveTo(hx-0.8,sb+hy);
+    X.lineTo(hx,sb-2.8+hy);
+    X.lineTo(hx+0.8,sb+hy);
+    X.closePath();X.fill();X.stroke();
+    X.beginPath();X.arc(hx,sb-0.1+hy,0.9,0,Math.PI*2);X.fill();X.stroke(); // spike ball base
+    X.beginPath();
+    if (back) X.arc(hx,cy0+hy,4.2,0,Math.PI*2); else X.arc(hx,cy0+hy,4.2,Math.PI,0);
+    X.fill();X.stroke();
+    // hard BLACK line at the helm's lower edge so the boundary reads
+    if (back) { X.beginPath();X.moveTo(hx-3.7,-13+hy);X.lineTo(hx+3.7,-13+hy);X.stroke(); }
+    else { X.beginPath();X.moveTo(hx-4.2,cy0+hy);X.lineTo(hx+4.2,cy0+hy);X.stroke(); }
+    X.save();
+    X.strokeStyle='rgba(255,255,255,0.5)';X.lineWidth=1.1/UNIT_SCALE;X.lineCap='round';
+    X.beginPath();X.arc(hx,cy0+hy,3,Math.PI*1.15,Math.PI*1.55);X.stroke();
+    X.lineCap='butt';X.restore();
+  } else {
+    // Hoods: archer's green, everyone else's peasant leather.
+    X.fillStyle = v.helmet === 'hood-team' ? tc : '#4a2e1b';
+    X.beginPath();
+    if (back) X.arc(hx,-15+hy,4.5,0,Math.PI*2); else X.arc(hx,-15+hy,4.5,Math.PI,0); // one crown height in EVERY view
+    X.fill();X.stroke();
+    if (prof && v.helmet !== 'hood-team') {
+      // side-on the leather hood drapes down the NAPE behind the head
+      // (the team CAP is brimless and close-fitting — no flap)
+      X.beginPath();
+      X.moveTo(hx-4.4,-15.2+hy);
+      X.quadraticCurveTo(hx-5.5,-12.4+hy,hx-3.9,-10.4+hy); // outer drape curve
+      X.quadraticCurveTo(hx-2.9,-11.6+hy,hx-3.2,-14.6+hy); // tucks back to the crown
+      X.closePath();X.fill();X.stroke();
+    }
+    if (v.helmet === 'hood-team' && v.feather) {
+      // Fletching tell: a tall team-color plume pinned in the cap, fluttering
+      // gently (idle-anim idiom: tick + id phase) — the tech's only
+      // always-visible mark, so it's deliberately exaggerated.
+      let fy = 0; // crowns align in every view
+      let sway = Math.sin(animTick*0.12 + id*0.7)*0.16;
+      X.save();
+      X.translate(hx+fx*0.5, -18.6+fy+hy); X.rotate(0.08 + sway); // rides the crown as the head turns
+      X.fillStyle=teamColorLight(team); // lighter than the cap so it pops
+      X.beginPath();
+      X.moveTo(0,0);
+      X.quadraticCurveTo(-2.2,-3.6, -1.1,-7.6);  // outer edge up
+      X.quadraticCurveTo(-0.1,-9.4, 1.4,-7.9);   // rounded tip
+      X.quadraticCurveTo(1.7,-3.6, 0.9,-0.2);    // inner edge back down
+      X.closePath();X.fill();X.stroke();
+      // quill line up the middle
+      X.strokeStyle='rgba(0,0,0,0.35)';X.lineWidth=0.8/UNIT_SCALE;
+      X.beginPath();X.moveTo(0.1,-0.5);X.quadraticCurveTo(-0.5,-3.8, 0.1,-7.8);X.stroke();
+      X.restore();
+      X.strokeStyle='#000000';X.lineWidth=1/UNIT_SCALE;
+    }
+  }
 }
 
 // Big readable broadsword, drawn with the context translated to the grip.
@@ -15,67 +234,286 @@ function ageMetal(team){
 // Shaped slash cycle shared by the sword and the arm that swings it:
 // slow windup over the shoulder → whip-fast strike (ease-out cubic) with
 // a small overshoot settle → smooth recovery back to guard.
-function swordSwingAngle(id){
-  let ph=((tick*0.05+id*0.4)%1+1)%1;
+function swordSwingAngle(e){
+  // Rides the reload clock like the archer's draw and the bear's bite —
+  // atkCooldown resets to rof ON the hit, so the phase sweeps through the
+  // strike exactly as the sim deals damage (the +0.52 offset parks the
+  // just-hit frame at the strike's end).
+  let rof=(typeof UNITS!=='undefined' && UNITS[e.utype] && UNITS[e.utype].rof)||T30(60);
+  let ph=(1-(e.atkCooldown||0)/rof+0.52)%1;
   if(ph<0.35){let t=ph/0.35;return 0.5+0.65*t*t;}                        // windup -> 1.15
   if(ph<0.52){let t=(ph-0.35)/0.17;return 1.15-2.5*(1-Math.pow(1-t,3));} // strike -> -1.35
   if(ph<0.68){let t=(ph-0.52)/0.16;return -1.35+0.25*t;}                 // settle -> -1.1
   let t=(ph-0.68)/0.32;return -1.1+1.6*(t*t*(3-2*t));                    // recover -> 0.5
 }
 
-// Should this unit be showing its attack/harvest ANIMATION right now? The
-// animation must match what the sim actually DOES: the sim only deals damage /
-// harvests when the unit is genuinely in range (see updateUnit — damageEntity
-// gated by adjToBuilding / distToTarget<=range, harvest by SHEEP_HARVEST_RANGE).
-// The old gates ("has a target and is standing still") let a unit that halted
-// just OUTSIDE range — or a surplus attacker with no reachable slot — swing at
-// thin air with nothing happening. This mirrors the sim's range checks EXACTLY,
-// so a swing always coincides with a real hit. Render-only: reads sim state,
+// Should this unit be showing its attack/harvest ANIMATION right now? It must
+// be the SAME predicate the sim fires on — inWeaponRange (js/logic.js) — never a
+// re-spelling: a looser gate swings at thin air, a tighter one shoots in silence
+// (this file's own copy omitted the ranged +0.5 slack, so an archer hitting a
+// mill from range+0.4 played no draw at all). Render-only: reads sim state,
 // never writes it.
 function inActionRange(e){
   if(e.__animAttack) return true;            // style-gallery preview swings freely
   if(!e.target) return false;
   let t = entitiesById.get(e.target);
   if(!t || t.hp<=0) return false;
-  let range = (typeof UNITS!=='undefined' && UNITS[e.utype] && UNITS[e.utype].range) || 0;
-  if(t.type==='building') return range>0 ? distToTarget(e,t)<=range : adjToBuilding(e.x,e.y,t);
-  let maxD = range>0 ? range
-           : (e.utype==='villager' && (t.utype==='sheep'||t.utype==='sheep_carcass')) ? SHEEP_HARVEST_RANGE : 1.5;
-  return distToTarget(e,t)<=maxD;
+  return inWeaponRange(e, t);                // THE shared gate (js/logic.js)
 }
 
-function drawBigSword(swinging, id){
-  if(swinging){
-    X.rotate(swordSwingAngle(id));
-  } else X.rotate(0.5); // rest: blade leans outward, away from the head
+// attack-tech steel ramp: 0 crude grey iron, 1 forged steel, 2 polished
+const tierSteel = t => t >= 2 ? '#f2f6fb' : t >= 1 ? '#dde3ea' : '#a7abb0';
+// two-stroke wooden shaft: black round-cap outline + timber core
+function strokeShaft(x1, y1, x2, y2, wOut, wIn){
+  X.strokeStyle='#000';X.lineWidth=wOut/UNIT_SCALE;X.lineCap='round';
+  X.beginPath();X.moveTo(x1,y1);X.lineTo(x2,y2);X.stroke();
+  X.strokeStyle='#8B4513';X.lineWidth=wIn/UNIT_SCALE;
+  X.beginPath();X.moveTo(x1,y1);X.lineTo(x2,y2);X.stroke();
+  X.lineCap='butt';
+}
+function drawBigSword(rot, tier = 0, edgeOn = false){
+  // rot 0 = blade straight up; rest passes the seam's anim.restRot;
+  // swings pass anim.swordRot so the blade is the ARM'S EXTENSION — it
+  // continues the shoulder→grip line, never scissors against the arm.
+  X.rotate(rot);
+  // The anchor (= the gripping hand) sits at the CENTER of the handle —
+  // grip runs local y 0..5.4, so shift the whole sword up half that along
+  // the blade axis; swings then rotate about the fist, not the crossguard.
+  // The art's blade axis is drawn at local x +0.5 — the −0.5 centers it
+  // on the anchor so the fist sits exactly ON the blade line (visible at
+  // the dead-center S rest, user caught it).
+  X.translate(-0.5,-2.7);
+  if (edgeOn){
+    // The sword ROTATED 90° about its long axis — seen down the guard
+    // (face-on idle: the flat rests against the leg, the camera sees the
+    // EDGE): thin blade line, crossguard foreshortened to a nub. The
+    // chop keeps the wide face — the edge leads a strike, turning the
+    // flat toward the camera.
+    let ext = tier >= 2 ? 3 : tier >= 1 ? 1.5 : 0;
+    // THREE flat rectangles — grey blade, gold guard, brown grip (user
+    // call: no round caps or beads; the edge-on sword is pure silhouette)
+    X.strokeStyle='#000';X.lineWidth=1/UNIT_SCALE;
+    X.fillStyle = tier >= 2 ? '#f2f6fb' : tier >= 1 ? '#dde3ea' : '#a7abb0';
+    X.beginPath();X.rect(-0.3,-21-ext,1.6,19+ext);X.fill();X.stroke();
+    X.fillStyle='#daa520';
+    X.beginPath();X.rect(-1.2,-1.6,3.4,1.8);X.fill();X.stroke();
+    X.fillStyle='#5c3d24';
+    X.beginPath();X.rect(-0.3,0.2,1.6,5.2);X.fill();X.stroke();
+    // (no pommel — simplified silhouette, user call)
+    return;
+  }
   X.strokeStyle='#000';X.lineWidth=1.2/UNIT_SCALE;X.lineJoin='round';
   // Same design as the barracks' crossed-swords emblem: parallel-edged
   // blade tapering to a point, rounded gold crossguard, leather grip,
   // gold pommel.
-  // Blade with point — single flat white, no fuller
-  X.fillStyle='#f5f2e9';
+  // Blade tier (attack techs), dark→bright so the upgrade pops: 0 crude
+  // grey iron, 1 forged steel (a touch longer), 2 iron-cast polish
+  // (+fuller groove, longer again).
+  let ext = tier >= 2 ? 3 : tier >= 1 ? 1.5 : 0;
+  X.fillStyle = tierSteel(tier);
   X.beginPath();
-  X.moveTo(-1.7,-2);X.lineTo(-1.4,-17);X.lineTo(0.5,-22);
-  X.lineTo(2.4,-17);X.lineTo(2.7,-2);X.closePath();X.fill();X.stroke();
-  // Rounded gold crossguard
-  X.strokeStyle='#000';X.lineWidth=3.2/UNIT_SCALE;X.lineCap='round';
-  X.beginPath();X.moveTo(-4.2,-0.7);X.lineTo(5.2,-0.7);X.stroke();
-  X.strokeStyle='#daa520';X.lineWidth=1.8/UNIT_SCALE;
-  X.beginPath();X.moveTo(-3.9,-0.7);X.lineTo(4.9,-0.7);X.stroke();
+  X.moveTo(-1.7,-2);X.lineTo(-1.4,-17-ext);X.lineTo(0.5,-22-ext);
+  X.lineTo(2.4,-17-ext);X.lineTo(2.7,-2);X.closePath();X.fill();X.stroke();
+  if(tier >= 2){ // fuller groove down the center
+    X.strokeStyle='rgba(0,0,0,0.28)';X.lineWidth=0.9/UNIT_SCALE;
+    X.beginPath();X.moveTo(0.5,-3.5);X.lineTo(0.5,-16.5-ext);X.stroke();
+  }
+  // FLAT rectangular crossguard (a rounded capsule read as tilted
+  // toward the screen, user call)
+  X.fillStyle='#daa520';X.strokeStyle='#000';X.lineWidth=1/UNIT_SCALE;
+  X.beginPath();X.rect(-4.2,-1.6,9.4,1.8);X.fill();X.stroke();
   // Grip
   X.strokeStyle='#000';X.lineWidth=3/UNIT_SCALE;
   X.beginPath();X.moveTo(0.5,0);X.lineTo(0.5,5.6);X.stroke();
   X.strokeStyle='#5c3d24';X.lineWidth=1.6/UNIT_SCALE;
   X.beginPath();X.moveTo(0.5,0);X.lineTo(0.5,5.4);X.stroke();
   X.lineCap='butt';
-  // Pommel
-  X.fillStyle='#daa520';X.strokeStyle='#000';X.lineWidth=1/UNIT_SCALE;
-  X.beginPath();X.arc(0.5,6.6,1.5,0,Math.PI*2);X.fill();X.stroke();
+  // (no pommel — simplified silhouette, user call)
+}
+
+// The spearman's long spear in drawBigSword's frame (the spearman rides
+// the whole sword pose seam): rot 0 = shaft straight up, the anchor (=
+// the gripping hand) 12 up from the butt — most of the spear above the
+// fist. Butt +12 → head base −16 → tip −24 (total 36). k foreshortens
+// the shaft along its own axis about the grip (a tilted thrust points
+// into the iso depth — drawn full-length it overshoots both ways).
+function drawBigSpear(rot, tier = 0, k = 1){
+  X.rotate(rot);
+  if (k !== 1) X.scale(1, k);
+  X.strokeStyle='#000';X.lineWidth=3.2/UNIT_SCALE;X.lineCap='round';
+  X.beginPath();X.moveTo(0,12);X.lineTo(0,-16);X.stroke();
+  X.strokeStyle='#8B4513';X.lineWidth=1.6/UNIT_SCALE;
+  X.beginPath();X.moveTo(0,12);X.lineTo(0,-16);X.stroke();
+  X.lineCap='butt';
+  // Spearhead tier (attack techs), dark→bright like the sword: 0 crude
+  // grey iron, 1 forged steel (leaf head), 2 polished DIAMOND head.
+  X.fillStyle = tierSteel(tier);
+  X.strokeStyle='#000';X.lineWidth=1.1/UNIT_SCALE;X.lineJoin='round';
+  if(tier >= 2){
+    // diamond symmetric about the shaft: back overlaps the shaft end
+    X.beginPath();X.moveTo(0,-15.2);X.lineTo(-2.5,-19.6);X.lineTo(0,-24);X.lineTo(2.5,-19.6);
+    X.closePath();X.fill();X.stroke();
+  } else {
+    // leaf head: base corners at the shaft end ± perpendicular
+    X.beginPath();X.moveTo(-2.8,-16);X.lineTo(0,-24);X.lineTo(2.8,-16);X.closePath();
+    X.fill();X.stroke();
+  }
+}
+
+// Recurve bow about the archer's grip anchor (+x = shoot direction). f is
+// the flex: 0 braced rest, →1 at full draw (tips pull back and inward,
+// limb curvature deepens), <0 during the forward release snap. Tier
+// (attack techs) changes a DIFFERENT part per step — 0 pale selfbow,
+// 1 laminated dark wood + leather-wrapped riser, 2 composite with in-path
+// siyahs + horn nocks — while the string always attaches at the tips, so
+// the nock/pull math is tier-invariant. Returns the tip position.
+function drawRecurveBow(f, tier){
+  // BIG dramatic recurve with a REAL-bow silhouette (user calls, both):
+  // TALL limbs sweep back from the riser through a deep belly and curl
+  // OUTWARD at the tips (an S per limb — cubic), while the string still
+  // braces only ~4 behind the riser so the draw arm never overstretches
+  // (the old deep-C put the brace ~7 back and the arm read rubber).
+  let tx = 4.6 - 2.6*f, ty = 10.6 - 1.8*f;     // limb tips (string ends)
+  let c1x = 5.6 + 0.8*f, c1y = 7.2 - 1.4*f;    // back-sweep (belly) control
+  // tip-curl control PINNED to the tip (fixed offset): the flex bends the
+  // BELLY only — a drawn recurve keeps its outward tip curls (user call);
+  // an f-term here flattened the S at full draw. (The old tier-2 siyah
+  // tip segments are gone — stacked on the built-in curls they kinked
+  // the silhouette; the horn nocks carry the tier-2 read.)
+  let c2x = tx - 2.2, c2y = ty - 1.0;
+  const path = () => {
+    X.beginPath();
+    X.moveTo(tx, -ty);
+    X.bezierCurveTo(c2x, -c2y, c1x, -c1y, 7.6, -2.6); // upper limb: curl out, sweep in
+    X.quadraticCurveTo(8.5, 0, 7.6, 2.6);             // rigid riser (never flexes)
+    X.bezierCurveTo(c1x, c1y, c2x, c2y, tx, ty);      // lower limb
+  };
+  const riser = () => {
+    X.beginPath(); X.moveTo(7.6, -2.6); X.quadraticCurveTo(8.5, 0, 7.6, 2.6);
+  };
+  X.lineCap='round'; X.lineJoin='round';
+  X.strokeStyle='#000'; X.lineWidth=3.4/UNIT_SCALE; path(); X.stroke();
+  X.lineWidth=4.6/UNIT_SCALE; riser(); X.stroke();  // thicker handle
+  let wood = tier >= 2 ? '#7d4a14' : tier >= 1 ? '#6e3d10' : '#b3874a';
+  X.strokeStyle=wood; X.lineWidth=1.8/UNIT_SCALE; path(); X.stroke();
+  X.strokeStyle = tier >= 1 ? '#c9a15e' : wood; X.lineWidth=2.8/UNIT_SCALE; riser(); X.stroke();
+  if (tier >= 1) { // wrap ticks across the leather riser
+    X.strokeStyle='#8a6a3a'; X.lineWidth=0.8/UNIT_SCALE;
+    X.beginPath();
+    X.moveTo(7.3,-1.2); X.lineTo(8.6,-1.2);
+    X.moveTo(7.5,0);    X.lineTo(8.8,0);
+    X.moveTo(7.3,1.2);  X.lineTo(8.6,1.2);
+    X.stroke();
+  }
+  if (tier >= 2) { // horn nocks at the tips
+    X.fillStyle='#ece4d2'; X.strokeStyle='#000'; X.lineWidth=1/UNIT_SCALE;
+    X.beginPath(); X.arc(tx,-ty,1.1,0,Math.PI*2); X.fill(); X.stroke();
+    X.beginPath(); X.arc(tx, ty,1.1,0,Math.PI*2); X.fill(); X.stroke();
+  }
+  X.lineCap='butt';
+  return { tx, ty };
 }
 
 // Uniform size multiplier for every drawn character (units and corpses).
 const UNIT_SCALE = 1.25;
 
+// Rest grip anchors in the mirrored body frame — shared by the hand-pose
+// seam, drawHeldLayer's translates, and drawCorpse's dropped-weapon HOLD
+// table. (Scout/knight HOLD is a drop point, not a grip — stays local.)
+const GRIP_REST = { militia:{x:6.5,y:-6}, spearman:{x:3,y:-6}, archer:{x:4,y:-8},
+                    mountedRest:{x:5.5,y:-8.5} }; // swing grips orbit the shoulder (see the seam)
+// Villager work-tool anchor: the handle rotates about this point and the
+// gripping hand rides the same anchor (hand-pose seam) — one spelling so
+// they can't drift, same contract as GRIP_REST.
+// (tool anchor lives in RIG_MOUNTS.villager.tool — projected per dir
+// at the seam as anim.toolRest)
+// Carried-resource mount: the load rides OVERHEAD, centered above the
+// head with both arms raised to steady it — identical in every
+// direction by construction (user call: dir-independent and clear).
+const CARRY_UP = 20.5;
+// tasks whose walking villager pushes the (post-tech) wheelbarrow —
+// resource gathering only; builders keep bare hands
+const BARROW_TASKS = new Set(['chop', 'mine_gold', 'mine_stone', 'farm', 'forage']);
+// Swing-orbit neutral pose (angle 0.5): constants of anchoring the orbit
+// center onto GRIP_REST, so idle IS the swing's neutral frame (same
+// grip, same side) and engage can't pop. The blade-angle constant in the
+// swing (see the seam) is chosen so the NEUTRAL blade stands DEAD
+// VERTICAL — matching the rest draw — and the windup tips PAST vertical
+// backward before the strike sweeps forward.
+const SWING_NEUTRAL = (() => {
+  let p0 = -0.8 - 0.96*0.5;
+  return { rs: 1.2*Math.sin(0.5), cos: Math.cos(p0), sin: Math.sin(p0) };
+})();
+// Face-on (S/N) chop model — see the sword pose seam. REACH = elevation
+// driven past vertical at the strike; DOWN_K = a down-pointing blade
+// reads shorter (it's coming at the camera); DROP = how far the grip
+// falls over the chop; RISE = how high the hands climb on the windup
+// (th < 0) — a FULL overhead swing, fists up over the head before the
+// blade drives down. The grip NEVER moves inward — the arm hangs at
+// the shoulder line and the whole chop happens straight down out there.
+const CHOP = { REACH: 2.4, DOWN_K: 0.75, DROP: 2.2, RISE: 10 };
+
+// ---- POSE RIG ----
+// Body-local 3D anchors (lat = the unit's RIGHT, fwd = the facing
+// direction, up) projected per dir through the iso camera: screen
+// position, DEPTH (draw order) and arm choice DERIVE from one 3D pose
+// instead of per-dir tables; the mounts' profileHeld carries the one
+// deliberate exception (profile sort pin).
+// C1 = 1/√2 makes profile forward = 1 screen px per body px (how all
+// existing art offsets were authored); C2 = C1·(HALF_TH/HALF_TW).
+// Depth = world (x+y) toward the camera; the body center is depth 0.
+const RIG_DIRV = [[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1],[0,-1],[1,-1]]; // SE,S,SW,W,NW,N,NE,E
+const RIG_C1 = Math.SQRT1_2, RIG_C2 = RIG_C1 * 0.5;
+// Vertical PARALLAX damping for mounts: the full iso projection puts a
+// near-side grip ~2px lower than a far-side one — 3D-correct, but at
+// ~20px sprites the ±2px reads as units sitting UN-LEVEL across dirs.
+// Keep a hint of the depth cue, not the full effect.
+const RIG_YK = 0.35;
+// Per-dir FORWARD screen basis {sx,sy,d}; the RIGHT basis is row
+// (d+2)&7 — the right of facing d is the facing two dirs clockwise.
+const RIG = RIG_DIRV.map(([wx, wy]) => {
+  let n = Math.hypot(wx, wy), x = wx / n, y = wy / n;
+  return { sx: (x - y) * RIG_C1, sy: (x + y) * RIG_C2, d: (x + y) * RIG_C1 };
+});
+// Sword mount per silhouette (rig coords), FITTED so the projections
+// reproduce the hand-approved per-dir anchors.
+// ONE sword hold for both silhouettes — the mount is relative to the
+// HUMAN body origin, and the rider's humanX/YOffset already seats that
+// origin on the horse, so foot and rider grip the sword identically.
+// ONE sword placement for EVERY weapon-arm mode (user call): the
+// UNHANDED centerline mount. L/R/B render the sword identically — only
+// the arms differ — and because lat = 0 every mirror-dir pair places
+// the sword symmetrically (S/N dead-center falls out free). The old
+// handed per-dir table (cross-body SW, E far-stretch, NW/NE pins) was
+// one-hand-LEFT choreography and died with this decision.
+// profileHeld: at the dead-on profiles (W/E) the forward depth projects
+// to 0 and would TIE with the body — the field pins the forward-held kit
+// just over it. One value; any pin in (0.01, ~2.5) sorts identically.
+// (The archer's bow deliberately has NONE: it derives BEHIND the body at
+// E side-on, nocked arrow furthest back — user call.)
+const SWORD_MOUNT = { lat: 0, fwd: 8.0, up: 7.1, profileHeld: 0.5 }; // fwd keeps the blade clear of the face in every dir
+// Shield mount: ALWAYS strapped to the off forearm (side = −gripS folds
+// the L/R flip in), in every view and mode — the plate turns with the
+// body: full face at the profiles, edge-on STRIP at S/N (the sword's
+// edge convention, user call), back face on the away quarters. A
+// separate slung-on-back mode was built and cut — one mount is honest
+// and covers every read.
+const SHIELD_MOUNT = { lat: 6.2, fwd: 0.8, up: 5.5 }; // lat clears the hanging arm at S/N
+const RIG_MOUNTS = {
+  // (militia/spearman/mounted read SWORD_MOUNT directly)
+  // held-item DEPTH mounts for the other humanoids (lat/fwd only —
+  // their draw anchors stay where they are; these place the item in the
+  // sort: forward-held kit sorts over the body facing camera, behind it
+  // facing away, from the F.d sign alone)
+  // (spearman: pose + heldD fully derived at its seam — no mount entry)
+  archer:   { bow:   { lat: -1, fwd: 6 } },
+  // fwd 6.5: the tool swings clearly IN FRONT of the body — lower values
+  // put the NE/E grips backward past the shoulder (user calls, twice)
+  villager: { tool:  { lat: 0,  fwd: 6.5, up: 9, profileHeld: 0.5 } },
+};
+// Tool-head frames: +x along the drawn handle (fixed handle geometry).
+const AXE_HEAD_ROT = Math.atan2(-14, 9);
+const MALLET_HEAD_ROT = Math.atan2(-12, 7.5);
 // ---- skeleton decay art (shared by drawCorpse and the trade cart wreck) ----
 const BONE='#e8e4d8';
 function drawHumanSkeleton(ox2,oy2,ss){
@@ -355,7 +793,7 @@ function drawTradeCartCorpse(c, sx, sy, age, alpha){
   wallQ(-nearB, bedInner);          // far side wall: inner face
   endQ(u.y<0 ? L : -L, bedInner);   // far end (view-dependent): inner face
   poly([P(-L,-WB,CB),P(L,-WB,CB),P(L,WB,CB),P(-L,WB,CB)], bedFloor); // floor
-  if (!weathered && cargoT < 0.55) drawCargo(); // still boxed in: walls occlude it
+  if (c.carrying > 0 && !weathered && cargoT < 0.55) drawCargo(); // still boxed in: walls occlude it
   // near outer faces are TEAM-COLORED panels (the live cart's ownership
   // read) — but once a wall folds past ~45° its blue outer face turns
   // toward the ground, so the visible side becomes the brown INNER face
@@ -367,7 +805,7 @@ function drawTradeCartCorpse(c, sx, sy, age, alpha){
   if (u.x !== 0 && tFold <= 0.3) nearWheels(); // still tipping: over the standing box
 
   // once the walls have mostly folded open the spilled cargo lies ON them
-  if (!weathered && cargoT >= 0.55) {
+  if (c.carrying > 0 && !weathered && cargoT >= 0.55) {
     X.save(); X.translate(0, drop);
     drawCargo();
     X.restore();
@@ -589,8 +1027,8 @@ function drawRamCorpse(c, sx, sy, age, alpha){
 }
 
 function drawCorpse(c){
-  let iso=toIso(c.x,c.y);
-  let sx=Math.round(iso.ix-camX+W/2), sy=Math.round(iso.iy-camY+topH+H/2+HALF_TH);
+  let scr=mapToScreen(c.x,c.y);
+  let sx=Math.round(scr.sx), sy=Math.round(scr.sy+HALF_TH);
   if(isOffscreen(sx,sy,50))return;
   
   let { ox, oy } = getUnitGroupOffset(c.id);
@@ -615,7 +1053,7 @@ function drawCorpse(c){
     rot *= 1 + 0.07 * Math.sin((age - TOPPLE) / 300 * Math.PI); // impact recoil
   }
   let alpha = age < CORPSE_LIFE - 3000 ? 1 : Math.max(0, 1 - (age - (CORPSE_LIFE - 3000)) / 3000);
-  let big = isMountedUnit(c.utype) || c.utype === 'bear'; // horse/bear-sized corpse
+  let big = isMountedUnit(c.utype) || isWildPredator(c); // horse/bear-sized corpse
 
   // Wooden vehicles get their own break-apart wreck sequences — they don't
   // topple like bodies (the cart's ox falls separately; the ram caves in).
@@ -625,7 +1063,7 @@ function drawCorpse(c){
   // Impact dust puff, once, the moment the body hits the ground (same
   // render-side particle spawning the sheep's grass nibbling uses).
   // Tracked in corpseImpactFxDone (js/core.js), not a `c.impactFx` field —
-  // corpses get wholesale-replaced by every sync, which used to wipe that
+  // corpses get wholesale-replaced by every sync, which would wipe that
   // flag and re-trigger the puff repeatedly instead of once.
   if (age >= TOPPLE && !corpseImpactFxDone.has(c.id)) {
     corpseImpactFxDone.add(c.id);
@@ -665,6 +1103,8 @@ function drawCorpse(c){
       // Bear remains: same construction as the horse but squatter — the
       // boulder ribcage is the read
       drawHorseSkeleton(1.15);
+    } else if(c.utype==='dragon'){
+      drawHorseSkeleton(2.1);             // a great beast's bones
     } else {
       drawHumanSkeleton(0,0,1.25);
     }
@@ -682,7 +1122,7 @@ function drawCorpse(c){
   if(!c.pose){
     c.pose = {type:'unit', utype:c.utype, team:c.team, id:c.id, x:c.x, y:c.y,
       female:c.female, dir:7, facing:c.facing, facingNorth:false,
-      path:[], target:null, buildTarget:null, task:null, followId:undefined,
+      path:[], target:null, buildTarget:null, task:null, order:null,
       hp:1, maxHp:1, carrying:0, carryType:null,
       lastX:c.x, lastY:c.y, corpseRot:0};
   }
@@ -702,11 +1142,11 @@ function drawCorpse(c){
     // Held position (where the living sprite draws the weapon) -> rest
     // spot on the ground beside the body, per type. {x,y,angle}.
     const HOLD = {
-      militia:  {x:6.5,  y:-6,  a:0.5},
+      militia:  {...GRIP_REST.militia,  a:0.5},
       scout:    {x:-4.5, y:-17, a:-0.6},
       knight:   {x:-4.5, y:-17, a:-0.6},
-      spearman: {x:3,    y:-6,  a:0},
-      archer:   {x:4,    y:-8,  a:0}
+      spearman: {...GRIP_REST.spearman, a:0},
+      archer:   {...GRIP_REST.archer,   a:0}
     };
     const REST = {
       militia:  {x:10,  y:1.5, a:2.0},
@@ -729,32 +1169,22 @@ function drawCorpse(c){
     X.translate(wx, wy);
     X.rotate(wa);
     if(c.utype==='spearman'){
-      // The spear, lying loose (static shapes of the living spear)
-      X.save();X.scale(0.8,0.8);
-      X.strokeStyle='#000';X.lineWidth=3.2/UNIT_SCALE;X.lineCap='round';
-      X.beginPath();X.moveTo(-8,10);X.lineTo(12,-10);X.stroke();
-      X.strokeStyle='#8B4513';X.lineWidth=1.6/UNIT_SCALE;
-      X.beginPath();X.moveTo(-8,10);X.lineTo(12,-10);X.stroke();
-      X.lineCap='butt';
-      X.fillStyle='#dde3ea';X.strokeStyle='#000';X.lineWidth=1.1/UNIT_SCALE;X.lineJoin='round';
-      X.beginPath();X.moveTo(10,-12);X.lineTo(17.6,-15.6);X.lineTo(13.9,-8.1);X.closePath();X.fill();X.stroke();
+      // The spear, lying loose — the LIVING art fn at the owner's tier
+      // (a static copy here went stale against two shaft rewrites)
+      X.save();X.scale(0.8,0.8);X.rotate(0.785);
+      drawBigSpear(0, (unitEquipment(c.pose) || {}).weapon || 0);
       X.restore();
     } else if(c.utype==='archer'){
-      // The bow, lying loose with its string at rest
-      X.save();X.scale(0.85,0.85);
-      X.strokeStyle='#000';X.lineWidth=4.2/UNIT_SCALE;X.lineCap='round';
-      X.beginPath();X.arc(0,0,10,-Math.PI/2.15,Math.PI/2.15);X.stroke();
-      X.strokeStyle='#8B4513';X.lineWidth=2.3/UNIT_SCALE;
-      X.beginPath();X.arc(0,0,10,-Math.PI/2.15,Math.PI/2.15);X.stroke();
-      X.lineCap='butt';
-      let tipX=10*Math.cos(Math.PI/2.15), tipY=10*Math.sin(Math.PI/2.15);
+      // The bow, lying loose at its braced rest profile (owner's tier)
+      X.save();X.scale(0.95,0.95);
+      let bt = drawRecurveBow(0, (unitEquipment(c.pose) || {}).weapon || 0);
       X.strokeStyle='#e8e8e8';X.lineWidth=1/UNIT_SCALE;
-      X.beginPath();X.moveTo(tipX,-tipY);X.lineTo(tipX,tipY);X.stroke();
+      X.beginPath();X.moveTo(bt.tx,-bt.ty);X.quadraticCurveTo(0.4,0,bt.tx,bt.ty);X.stroke();
       X.restore();
     } else {
-      // Militia / scout broadsword
+      // Militia / scout broadsword — dropped at the owner's forged tier
       X.rotate(0.35);
-      drawBigSword(false, c.id);
+      drawBigSword(0.5, (unitEquipment(c.pose) || {}).weapon || 0);
     }
   }
   X.restore();
@@ -765,6 +1195,20 @@ function drawCorpse(c){
 // left, so left-pointing directions map onto their right-pointing twins and
 // only right-facing poses ever need authoring. Was copy-pasted at every
 // posed-sprite branch (bear, horse legs, scout).
+// 8-direction index (0: SE, 1: S, 2: SW, 3: W, 4: NW, 5: N, 6: NE, 7: E) to
+// the sprite's mirror (facing) and front/back (facingNorth) quadrant.
+function setFacingFromDir(e, dir){
+  if (dir === 0 || dir === 1 || dir === 7) {
+    e.facing = 1; e.facingNorth = false; // SE, S, E (facing front-right)
+  } else if (dir === 2 || dir === 3) {
+    e.facing = -1; e.facingNorth = false; // SW, W (facing front-left)
+  } else if (dir === 4) {
+    e.facing = -1; e.facingNorth = true; // NW (facing back-left)
+  } else if (dir === 5 || dir === 6) {
+    e.facing = 1; e.facingNorth = true; // N, NE (facing back-right)
+  }
+}
+
 function mirroredDir(e){
   if (e.facing === -1) {
     if (e.dir === 2) return 0;      // SW -> SE
@@ -777,12 +1221,22 @@ function mirroredDir(e){
 // Per-ram last rolling-creak period that already played (render-side
 // cosmetic state, like workSwingCycles for the villagers' work swing).
 let ramCreakCycles = new Map();
+let grazeCycles = new Map(); // per-sheep grazing-puff cycle (same pattern)
 
 // ---- BATTERING RAM: one physical model, projected per view ----
 // Every facing AND the ground shadow derive from these numbers, so
 // proportions cannot drift between views. World units are local px at
 // scale 1 (RAM_SCALE applied at draw time): X = movement axis (a),
 // Y = width axis (b), Z = up (c).
+// A rolling wheel's turn (rad) for a vehicle whose wheel radius is rPx art px
+// (before UNIT_SCALE): rolled, not spun — the ground it covers (speed ×
+// UNIT_PX_PER_TICK screen px a tick, animTick running at the authored 30/s)
+// over its radius. Viewer-only: never unitMoveSpeed, which can clear the hashed
+// groupSpeed (a render-side write would desync); the ram's rider boost is read here.
+function wheelSpin(e, rPx){
+  const sp = e.speed * (e.utype === 'ram' && e.garrison ? 1 + 0.08 * e.garrison.length : 1);
+  return animTick * sp * UNIT_PX_PER_TICK * (TPS / 30) / (rPx * UNIT_SCALE) + e.id;
+}
 const RAM_DIM = {
   L: 12,      // body half-length (gable planes at a=±L)
   WE: 7,      // eave half-width
@@ -828,27 +1282,218 @@ const RAM_AXES = {
   5: { u:{x:0,y:-0.55},      v:{x:1.25,y:0} },
   6: { u:{x:0.894,y:-0.447}, v:{x:0.72,y:0.36} }
 };
-// Footprint shadow half-extents (local px, before UNIT_SCALE): the ground
-// rectangle |a| ≤ L+OV, |b| ≤ WE+WTH projected through the view basis —
-// |a|·|u| + |b|·|v| per screen axis is exact for an axis-aligned box.
-// 0.92 tucks the shadow slightly inside the silhouette. Mirrored dirs
-// (2/3/4) share their right-facing twin's extents (all terms are |abs|).
-function ramShadowExtent(dir){
-  let m = dir === 2 ? 0 : dir === 3 ? 7 : dir === 4 ? 6 : dir;
-  let ax = RAM_AXES[m] || RAM_AXES[7];
-  // the profile pose is drawn RAM_PROFILE_K larger (size constancy) — its
-  // footprint shadow scales with it
-  let k = m === 7 ? RAM_PROFILE_K : 1;
-  let A = (RAM_DIM.L + RAM_DIM.OV) * RAM_DIM.SCALE * 0.78 * k;
-  let B = (RAM_DIM.WE + RAM_DIM.WTH) * RAM_DIM.SCALE * 0.78 * k;
-  // rx spans the full projected footprint, but ry is flattened to ~half:
-  // an ellipse tall enough to reach the footprint's far corners pools out
-  // BELOW the near wheels (it's centered on the anchor) and reads as the
-  // ram hovering over a puddle. Ground shadows hug the contact line.
-  return {
-    rx: A * Math.abs(ax.u.x) + B * Math.abs(ax.v.x),
-    ry: Math.max(3, (A * Math.abs(ax.u.y) + B * Math.abs(ax.v.y)) * 0.5)
+// ---- WHEELBARROW (the Wheelbarrow tech's tell) ----
+// A true projected box in the trade-cart idiom: authored ONCE in the
+// facing frame (u = push axis, v = ground lateral, c = up); the five
+// authored facings come from mirroredDir, dirs 2/3/4 free via the facing
+// mirror. Drawn about the unit's GROUND CENTER; the barrow extends
+// forward along u (tray TB..TF, axle at AXA, handles back to HA at HZ —
+// the fist points barrowGrips exports for the hand seam). tilt rocks
+// tray + handles + load about the AXLE while the wheel stays planted.
+// FWD shifts the whole composite ahead along u: the handles land AT the
+// body (a+FWD ~ 0) and tray/wheel push out front — authored about the
+// unit center they put the handles BEHIND the villager, arms reaching
+// backward (user caught it at E).
+const BARROW_DIM = { TB:-2.5, TF:7.5, WB:3.1, CB:2.7, CH:6.2, WR:3.6, AXA:12, HA:-8.2, HZ:9.2, FWD:10, WTH:1.5 };
+function barrowAxes(e){
+  let useDir = mirroredDir(e);
+  let ax = useDir === 7 ? SIDE_AXES : (RAM_AXES[useDir] || SIDE_AXES);
+  // RIG_YK-style vertical parallax damping on u ONLY: the barrow
+  // reaches ~22px along u, and full-strength u.y hoists it to head
+  // height on the up-screen diagonals (floating barrow). v spans just
+  // ±WB — damping it flattens the tray until loads leak through. The
+  // head-on facings keep the FULL axis: there u is purely vertical,
+  // and damping it eclipses the whole barrow behind the body at N.
+  let k = useDir === 1 || useDir === 5 ? 1 : 0.4;
+  return { useDir, ax: { u: { x: ax.u.x, y: ax.u.y * k }, v: ax.v } };
+}
+function barrowGrips(e, tilt, shift){
+  const { WB, WR, AXA, HA, HZ, FWD } = BARROW_DIM;
+  let { ax } = barrowAxes(e);
+  let u = ax.u, v = ax.v, sh = shift || 0;
+  const P = (a,b,c) => ({ x: (a+sh+FWD)*u.x + b*v.x, y: (a+sh+FWD)*u.y + b*v.y - c });
+  let axle = P(AXA, 0, WR), ca = Math.cos(tilt || 0), sa = Math.sin(tilt || 0);
+  let nearB = Math.sign(v.y) || 1;
+  const rot = p => ({ x: axle.x + (p.x-axle.x)*ca - (p.y-axle.y)*sa,
+                      y: axle.y + (p.x-axle.x)*sa + (p.y-axle.y)*ca });
+  return [rot(P(HA, nearB*WB, HZ)), rot(P(HA, -nearB*WB, HZ))]; // [near, far]
+}
+function drawBarrow(e, rolling, tilt, loadFn, part, kind, shift){
+  const { TB, TF, WB, CB, CH, WR, AXA, HA, HZ, FWD, WTH } = BARROW_DIM;
+  let { useDir, ax } = barrowAxes(e);
+  let u = ax.u, v = ax.v, headOn = useDir === 1 || useDir === 5;
+  let plow = kind === 'plow', sh = shift || 0;
+  const P = (a,b,c) => ({ x: (a+sh+FWD)*u.x + b*v.x, y: (a+sh+FWD)*u.y + b*v.y - c });
+  let axle0 = P(AXA, 0, WR);
+  X.save();
+  X.translate(axle0.x, axle0.y); X.rotate(tilt || 0); X.translate(-axle0.x, -axle0.y);
+  const lw = 1.1/UNIT_SCALE;
+  const poly = (pts, fill) => {
+    X.fillStyle = fill; X.beginPath();
+    pts.forEach((p,i) => i ? X.lineTo(p.x,p.y) : X.moveTo(p.x,p.y));
+    X.closePath(); X.fill();
+    X.strokeStyle = '#000'; X.lineWidth = lw; X.lineJoin = 'round'; X.stroke();
   };
+  const rod = (p, q, wOut, wIn) => {
+    X.lineCap='round';
+    X.strokeStyle='#000'; X.lineWidth=wOut/UNIT_SCALE;
+    X.beginPath(); X.moveTo(p.x,p.y); X.lineTo(q.x,q.y); X.stroke();
+    X.strokeStyle='#8B4513'; X.lineWidth=wIn/UNIT_SCALE;
+    X.beginPath(); X.moveTo(p.x,p.y); X.lineTo(q.x,q.y); X.stroke();
+    X.lineCap='butt';
+  };
+  // wheel ground drop: at the PROFILE the near leg dips v.y·WB below
+  // the anchor plane but the centered wheel doesn't; the up-screen
+  // diagonals (NE/NW) hover worse — the damped push axis lifts the far
+  // wheel off its ground line (user caught both). Hoisted so the plow
+  // beam can aim at the REAL wheel center, not the undropped axle.
+  const wDrop = useDir === 7 ? WB*0.85*Math.abs(v.y) : useDir === 6 ? 2.2 : 0;
+  const wheel = () => {
+    let axle = { x: axle0.x, y: axle0.y + wDrop };
+    if (headOn) { // edge-on slab — the cart's S/N wheel convention.
+      // full WR height: the 0.8 shave read as a smaller wheel at S
+      // next to the side views' full disc (user caught it)
+      let w2 = 1.3, h2 = WR;
+      X.fillStyle='#33261a'; X.fillRect(axle.x-w2, axle.y-h2, w2*2, h2*2);
+      X.strokeStyle='#1d150c'; X.lineWidth=0.9/UNIT_SCALE;
+      X.strokeRect(axle.x-w2, axle.y-h2, w2*2, h2*2);
+      X.fillStyle='#5a4630'; X.fillRect(axle.x-0.4, axle.y-h2+0.5, 0.8, h2*2-1);
+      return;
+    }
+    // single spoked wheel in the push plane (the cart's chariot wheel).
+    // No extra shear damp here: barrowAxes already damps u.y, and a
+    // second 0.35 left the disc flatter than the tray's edge — the
+    // wheel read as skewed off the barrel at NE/NW (user caught it;
+    // the original squished-oval fix predates the axis-level damping)
+    let wu = { x: u.x, y: u.y };
+    const ringAt = (cx, cy, fill) => {
+      X.save(); X.transform(wu.x,wu.y,0,-1,cx,cy);
+      X.beginPath(); X.arc(0,0,WR,0,Math.PI*2); X.arc(0,0,WR-1.2,0,Math.PI*2,true);
+      X.restore(); X.fillStyle=fill; X.fill('evenodd');
+    };
+    const disc = (cx, cy, rr) => { X.save(); X.transform(wu.x,wu.y,0,-1,cx,cy);
+      X.beginPath(); X.arc(0,0,rr,0,Math.PI*2); X.restore(); };
+    // DEPTH: the far rim face peeks behind the near one along the
+    // lateral axis (the cart's two-face treatment)
+    let bx = axle.x - v.x*WTH, by = axle.y - v.y*WTH;
+    ringAt(bx, by, '#453522');
+    X.strokeStyle='#1d150c'; X.lineWidth=0.7/UNIT_SCALE;
+    disc(bx, by, WR); X.stroke();
+    // near rim face
+    ringAt(axle.x, axle.y, '#6b543a');
+    X.strokeStyle='#1d150c'; X.lineWidth=0.9/UNIT_SCALE;
+    disc(axle.x, axle.y, WR); X.stroke(); disc(axle.x, axle.y, WR-1.2); X.stroke();
+    let ang = typeof rolling === 'number' ? rolling
+            : rolling ? animTick*0.35 + e.id : 0.6;
+    X.strokeStyle='#8a6a4a'; X.lineWidth=1.2/UNIT_SCALE;
+    for (let k = 0; k < 3; k++){
+      let A = ang + k*Math.PI/3, c2 = Math.cos(A), s2 = Math.sin(A), t = WR - 0.9;
+      X.beginPath();
+      X.moveTo(axle.x - c2*wu.x*t, axle.y - (c2*wu.y + s2)*t);
+      X.lineTo(axle.x + c2*wu.x*t, axle.y + (c2*wu.y + s2)*t);
+      X.stroke();
+    }
+    X.fillStyle='#8a6a4a'; X.strokeStyle='#1d150c'; X.lineWidth=0.7/UNIT_SCALE;
+    X.beginPath(); X.arc(axle.x, axle.y, WR*0.25, 0, Math.PI*2); X.fill(); X.stroke();
+  };
+  let nearB = Math.sign(v.y) || 1;   // +v.y side is nearer the camera
+  // the FAR handle rod is its own depth part (drawn BEHIND the villager
+  // on the front facings — the poles straddle the body, user call)
+  if (part === 'farRod') {
+    // plow handles fan from ONE beam root (no tray corners on a plow)
+    rod(P(TB, plow ? 0 : -nearB*WB, CH), P(HA, -nearB*WB, HZ), 2.2, 1.1);
+    X.restore(); return;
+  }
+  let wheelFar = u.y < -0.05;        // pushing up-screen: the wheel is far
+  if (wheelFar) wheel();
+  if (plow) {
+    // PLOW body on the barrow frame: beam from the handle root to the
+    // axle, a polished-steel share digging at the ground line (the
+    // plow IS the Heavy Plow tier tell — always tierSteel(2)), and the
+    // twin handles fanning back from the beam root to the same grips
+    // the barrow uses (fists weld via the shared barrowGrips).
+    // the share is a MOLDBOARD blade in the WHEEL's full convention
+    // (user call): push-plane transform, own projected anchor, two
+    // faces offset along v (the back-rim treatment), a face-on SLAB
+    // shape at S/N (the plane is edge-on there and the true
+    // projection collapses to a sliver), and painter order by the
+    // same far/near rule as the wheel.
+    // V-WEDGE share (user call): both faces meet on one shared KEEL
+    // line at the ground (closed bottom) and spread apart upward along
+    // v — the far face draws BEHIND the beam, the near face in front.
+    // No blade at S/N: the wedge is edge-on there, beam+wheel carry
+    // the head-on read alone.
+    // ONE triangle in plane coordinates for every view (the wheel's
+    // one-circle-one-transform rule); the anchor rides wDrop so blade
+    // and wheel share the same ground line in every facing — the NE
+    // collision was the wheel dropping out from under the blade, not
+    // a shape problem.
+    // the blade takes the BEAM's local share of the wheel drop (~40%
+    // at this a-position), not the full drop: constant triangle height
+    // and constant beam overlap in every view (full drop grew the
+    // blade at NE/E, user caught it); the keel floats a hair above the
+    // dropped-wheel ground there, hidden behind the wheel.
+    // up-screen the dropped wheel leans back over the blade's ground
+    // slot — the blade steps back ~2 along the axis there so the tip
+    // clears the rim (user call)
+    let shB0 = P(useDir === 6 ? 3.6 : 4.6, 0, 0);
+    let shB = { x: shB0.x, y: shB0.y + wDrop*0.39
+                   - (useDir === 6 ? 1.0 : useDir === 0 ? 0.6 : useDir === 7 ? 0.6 : 0) };
+    const shareFace = (ox, oy, fill) => {
+      X.beginPath();
+      X.save(); X.transform(u.x, u.y, 0, -1, shB.x, shB.y);
+      // NE/NW: slight clockwise turn about the apex — counters most of
+      // the axis slope so the keel runs near-parallel to the ground
+      // (user call); other views keep the pure plane keel
+      if (useDir === 6) { X.moveTo(-3.5, 0.15); X.lineTo(3.8, -0.75); }
+      // E/W: ~8deg clockwise about the apex (user call) — the front
+      // tip dips into the soil, the back corner rises
+      else if (useDir === 7) { X.moveTo(-4.15, 0.05); X.lineTo(3.05, -1.0); }
+      else { X.moveTo(-3.5, -0.3); X.lineTo(3.8, -0.3); }
+      X.restore();
+      X.save(); X.transform(u.x, u.y, 0, -1, shB.x + ox, shB.y + oy);
+      X.lineTo(-1.4, 4.6);                             // spread top corner
+      X.restore();
+      X.closePath();
+      X.fillStyle = fill; X.fill();
+      X.strokeStyle = '#000'; X.lineWidth = lw; X.lineJoin = 'round'; X.stroke();
+    };
+    if (!headOn) shareFace(-v.x*WTH, -v.y*WTH, '#8f8f8f');            // far, shadowed
+    rod(P(TB, 0, CH), { x: axle0.x, y: axle0.y + wDrop }, 3.4, 2.0);
+    if (!headOn) shareFace(v.x*WTH*0.7, v.y*WTH*0.7, tierSteel(2));    // near, polished
+    rod(P(TB, 0, CH), P(HA, nearB*WB, HZ), 2.2, 1.1);
+    if (!wheelFar || useDir === 6) wheel();
+    X.restore(); return;
+  }
+  // rear legs to the ground — at the PROFILE the two legs project
+  // nearly on top of each other and read as clutter (user caught it):
+  // keep only the NEAR leg there (same geometry as every other view,
+  // so its length matches), the true pair everywhere else
+  rod(P(TB+0.6, nearB*WB, CB), P(TB+1.2, nearB*WB*0.85, 0), 2.0, 1.0);
+  if (useDir !== 7)
+    rod(P(TB+0.6, -nearB*WB, CB), P(TB+1.2, -nearB*WB*0.85, 0), 2.0, 1.0);
+  // tray, painter order: far wall (shadowed inner) → far end board →
+  // floor → cargo → near end board → near wall (lit)
+  poly([P(TB,-nearB*WB,CB), P(TF,-nearB*WB,CB), P(TF,-nearB*WB,CH), P(TB,-nearB*WB,CH)], '#74593a');
+  let endFarA = u.y < 0 ? TF : TB;
+  poly([P(endFarA,-WB,CB), P(endFarA,WB,CB), P(endFarA,WB,CH), P(endFarA,-WB,CH)], '#74593a');
+  poly([P(TB,-WB,CB), P(TF,-WB,CB), P(TF,WB,CB), P(TB,WB,CB)], '#3a2c1c'); // floor
+  // head-on the handles rise straight through the cargo zone — draw the
+  // near rod BEFORE the load so both poles sit behind the resources
+  // (user call; the split-out far rod is already a behind part)
+  const nearRod = () => rod(P(TB, nearB*WB, CH), P(HA, nearB*WB, HZ), 2.2, 1.1);
+  if (headOn) nearRod();
+  // seat the cargo HIGH: most of each art rides above the tray rim so
+  // the resource reads at a glance (user call), while the near wall
+  // still crops the base — nothing pokes out the underside
+  if (loadFn) loadFn(P((TB+TF)/2, 0, CB+4.4));
+  let endNearA = u.y < 0 ? TB : TF;
+  poly([P(endNearA,-WB,CB), P(endNearA,WB,CB), P(endNearA,WB,CH), P(endNearA,-WB,CH)], '#a07c4c');
+  poly([P(TB,nearB*WB,CB), P(TF,nearB*WB,CB), P(TF,nearB*WB,CH), P(TB,nearB*WB,CH)], '#a07c4c');
+  // near handle rod, over everything (side views)
+  if (!headOn) nearRod();
+  if (!wheelFar) wheel();
+  X.restore();
 }
 
 // ---- BATTERING RAM (covered ram, AoE2 style) ----
@@ -890,7 +1535,7 @@ function drawRamBody(e){
   if (ramming) {
     // ~45-tick cycle (1.5 game-s): a heavy ram swings SLOWLY (AoE2), and
     // the per-cycle impact boom needs the slower cadence to not spam.
-    let phRaw = tick*0.022 + e.id*0.4;
+    let phRaw = animTick*0.022 + e.id*0.4;
     let ph = ((phRaw % 1) + 1) % 1;
     if (ph < 0.7) dLog = -4 * (ph/0.7);
     else { let t = (ph-0.7)/0.3; dLog = -4 + 8 * (1 - Math.pow(1-t,3)); }
@@ -910,7 +1555,7 @@ function drawRamBody(e){
     }
   }
   // Idle log sway — the only idle motion; a vehicle sits still.
-  else if (!rolling) dLog = Math.sin(tick*0.05 + e.id) * 0.4;
+  else if (!rolling) dLog = Math.sin(animTick*0.05 + e.id) * 0.4;
 
   // Rolling creak: a slow wooden groan while the ram is moving — sparse
   // (every ~3 game-s, staggered per unit), skipped at 4x speed on odd
@@ -918,7 +1563,7 @@ function drawRamBody(e){
   // (ramCreakCycles), not by a frame landing on an exact tick — frames
   // skip ticks, and an equality check dropped most creaks.
   if (rolling && !window._maskDraw && window.playSound) {
-    let ck = Math.floor((tick + e.id * 7) / 90);
+    let ck = Math.floor((animTick + e.id * 7) / 90);
     if (ramCreakCycles.get(e.id) !== ck) {
       if (ramCreakCycles.has(e.id) && (GAME_SPEED < 4 || ck % 2 === 0)) playSound('ram_creak', e.x, e.y);
       ramCreakCycles.set(e.id, ck);
@@ -927,7 +1572,7 @@ function drawRamBody(e){
 
   X.save();
   // Rolling: gentle sway, no head-bob (suppressed in drawUnit's translate)
-  if (rolling) X.translate(0, Math.sin(tick*0.2 + e.id) * 0.5);
+  if (rolling) X.translate(0, Math.sin(animTick*0.2 + e.id) * 0.5);
   X.translate(recoil * u.x, recoil * u.y);
   X.scale(SCALE, SCALE); // the ram out-bulks even the horse units
 
@@ -943,7 +1588,7 @@ function drawRamBody(e){
   // v), then the lit wooden face with rotating cross-spokes and a hub sits
   // on the outer end. Head-on facings see a wheel edge-on: only the tread
   // shows, a dark rounded slab.
-  let wheelRot = tick*0.35 + e.id;
+  let wheelRot = wheelSpin(e, RAM_DIM.WR * RAM_DIM.SCALE);
   let wheel = (a, b, r) => {
     let thin = (useDir === 1 || useDir === 5);
     if (thin) {
@@ -1281,17 +1926,17 @@ function drawRamBody(e){
 function drawQuadruped(e, p){
   let useDir = mirroredDir(e);
   let moving = e.path && e.path.length>0 && !e.corpseRot;
-  let walk = moving ? Math.sin(tick*0.4 + e.id)*p.walkAmp : 0; // oxen plod: shorter, slower stride
+  let walk = moving ? Math.sin(animTick*0.4 + e.id)*p.walkAmp : 0; // oxen plod: shorter, slower stride
   let idle = !moving;
-  let swish = e.corpseRot ? 0 : Math.sin(tick*0.08+e.id)*(idle?0.18:0.07);
-  let nod = (idle && !e.corpseRot) ? Math.sin(tick*0.05+e.id)*0.5 : 0; // a dead ox's head doesn't bob
+  let swish = e.corpseRot ? 0 : Math.sin(animTick*0.08+e.id)*(idle?0.18:0.07);
+  let nod = (idle && !e.corpseRot) ? Math.sin(animTick*0.05+e.id)*0.5 : 0; // a dead ox's head doesn't bob
   const coat=p.coat, dark=p.maneC, legC=p.legC, hornC=p.hornC;
   const LT=p.legTop, LB=p.legBot;
   X.save(); X.translate(0,-1); X.scale(p.scale, p.scale);
   X.lineJoin='round';
 
   // One FILLED crescent horn (single path, outer-silhouette stroke only —
-  // the old fat stroke-curls read as white bananas): broad at the poll,
+  // fat stroke-curls read as white bananas): broad at the poll,
   // sweeping out along sd, tapering to an upturned tip.
   let horn=(bx,by,sd,s,rot=0)=>{
     X.save(); X.translate(bx,by); if(rot) X.rotate(rot);
@@ -1448,11 +2093,12 @@ function drawQuadruped(e, p){
 // (drawQuadruped) at the front. Gold cargo rides hidden under the canvas.
 // Drawn inside drawUnit's translated + mirrored + scaled context, coords local
 // px around the ground anchor.
-// The trade cart's ONE canonical load: crate + sack + gold, drawn
-// identically on the living cart (every trade phase — kept constant for
-// visual consistency) and through the death sequence. `pos(key, dx, dy)`
-// maps each piece's local offset from the load anchor to its final center,
-// which lets the wreck spill the pieces apart along their own paths.
+// The trade cart's ONE canonical load: crate + sack + gold. Drawn only while
+// the cart is LOADED (carrying>0) — the sack appears when it picks up gold at
+// the far market and vanishes when it deposits at home, mirroring a villager's
+// carried resource. Shared by the living cart and the death-spill sequence.
+// `pos(key, dx, dy)` maps each piece's local offset from the load anchor to its
+// final center, which lets the wreck spill the pieces apart along their paths.
 function drawCartLoad(pos, lw){
   X.lineJoin='round';
   // one BIG plump grain sack, tied at the neck — clean over busy
@@ -1489,7 +2135,7 @@ function drawTradeCartBody(e){
 
   // Rolling creak — same cadence/counter as the ram.
   if (rolling && !window._maskDraw && window.playSound) {
-    let ck = Math.floor((tick + e.id*7)/90);
+    let ck = Math.floor((animTick + e.id*7)/90);
     if (ramCreakCycles.get(e.id) !== ck) {
       if (ramCreakCycles.has(e.id) && (GAME_SPEED<4 || ck%2===0)) playSound('ram_creak', e.x, e.y);
       ramCreakCycles.set(e.id, ck);
@@ -1497,7 +2143,7 @@ function drawTradeCartBody(e){
   }
 
   X.save();
-  if (rolling) X.translate(0, Math.sin(tick*0.2+e.id)*0.5);
+  if (rolling) X.translate(0, Math.sin(animTick*0.2+e.id)*0.5);
   // Recenter the RIG on the unit anchor: the ox extends far ahead of the
   // bed, so shift the whole drawing back along the facing axis — the
   // anchor (pathing position, shadow, selection) sits mid-composite.
@@ -1571,7 +2217,7 @@ function drawTradeCartBody(e){
   };
   // Wheels — proper spoked cartwheels: wooden rim ring, dark interior seen
   // through the spokes, 3 rotating spoke diameters, hub. Two axles (±WA/2).
-  let wheelRot = tick*0.35 + e.id;
+  let wheelRot = wheelSpin(e, CART_DIM.WR * CART_DIM.SCALE);
   // Edge-on wheel slab for the head-on facings (also used by the head-on
   // body assembly below).
   let slab = (a,b,r,w2) => {
@@ -1653,14 +2299,14 @@ function drawTradeCartBody(e){
   let nearB = WB+0.4, farB = -(WB+0.4);
   if (useDir===1 || useDir===5) {
     // Head-on (S/N): a real shallow open box using the projection's depth
-    // (u.y=±0.55) instead of the old single flat plank — far board first,
+    // (u.y=±0.55) instead of a single flat plank — far board first,
     // thin side rails, floor, cargo peeking over the far rim, then the near
     // board and near wheels over it. Widened (like the ram's head-on v) so
     // it doesn't read as a narrow spike.
     let nearA = useDir===5 ? -L : L; // the end toward the camera
     let farA  = -nearA;
-    // modest widening only (WB*1.25): the old 1.7 made the head-on cart
-    // read wider than every other view
+    // modest widening only (WB*1.25): at 1.7 the head-on cart reads
+    // wider than every other view
     let hw = WB*1.25, fw = hw*0.82, fh = CH*0.9; // far board slightly narrower/shorter (depth cue)
     // the single axle's two big wheel slabs, behind the body at its sides
     [-1,1].forEach(sd=>slab(0, sd*hw, WR, WTH*1.2));
@@ -1674,7 +2320,7 @@ function drawTradeCartBody(e){
     // the load sits IN the box, sunk low between the boards: the near
     // board occludes its base, the top rising only to the far rim
     let cc=P(0,0,CH-3.4);
-    drawCartLoad((k,dx,dy)=>({x:cc.x+dx, y:cc.y+dy}), lw);
+    if (e.carrying > 0) drawCartLoad((k,dx,dy)=>({x:cc.x+dx, y:cc.y+dy}), lw);
     // near board: team-colored outer face with plank seams
     let bl=P(nearA,-hw,CB), br=P(nearA,hw,CB), tl=P(nearA,-hw,CH), tr=P(nearA,hw,CH);
     poly([bl,br,tr,tl], tc);
@@ -1695,7 +2341,7 @@ function drawTradeCartBody(e){
     // the near wall, so the wall occludes its base and only the tops peek
     // over the rim
     let cc=P(0,0,CH-2.2);
-    drawCartLoad((k,dx,dy)=>({x:cc.x+dx, y:cc.y+dy}), lw);
+    if (e.carrying > 0) drawCartLoad((k,dx,dy)=>({x:cc.x+dx, y:cc.y+dy}), lw);
     // near structure (open top): team-colored outer faces — side wall lit
     // (tc), end board shaded (tcD)
     wall(1, tc);
@@ -1712,12 +2358,12 @@ function drawTradeCartBody(e){
 // the body's facing and half-width across it. Radially-symmetric units set
 // len==wid (facing then doesn't matter); elongated ones (mounts, bear) are
 // longer along the body so their shadow stretches in profile and shortens
-// head-on. Tuned so the humanoid footprint matches the old 6×3-ish ellipse.
+// head-on. Tuned so the humanoid footprint matches a 6×3-ish ellipse.
 const UNIT_SHADOW = {
   villager:{len:0.17,wid:0.17}, militia:{len:0.18,wid:0.18},
   spearman:{len:0.18,wid:0.18}, archer:{len:0.18,wid:0.18},
   scout:{len:0.42,wid:0.19},    knight:{len:0.44,wid:0.21},
-  bear:{len:0.34,wid:0.26},     sheep:{len:0.17,wid:0.17},
+  bear:{len:0.34,wid:0.26},     sheep:{len:0.17,wid:0.17},     dragon:{len:1.2,wid:0.8},
   sheep_carcass:{len:0.22,wid:0.2},
   // Ram: big, elongated, and its wheels touch AT the anchor line (yoff),
   // unlike foot units whose feet sit ~6px above it. Goes through the same
@@ -1734,7 +2380,7 @@ const UNIT_SHADOW = {
 // upper-left light, matching the building shadows (buildingShadowPath).
 function drawUnitShadow(e, sx, sy){
   let f = UNIT_SHADOW[e.utype] || {len:0.18, wid:0.18};
-  let ta = (e.dir || 0) * Math.PI / 4; // facing angle in TILE space
+  let ta = e.faceAng !== undefined ? e.faceAng : (e.dir || 0) * Math.PI / 4; // facing angle in TILE space (the dragon: its own smooth heading)
   X.save();
   X.fillStyle = 'rgba(0,0,0,0.28)';
   // No horizontal nudge: units are small enough that the buildings' cast-
@@ -1759,7 +2405,8 @@ function drawUnitShadow(e, sx, sy){
     let slen = Math.hypot(fxv*HALF_TW - fyv*HALF_TW, fxv*HALF_TH + fyv*HALF_TH) || 1;
     // the head-on basis compresses the facing axis (|u|=0.55), so the
     // drawn rig only shifts ~55% as far on S/N — match it
-    let ulen = (e.dir === 1 || e.dir === 5) ? 0.55 : 1;
+    const faceOnView = e.dir === 1 || e.dir === 5; // S/N — forward is the view axis
+    let ulen = faceOnView ? 0.55 : 1;
     for (const [px, l, w2] of [[-22*ulen, 0.42, 0.30], [11.5*ulen, 0.30, 0.24]]) {
       X.save(); X.translate(px/slen, 0); X.scale(l, w2);
       X.beginPath(); X.arc(0, 0, 1, 0, Math.PI * 2); X.fill();
@@ -1773,22 +2420,686 @@ function drawUnitShadow(e, sx, sy){
   X.restore();
 }
 
+// Walking THIS frame: a queued path, or the press-to-contact ring re-armed
+// on this exact tick (js/logic.js).
+function isUnitMoving(e){ return e.path.length>0 || e.pressWalk===tick; }
+
+// Bear body — same per-archetype seam as drawRamBody/drawTradeCartBody, which
+// drawUnit's dispatch already delegates to.
+function drawBearBody(e){
+  let moving = isUnitMoving(e);
+  // Bear — heavy quadruped in the sheep's style: one black silhouette
+  // pass, then fur fill. Side profile; X.scale(e.facing,…) flips it.
+  let attacking = inActionRange(e) && !moving;
+  // The maul rides the REAL bite clock (atkCooldown, like the archer's
+  // draw): crouch back → rear up on the haunches → explosive pounce
+  // landing EXACTLY when the damage tick fires → jaws-in hold with a
+  // worrying head-shake that decays.
+  let bearRof = (UNITS.bear && UNITS.bear.rof) || T30(60), bcd = e.atkCooldown || 0;
+  let bp = attacking ? 1 - bcd/bearRof : 0;   // 0 just bitten → 1 next bite
+  let justBit = attacking && bcd > bearRof*0.85;
+  let bsnap = attacking ? Math.max(0, (bcd - bearRof*0.85)/(bearRof*0.15)) : 0;
+  let lunge = 0, rear = 0, jaw = 0;
+  if (justBit) { lunge = 4.5; jaw = Math.max(0, bsnap*2 - 1); rear = -0.2; } // CHOMP: jaws snap shut as the bite lands
+  else if (attacking && bp > 0.85) { let t = (bp-0.85)/0.15; lunge = -1.2+5.7*t*t; rear = 0.8*(1-t)-0.2; jaw = t; }
+  else if (attacking && bp > 0.55) { let t = (bp-0.55)/0.3; lunge = -1.2*t; rear = 0.8*t; }
+  let sway = moving ? Math.sin(animTick*0.25+e.id)*0.05 : 0;
+  sway += Math.sin(animTick*1.4)*0.05*bsnap; // worrying the prey — decays after the bite
+  let breath = (!moving && !attacking && !e.corpseRot) ? Math.sin(animTick*0.05+e.id)*0.25 : 0;
+
+  // Direction resolution (same scheme as the sheep): the canvas is already
+  // mirrored via X.scale(e.facing,…), so left-pointing dirs map onto their
+  // right-pointing twins and we only author 4 poses:
+  //   'front' (S: face to camera), 'back' (N: rump to camera),
+  //   'side'  (E/SE profile),      'backside' (NE: profile from behind)
+  let useDir = mirroredDir(e);
+  let pose = e.dir === 1 ? 'front' : e.dir === 5 ? 'back' :
+             (useDir === 6) ? 'backside' : 'side';
+  // Profile head sits a touch lower when heading SE (downhill toward camera)
+  let hx = useDir === 0 ? 7.8 : 8.6;
+  let hy = useDir === 0 ? -3.2 : -4.2;
+
+  X.save();
+  X.rotate(sway);
+  // Pounce along the view axis when facing the camera/away — a sideways
+  // lunge in the S/N poses reads as a side attack.
+  if (pose === 'front') X.translate(0, lunge*0.7);
+  else if (pose === 'back') X.translate(0, -lunge*0.7);
+  else X.translate(lunge, 0);
+  // Cartoon proportions: one huge boulder of a body on tiny stub legs.
+  X.scale(1.4, 1.4);
+  // Rearing up on the haunches: profiles pivot at the hind paws; head-on
+  // poses stretch tall instead (anchored at the paws).
+  if (rear) {
+    if (pose === 'side' || pose === 'backside') {
+      X.translate(-7, 4); X.rotate(-rear*0.22); X.translate(7, -4);
+    } else {
+      X.translate(0, 5); X.scale(1, 1 + rear*0.12); X.translate(0, -5);
+    }
+  }
+
+  // Stub-leg walk cycle: comically short, thick legs mostly hidden
+  // under the body mass — just paws scuttling along
+  let lw1 = moving ? Math.sin(animTick*0.5+e.id)*1.8 : 0;
+  let lw2 = -lw1;
+  // Pounce stance: front paws reach into the strike, hind paws brace back
+  let pounce = Math.max(0, Math.min(1, jaw));
+  let legPts = [[-6,2,lw1-1.8*pounce],[-3,2.5,lw2-1.2*pounce],[2.5,2.5,lw1+1.6*pounce],[5.5,2,lw2+2.2*pounce]];
+  X.beginPath();
+  legPts.forEach(p=>{ X.moveTo(p[0],p[1]); X.lineTo(p[0]+p[2],5); });
+  X.strokeStyle='#000'; X.lineWidth=4.2/UNIT_SCALE; X.lineCap='round'; X.stroke();
+  X.strokeStyle='#4e3520'; X.lineWidth=2.6/UNIT_SCALE; X.stroke(); X.lineCap='butt';
+  X.fillStyle='#241a10';
+  legPts.forEach(p=>{ X.beginPath(); X.ellipse(p[0]+p[2],5.2,1.6,1,0,0,Math.PI*2); X.fill(); });
+
+  // Body silhouette pass (black, slightly inflated), then fur fill —
+  // one giant boulder body with a high shoulder hump; head/ears/tail
+  // move with the pose, the boulder itself barely changes (that's the
+  // luxury of cartoon mass: it reads from every angle).
+  const bearShapes = (grow)=>{
+    if(pose==='front'||pose==='back'){
+      X.beginPath(); X.ellipse(-0.2,-4.5,8.4+grow+breath,7.4+grow+breath,0,0,Math.PI*2); X.fill(); // body (narrower head-on)
+      X.beginPath(); X.arc(0,-9.8,5+grow+breath,0,Math.PI*2); X.fill();       // hump reads as shoulders
+      if(pose==='front'){
+        X.beginPath(); X.arc(0,-4.2,4.4+grow,0,Math.PI*2); X.fill();          // head, face to camera
+        X.beginPath(); X.arc(-3.4,-8.2,1.7+grow,0,Math.PI*2); X.fill();       // ears
+        X.beginPath(); X.arc(3.4,-8.2,1.7+grow,0,Math.PI*2); X.fill();
+      } else {
+        X.beginPath(); X.arc(0,-11.2,3.6+grow,0,Math.PI*2); X.fill();         // back of head over the hump
+        X.beginPath(); X.arc(-3,-13.6,1.6+grow,0,Math.PI*2); X.fill();        // ears
+        X.beginPath(); X.arc(3,-13.6,1.6+grow,0,Math.PI*2); X.fill();
+        X.beginPath(); X.arc(0,1.2,2.2+grow,0,Math.PI*2); X.fill();           // stub tail on the rump
+      }
+    } else {
+      X.beginPath(); X.ellipse(-0.5,-4.5,9.6+grow+breath,7.4+grow+breath,0,0,Math.PI*2); X.fill(); // huge body
+      X.beginPath(); X.arc(-3.5,-9.5,4.6+grow+breath,0,Math.PI*2); X.fill();  // shoulder hump
+      X.beginPath(); X.arc(-10.2,-4,2+grow,0,Math.PI*2); X.fill();            // stub tail
+      if(pose==='backside'){
+        X.beginPath(); X.arc(6.4,-7.2,3.2+grow,0,Math.PI*2); X.fill();        // head turned away, higher
+        X.beginPath(); X.arc(4.8,-10.4,1.6+grow,0,Math.PI*2); X.fill();       // ear
+      } else {
+        X.beginPath(); X.arc(hx,hy,3.4+grow,0,Math.PI*2); X.fill();           // head (small, set low)
+        X.beginPath(); X.ellipse(hx+2.8,hy+0.8,2.2+grow,1.6+grow,0.2,0,Math.PI*2); X.fill(); // snout
+        X.beginPath(); X.arc(hx-1.6,hy-3.2,1.6+grow,0,Math.PI*2); X.fill();   // tiny ear
+      }
+    }
+  };
+  X.fillStyle='#000';
+  bearShapes(1.1);
+  X.fillStyle='#6b4a2c';
+  bearShapes(0);
+  // Fur shading: light along the massive back, ground shade under the belly
+  X.fillStyle='rgba(255,235,200,0.28)';
+  if(pose==='front'||pose==='back') X.beginPath(), X.ellipse(0,-10.2,4.4,2.4,0,0,Math.PI*2), X.fill();
+  else X.beginPath(), X.ellipse(-2.5,-9.5,5.8,2.6,0.15,0,Math.PI*2), X.fill();
+  X.fillStyle='rgba(40,25,10,0.30)';
+  X.beginPath(); X.ellipse(-0.5,0.8,7.6,2.2,0,0,Math.PI*2); X.fill();
+
+  // Face per pose: tan muzzle, black nose, tiny eyes (cartoon rule: the
+  // smaller the eyes on the bigger the body, the better), inner ears
+  if(pose==='front'){
+    X.fillStyle='#4a3018';
+    X.beginPath(); X.arc(-3.4,-8.2,0.9,0,Math.PI*2); X.fill();  // inner ears
+    X.beginPath(); X.arc(3.4,-8.2,0.9,0,Math.PI*2); X.fill();
+    X.fillStyle='#c9a578';
+    X.beginPath(); X.ellipse(0,-2.6,2.4,1.9,0,0,Math.PI*2); X.fill(); // muzzle
+    X.fillStyle='#000';
+    X.beginPath(); X.arc(0,-3.4,1.05,0,Math.PI*2); X.fill();    // nose
+    X.beginPath(); X.arc(-1.9,-5.4,0.65,0,Math.PI*2); X.fill(); // eyes
+    X.beginPath(); X.arc(1.9,-5.4,0.65,0,Math.PI*2); X.fill();
+  } else if(pose==='back'){
+    X.fillStyle='#4a3018';
+    X.beginPath(); X.arc(-3,-13.6,0.85,0,Math.PI*2); X.fill();  // inner ears
+    X.beginPath(); X.arc(3,-13.6,0.85,0,Math.PI*2); X.fill();
+    X.fillStyle='#c9a578';
+    X.beginPath(); X.arc(0,1.2,1.3,0,Math.PI*2); X.fill();      // tail tuft
+  } else if(pose==='backside'){
+    X.fillStyle='#4a3018';
+    X.beginPath(); X.arc(4.8,-10.4,0.85,0,Math.PI*2); X.fill(); // inner ear
+  } else {
+    X.fillStyle='#c9a578';
+    X.beginPath(); X.ellipse(hx+2.8,hy+0.8,1.6,1.1,0.2,0,Math.PI*2); X.fill();
+    X.fillStyle='#000';
+    X.beginPath(); X.arc(hx+4.3,hy+0.5,1,0,Math.PI*2); X.fill();    // nose
+    X.beginPath(); X.arc(hx+0.4,hy-0.8,0.65,0,Math.PI*2); X.fill(); // eye
+    X.fillStyle='#4a3018';
+    X.beginPath(); X.arc(hx-1.6,hy-3.2,0.85,0,Math.PI*2); X.fill(); // inner ear
+  }
+
+  // Mauling: the mouth opens through the pounce and snaps shut on the bite —
+  // one plain red shape (head-on an oval, in profile a wedge off the snout).
+  if(jaw > 0.05){
+    X.fillStyle='#a03030';
+    if(pose==='front'){ X.beginPath(); X.ellipse(0,-2.2,1.4,0.3+1.3*jaw,0,0,Math.PI*2); X.fill(); }
+    else if(pose==='side'){
+      let ja = 0.6*jaw;
+      X.beginPath(); X.moveTo(hx+1.6,hy+1.2); X.lineTo(hx+5.2,hy+0.9); X.lineTo(hx+1.6+3.4*Math.cos(ja),hy+1.2+3.4*Math.sin(ja)); X.closePath(); X.fill();
+    }
+  }
+  X.restore();
+}
+
+// ---- The dragon's animation, shared by the 2D art (drawDragonBody) and the 3D model (js/pov3d.js) ----
+// Viewer-only: nothing here is read by the sim. dragonAnim advances one dragon's animation state `a` by dt seconds
+// and returns its pose numbers — the same numbers both views draw — plus this frame's events (footfalls, the slam,
+// smoke) for each view's own dust and shake. The caller keeps a.phase / a.gait (its stride, from how far the
+// dragon was drawn to move) and may set a.roarT (a scripted roar, 0..1), a.noRoar, a.lab.
+const DRAGON_LEG_PHASE = [0, 0.5, 0.25, 0.75].map(f => f * 2 * Math.PI); // legs 0/1 hind, 2/3 fore
+// The stride: each leg's foot, x −1 (back) … 1 (ahead), its lift, and the heel roll (late stance heel up, toes down
+// in the swing).
+function dragonStride(phase, i){
+  const q = (((phase + DRAGON_LEG_PHASE[i] - Math.PI / 2) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+  if (q < Math.PI) return { q, x: 1 - 2 * q / Math.PI, up: 0, roll: Math.max(0, (q / Math.PI - 0.75) / 0.25) * 0.5 };
+  const u = q / Math.PI - 1; return { q, x: -Math.cos(u * Math.PI), up: Math.sin(u * Math.PI), roll: -0.45 * Math.sin(u * Math.PI) };
+}
+function dragonAnim(e, a, dt){
+  const D = a.dr || (a.dr = { ck: 0, sp: {}, q: [0, 0, 0, 0] }); D.ck += dt; const ck = D.ck, idp = e.id || 0;
+  const spring = (k, target, K, z) => { let S = D.sp[k]; if (!S) S = D.sp[k] = { x: target, v: 0 };
+    const w = Math.sqrt(K); for (let left = dt; left > 1e-6; left -= 0.02) { const h = Math.min(0.02, left); S.v += (-K * (S.x - target) - 2 * z * w * S.v) * h; S.x += S.v * h; } return S.x; };
+  const kick = (k, v) => { if (D.sp[k]) D.sp[k].v += v; };
+  const moving = isUnitMoving(e), asleep = !e.awake && !moving, rof = UNITS.dragon.rof, cd = e.atkCooldown || 0;
+  const since = e.breathTick !== undefined ? tick - e.breathTick : 1e9, blast = since < T30(26) ? since / T30(26) : 1;
+  const bl = blast < 1 ? Math.sin(Math.min(1, blast * 3) * Math.PI / 2) * (1 - blast) ** 0.6 : 0;   // the thrust: snaps in, fades
+  const inhale = e.target && !moving && blast >= 1 && cd > 0 && cd < rof * 0.35 ? 1 - cd / (rof * 0.35) : 0;
+  if (e.target && e.target !== D.prey && a.roarT === undefined && !a.noRoar) D.roarAt = ck; D.prey = e.target;
+  const ro = a.roarT ?? (D.roarAt !== undefined ? Math.min(1, (ck - D.roarAt) / 1.9) : 1);
+  const sm = x => x * x * (3 - 2 * x), rr = ro < 0.3 ? sm(ro / 0.3) : ro < 0.62 ? 1 : ro < 0.74 ? 1 - ((ro - 0.62) / 0.12) ** 2 : 0; // rear up, hold, drop
+  const roarJaw = ro > 0.18 && ro < 0.8 ? Math.sin((ro - 0.18) / 0.62 * Math.PI) : 0;
+  a.sleep = (a.sleep ?? (asleep ? 1 : 0)) + ((asleep ? 1 : 0) - (a.sleep ?? 0)) * Math.min(1, dt * 0.7);  // heavy: wakes and settles slowly
+  const sl = sm(Math.max(0, Math.min(1, a.sleep))), g = a.gait, awake = 1 - sl;
+  // breathing: slow and deep asleep, the chest swelling for the breath
+  const bp = ck / (sl > 0.5 ? 4.6 : 3.2) * 2 * Math.PI + idp, br0 = 0.5 + 0.5 * Math.sin(bp);
+  const chest = (0.045 * sl + 0.035 * awake) * br0 + 0.08 * inhale - 0.04 * bl;
+  // footfalls: each leg's touchdown (its stride phase wrapping) sinks the body and rolls it
+  const ev = { steps: [], slam: false, snore: false, smoke: false };
+  for (let i = 0; i < 4; i++) { const q = dragonStride(a.phase, i).q;
+    if (g > 0.5 && q < D.q[i] - Math.PI) { kick('sink', -0.55); kick('roll', (i % 2 ? 1 : -1) * 0.25); ev.steps.push(i); }
+    D.q[i] = q; }
+  if (D.lastRo !== undefined && D.lastRo < 0.74 && ro >= 0.74) { kick('sink', -1.6); kick('pitch', -0.6); kick('tailZ1', 1.4); kick('tailZ2', 2); ev.slam = true; } // the slam (the tail bounces)
+  D.lastRo = ro;
+  // body: sink and bounce, roll with the steps and an idle weight shift, pitch about the hind feet (rear up / lurch)
+  const sink = spring('sink', 0, 55, 0.3);
+  const shift = Math.sin(ck * 0.33 + idp) * awake * (1 - g);                              // idle: the weight rocks from side to side
+  const roll = spring('roll', Math.sin(a.phase) * 0.05 * g + shift * 0.04, 14, 0.45);
+  const pitch = spring('pitch', 0.22 * rr + 0.05 * inhale - 0.09 * bl + Math.sin(2 * a.phase) * 0.02 * g, 22, 0.42);
+  // neck and head: lag behind the body (a head of that weight swings through), look round slowly when idle
+  const lookT = (0.45 * Math.sin(ck * 0.29 + idp) + 0.2 * Math.sin(ck * 0.71 + 2)) * awake * (1 - g * 0.6) * (1 - rr) * (1 - bl);
+  const neck = spring('neck', -1.25 * sl + 0.12 * inhale - 0.4 * bl + 0.12 * rr - 0.5 * pitch - Math.sin(2 * a.phase + 0.6) * 0.12 * g + Math.sin(ck * 0.5 + idp) * 0.06 * awake * (1 - g), 16, 0.42);
+  const neckY = spring('neckY', lookT, 7, 0.55);
+  const head = spring('head', 0.8 * sl - 0.22 * inhale + 0.3 * bl - 0.3 * roarJaw, 26, 0.45);
+  const headX = spring('headX', Math.sin(ck * 23) * 0.05 * roarJaw, 60, 0.3);                  // the roar shakes it
+  const snore = sl * 0.07 * Math.max(0, Math.sin(bp + Math.PI));
+  const jaw = spring('jaw', 0.65 * bl + 0.75 * roarJaw + snore + 0.06 * inhale, 70, 0.55);
+  const blink = Math.max(0, Math.sin(ck * 0.83 + idp)) ** 60, eyeShut = Math.max(sl, blink);
+  // tail, three joints: the swing travels down it — each joint later and wider than the last, on a softer spring,
+  // so the tip whips; pressed down when it rears (and bounced by the slam); curled round the body asleep
+  const wave = k => Math.sin(ck * 0.45 + idp - k * 0.9) * (0.16 + 0.07 * k) * awake * (1 - g) - Math.sin(a.phase - k * 0.8) * (0.14 + 0.06 * k) * g
+    + Math.sin(ck * 4 - k * 1.2) * 0.12 * bl * k;                                                // (the breath's recoil lashes the tip)
+  const tail = [0, 1, 2].map(k => spring('tail' + k, wave(k) + [0.6, 0.65, 0.7][k] * sl, [5, 7, 9][k], [0.35, 0.3, 0.25][k]));
+  const tailZ = [0, 1, 2].map(k => spring('tailZ' + k, [-0.12 * sl - 0.4 * rr + 0.12 * bl, -0.1 * sl - 0.12 * rr + 0.06 * bl, 0.08 * sl + 0.1 * rr][k], [9, 8, 10][k], [0.4, 0.35, 0.3][k]));
+  const spade = spring('spade', 0.6 * sl * Math.max(0, Math.sin(ck * 0.3 + idp)) ** 12 * Math.sin(ck * 9) + 0.3 * tail[2], 40, 0.3); // twitching in its sleep
+  // wings: open to the roar and the breath (half at the inhale), beating as it roars; folded they rise with the breathing
+  const shuffle = 0.3 * Math.max(0, Math.sin(ck * 0.17 + idp)) ** 10 * (1 - g);                // now and then it resettles its wings
+  const open = Math.max(0, Math.min(1, spring('wing', Math.max(bl, rr, 0.55 * inhale, e.target && !moving ? 0.3 : 0, shuffle) * awake, 12, 0.5)));
+  const beat = Math.sin(ck * 7) * 0.35 * rr + spring('wingBob', 0, 30, 0.3) * 0.5 + Math.sin(2 * a.phase - 0.8) * 0.08 * g; // folded wings bounce with the steps
+  if (g > 0.5) kick('wingBob', -Math.abs(D.sp.sink ? D.sp.sink.v : 0) * dt * 3);
+  const flame = bl > 0.02 ? Math.min(1, blast * 6) : 0;
+  ev.snore = sl > 0.8 && D.lastBp !== undefined && Math.sin(D.lastBp + Math.PI) < 0.95 && Math.sin(bp + Math.PI) >= 0.95;
+  ev.smoke = blast > 0.6 && blast < 1 && Math.random() < dt * 6;
+  D.lastBp = bp;
+  const reach = rr * (0.7 + 0.3 * Math.sin(ck * 5)) + 0.3 * inhale;                              // fore legs paw the air as it rears
+  a.lie = sl;
+  // the body's offset: pitched about the hind feet, lurched by the breath, crouched by the inhale, lowered asleep
+  const hind = -0.45, bodyX = hind - hind * Math.cos(pitch) + 0.1 * bl - 0.04 * inhale, bodyY = -hind * Math.sin(pitch) + sink * 0.12 - 0.07 * inhale - 0.4 * sl;
+  return { ck, sl, awake, g, rr, inhale, bl, blast, chest, sink, roll, pitch, bodyX, bodyY, neck, neckY, head, headX, jaw, eyeShut,
+    tail, tailZ, spade, open, beat, flame, reach, ev };
+}
+// The dragon's wing, bat-style, laid out for fold fd (0 spread … 1 folded; tuck 0..1 tighter still, asleep): joints
+// shoulder S → elbow E → wrist W, fingertips F0..F2, the hip attach B, and the membrane's scallop points M*. In the
+// wing's own plane: x chord (back −), y span (out), z its normal (the pleats step out of it in turn, by side sd).
+const DRAGON_WING = { S: [0.05, 0], LU: 0.38, LF: 0.5, LK: [0.82, 0.74, 0.6], B: [-0.78, 0.04],
+  // joint angles from the span axis, + toward the back: spread (arm out, fingers fanned) → folded (upper arm back,
+  // forearm doubled forward, fingers doubled back along it, drawn together)
+  spread: { u: -0.1, f: -0.05, k: [0.05, 0.62, 1.2] }, folded: { u: 1.15, f: -1.35, k: [1.72, 1.8, 1.88] },
+  tucked: { u: 1.4, f: -1.62, k: [1.92, 1.97, 2.02] },                                    // asleep: folded tighter still, fingers pulled in
+  pleat: [0.07, 0.02, 0.07] };                                                             // folded, the fingers step out of the plane in turn: the membrane between zig-zags
+function dragonWingJoints(fd, tuck, sd){
+  const WG = DRAGON_WING, e = fd * fd * (3 - 2 * fd), A = (a, b) => a + (b - a) * e, P = WG.spread, T = WG.tucked, F0 = WG.folded;
+  const mixQ = (a, b) => a + (b - a) * tuck, Q = { u: mixQ(F0.u, T.u), f: mixQ(F0.f, T.f), k: F0.k.map((v, k) => mixQ(v, T.k[k])) }; // the fold, tucked tighter as it sleeps
+  const dir = th => [-Math.sin(th), Math.cos(th)], at = (o, th, L, z = 0) => { const v = dir(th); return [o[0] + v[0] * L, o[1] + v[1] * L, z]; };
+  const S = [WG.S[0], WG.S[1], 0], u = A(P.u, Q.u), E = at(S, u, WG.LU), f = u + A(P.f, Q.f), W = at(E, f, WG.LF);
+  const F = WG.LK.map((L, k) => at(W, f + A(P.k[k], Q.k[k]), L * A(1, 0.72 - 0.15 * tuck), sd * WG.pleat[k] * e));
+  const B = [WG.B[0], WG.B[1], 0], mid = (a, b, t, z) => [(a[0] + b[0]) / 2 + (W[0] - (a[0] + b[0]) / 2) * t, (a[1] + b[1]) / 2 + (W[1] - (a[1] + b[1]) / 2) * t, z];
+  return { S, E, W, B, F0: F[0], F1: F[1], F2: F[2], M01: mid(F[0], F[1], 0.28, (F[0][2] + F[1][2]) / 2 - sd * 0.03 * e), M23: mid(F[1], F[2], 0.28, (F[1][2] + F[2][2]) / 2 - sd * 0.03 * e), M3: mid(F[2], B, 0.2, F[2][2] / 2) };
+}
+// The dragon's legs: a two-bone reach (thigh th, shin sh, the knee bending by `bend`: hind forward +1, fore back −1)
+// from the hip to a foot at (tx, ty) (hip-relative, y up): the hip and knee angles, 0 = straight down, + toward +x.
+const DRAGON_FOOT = 0.1; // the ankle's height over the sole
+const DRAGON_LEG = { hind: { th: 0.31, sh: 0.33, bend: 1 }, fore: { th: 0.28, sh: 0.32, bend: -1 } };
+// Lying: the hip ~0.22 over the ground, so each joint rests ON it beside the body. Hind: thigh down-forward to the
+// knee on the ground at the flank, shin folded straight back along it (the foot under it). Fore, a sphinx's: upper
+// arm down-back to the elbow at the chest's side, forearm out forward along the ground.
+const DRAGON_TUCK = { hind: { hip: 0.78, knee: -Math.PI / 2 - 0.78, out: 0.42 }, fore: { hip: -0.67, knee: Math.PI / 2 + 0.67, out: 0.36 } };
+function dragonLegIK(L, tx, ty){
+  const d = Math.max(Math.abs(L.th - L.sh) + 0.02, Math.min(L.th + L.sh - 1e-3, Math.hypot(tx, ty)));
+  const base = Math.atan2(tx, -ty), a1 = Math.acos((L.th * L.th + d * d - L.sh * L.sh) / (2 * L.th * d)), k = Math.acos((L.th * L.th + L.sh * L.sh - d * d) / (2 * L.th * L.sh));
+  return [base + L.bend * a1, -L.bend * (Math.PI - k)];
+}
+// The dragon's animation sounds (its footfalls, the slam, snoring), from the view that draws it — the 2D map or the
+// 3D world view, never both. Viewer-only.
+function dragonSounds(e, ev){
+  if (!window.playSound) return;
+  if (ev.steps.length) playSound('dragon_step', e.x, e.y);
+  if (ev.slam) playSound('dragon_slam', e.x, e.y);
+  if (ev.snore) playSound('dragon_snore', e.x, e.y);
+}
+const DRAGON_COL = { plate: '#2c5a28', plateLit: '#4b8341', plateDark: '#24491f', body: '#3f7a3a', dark: '#35693a', bone: '#2c5a28', belly: '#dcc47e', membrane: '#6f9e4c', horn: '#efe3c4', eye: '#ffd23a' };
+// The dragon in 2D: the 3D model's own shape (the same model numbers as js/pov3d.js), posed by the same dragonAnim
+// numbers, and projected at its real heading into the map's isometric view — so it reads from every direction as
+// it turns (side, three-quarter, front, back). Round parts project to ellipses, limbs to tubes, plates and wings to
+// polygons; they're painted far to near under one black silhouette, with a flat cel shadow on each rounded part.
+// (to scale with the map, as the 3D model: a model unit is a tile — HALF_TW across the iso view, the 3D view's HPX
+// tall — divided by the UNIT_SCALE drawUnit applies)
+// the underside shade: its tint, and each group's lift (model units: the band's depth under a level part)
+const DRAGON_SHADE = { col: '#0c280c', alpha: 0.2, trunk: 0.2, neck: 0.07, face: 0.07, tail: 0.08, leg: 0.06, wing: 0.14 };
+let dragonShadeC = null;
+const DRAGON_K = HALF_TW * Math.SQRT2 * Math.sqrt(3) / 2 / UNIT_SCALE, DRAGON_C = HALF_TW / UNIT_SCALE, dragon2D = new Map();
+const DRAGON_STRIDE = 0.5 * Math.sin(0.42), DRAGON_LIFT = 0.08; // (GAIT.dragon, js/pov3d.js)
+function drawDragonBody(e){
+  // the animation: its own clock and stride per dragon; the selection/outline mask pass re-draws the last pose
+  let a = dragon2D.get(e.id);
+  if (!a) dragon2D.set(e.id, a = { phase: 0, gait: 0, px: e.x, py: e.y, last: 0 });
+  if (!window._maskDraw || !a.P) {
+    const now = performance.now(), dt = a.last ? Math.min(0.1, (now - a.last) / 1000) : 1 / 60; a.last = now;
+    const moved = Math.hypot(e.x - a.px, e.y - a.py); a.px = e.x; a.py = e.y;
+    a.gait += ((moved > 1e-4 ? 1 : 0) - a.gait) * Math.min(1, dt * 8);
+    a.phase += moved / (4 * DRAGON_STRIDE) * 2 * Math.PI;
+    a.P = dragonAnim(e, a, dt);
+    if (!e.corpseRot) {
+      for (const i of a.P.ev.steps) spawnParticles(e.x, e.y, '#b7a27a', 2, 0.02, 0.6);
+      if (a.P.ev.slam) spawnParticles(e.x, e.y, '#b7a27a', 8, 0.04, 1.4);
+      dragonSounds(e, a.P.ev);
+    }
+  }
+  const P = a.P, C = DRAGON_COL, K = DRAGON_K, cos = Math.cos, sin = Math.sin, TAU = Math.PI * 2;
+  X.save(); if (e.facing === -1) X.scale(-1, 1);                                                     // (it draws its own heading: undo drawUnit's mirror)
+  // --- the projection: model (x forward, y up, z to its left) → world by its heading → the isometric screen (px) ---
+  const hd0 = e.faceAng !== undefined ? e.faceAng : (e.dir !== undefined ? e.dir : 7) * Math.PI / 4;
+  const fx = cos(hd0), fy = sin(hd0), sx = -fy, sy = fx, Cc = DRAGON_C, RR = Cc * Math.SQRT2;          // (a tube's thickness: the across-the-view scale, not the vertical)
+  const Pf = [(fx - fy) * Cc, (fx + fy) * Cc / 2], Ps = [(sx - sy) * Cc, (sx + sy) * Cc / 2];
+  const pj = (x, y, z) => [x * Pf[0] + z * Ps[0], x * Pf[1] + z * Ps[1] - y * K];
+  const depth = (x, z) => x * (fx + fy) + z * (sx + sy);                                             // nearer the viewer = larger
+  const cp = cos(P.pitch), spc = sin(P.pitch);
+  const bm = (x, y, z = 0) => [P.bodyX + x * cp - y * spc, P.bodyY + x * spc + y * cp, z];           // body frame → model
+  // --- path helpers (screen px); every subpath wound one way, so overlapping pieces of one path never cut holes ---
+  const polyP = pts => { let a2 = 0; for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; a2 += p[0] * q[1] - q[0] * p[1]; }
+    const o = a2 < 0 ? pts.slice().reverse() : pts; X.moveTo(o[0][0], o[0][1]); for (let i = 1; i < o.length; i++) X.lineTo(o[i][0], o[i][1]); X.closePath(); };
+  const ellP = (cx, cy, rx, ry, rot = 0) => { X.moveTo(cx + rx * cos(rot), cy + rx * sin(rot)); X.ellipse(cx, cy, Math.max(0.5, rx), Math.max(0.5, ry), rot, 0, TAU); };
+  // An ellipsoid in a frame f (f(x, y, z) → model point: the body's, the head's, the jaw's) seen on screen: its three
+  // radii projected as vectors, and the ellipse they span (from their covariance) — turned with the part, not boxed
+  // upright, so a long jaw seen at a slant stays a slim slanted oval.
+  const ellOf = (f, x, y, z, rx, ry, rz) => { const o = pj(...f(x, y, z));
+    const ax = [f(x + rx, y, z), f(x, y + ry, z), f(x, y, z + rz)].map(m => { const q = pj(...m); return [q[0] - o[0], q[1] - o[1]]; });
+    let sxx = 0, sxy = 0, syy = 0; for (const [u, v] of ax) { sxx += u * u; sxy += u * v; syy += v * v; }
+    const tr = (sxx + syy) / 2, dd = Math.sqrt(((sxx - syy) / 2) ** 2 + sxy * sxy), rot = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+    return [o[0], o[1], Math.sqrt(tr + dd), Math.sqrt(Math.max(0, tr - dd)), rot, f(x, y, z)]; };
+  const tubeP = (a0, a1, ra, rb) => { const dx = a1[0] - a0[0], dy = a1[1] - a0[1], l = Math.hypot(dx, dy) || 1e-6, nx = -dy / l, ny = dx / l;
+    ellP(a0[0], a0[1], ra, ra); ellP(a1[0], a1[1], rb, rb);
+    polyP([[a0[0] + nx * ra, a0[1] + ny * ra], [a1[0] + nx * rb, a1[1] + ny * rb], [a1[0] - nx * rb, a1[1] - ny * rb], [a0[0] - nx * ra, a0[1] - ny * ra]]); };
+  // the parts: { col, path, d (depth), clip }
+  // (grp: the shading group — trunk, head, tail, a leg — the parts added now belong to)
+  let grp = null; const parts = [], add = (col, d, path, clip) => { const p = { col, d, path, clip, g: grp }; parts.push(p); return p; };
+  // an ellipsoid (model centre, radii along its x / y / z) → the ellipse it projects to
+  const blob = (col, m, rx, ry, rz) => { const [cx, cy] = pj(...m);
+    const hx = Math.hypot(rx * Pf[0], rz * Ps[0]), hy = Math.hypot(rx * Pf[1], ry * K, rz * Ps[1]);
+    add(col, depth(m[0], m[2]), () => ellP(cx, cy, hx, hy)).bb = [cx - hx, cy - hy, cx + hx, cy + hy]; };
+  // (bb: a part's screen box, for its group's underside shade — see the paint pass)
+  const blobF = (col, f, x, y, z, rx, ry, rz, dBias = 0) => { const [cx, cy, a, b2, rot, m] = ellOf(f, x, y, z, rx, ry, rz);
+    add(col, depth(m[0], m[2]) + dBias, () => ellP(cx, cy, a, b2, rot)).bb = [cx - a, cy - a, cx + a, cy + a]; };
+  const tube = (col, m0, m1, r0, r1, dBias = 0) => { const a0 = pj(...m0), a1 = pj(...m1), r = Math.max(r0, r1) * RR;
+    add(col, (depth(m0[0], m0[2]) + depth(m1[0], m1[2])) / 2 + dBias, () => tubeP(a0, a1, r0 * RR, r1 * RR)).bb =
+      [Math.min(a0[0], a1[0]) - r, Math.min(a0[1], a1[1]) - r, Math.max(a0[0], a1[0]) + r, Math.max(a0[1], a1[1]) + r]; };
+  const poly = (col, ms, dBias = 0) => { const pts = ms.map(m => pj(...m)), xs = pts.map(q => q[0]), ys = pts.map(q => q[1]);
+    add(col, ms.reduce((s, m) => s + depth(m[0], m[2]), 0) / ms.length + dBias, () => polyP(pts)).bb = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]; };
+  const s1 = 1 + P.chest * 0.35, s2 = 1 + P.chest;
+  // body: haunch, barrel, chest (model 3D's blobs), the back plates
+  grp = 'trunk';
+  blobF(C.body, bm, -0.52 * s1, 0.72 * s2, 0, 0.36 * s1, 0.36 * s2, 0.4 * s1);
+  blobF(C.body, bm, -0.12 * s1, 0.74 * s2, 0, 0.62 * s1, 0.42 * s2, 0.44 * s1);
+  blobF(C.body, bm, 0.28 * s1, 0.8 * s2, 0, 0.5 * s1, 0.46 * s2, 0.46 * s1); grp = null;
+  const bodyD = depth(bm(0, 0)[0], 0);
+  // the back plates: a row of fins stood along the spine — each set on the body's top line where it stands (so the row
+  // follows the back in one line), a triangle ±0.5·h at the base, h tall, leaning back, with a little thickness so seen
+  // end-on they're slim wedges, not lines; tallest mid-back, in the dark plate colour
+  const topAt = x => Math.max(...[[-0.52, 0.72, 0.36, 0.36], [-0.12, 0.74, 0.62, 0.42], [0.28, 0.8, 0.5, 0.46]]
+    .map(([cx, cy, rx, ry]) => { const u = (x - cx * s1) / (rx * s1); return u * u < 1 ? cy * s2 + ry * s2 * Math.sqrt(1 - u * u) : -9; }));
+  const hull2 = pts => { pts = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]); const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const lo = [], up = []; for (const q of pts) { while (lo.length > 1 && cr(lo[lo.length - 2], lo[lo.length - 1], q) <= 0) lo.pop(); lo.push(q); }
+    for (let n = pts.length - 1; n >= 0; n--) { const q = pts[n]; while (up.length > 1 && cr(up[up.length - 2], up[up.length - 1], q) <= 0) up.pop(); up.push(q); }
+    return lo.slice(0, -1).concat(up.slice(0, -1)); };
+  // Set where the 3D model sets them (the front ones sunk deep in the chest): only what stands above the back line
+  // shows, so each triangle is clipped to the body's top — else the buried ones read as saw-teeth up the neck.
+  for (let k = 0; k < 5; k++) { const x = 0.42 - k * 0.24, h = (0.36 - Math.abs(k - 2) * 0.07) * s2, y = (1.14 - Math.abs(k - 2) * 0.05) * s2, ln = 0.3;
+    // the 3D plate's shape: a three-sided cone (base corners at radius 0.55·h, squashed to 0.35 across), so edge-on it's a spike
+    const r = 0.55 * h, base = [[0, 0.35 * r], [0.866 * r, -0.175 * r], [-0.866 * r, -0.175 * r]], pts = [];
+    const put = (u, v, w) => { const px = x + u * cos(ln) - v * sin(ln), py = y + u * sin(ln) + v * cos(ln); pts.push([px, Math.max(py, topAt(px) - 0.03), w]); };
+    for (let n = 0; n < 3; n++) for (let t = 0; t <= 8; t++) { const [u0, w0] = base[n], [u1, w1] = base[(n + 1) % 3];
+      put(u0 * (1 - t / 8), h * t / 8, w0 * (1 - t / 8)); put(u0 + (u1 - u0) * t / 8, 0, w0 + (w1 - w0) * t / 8); }
+    if (pts.every(([px, py]) => py <= topAt(px) - 0.02)) continue;
+    const ms = pts.map(([px, py, w]) => bm(px, py, w));
+    const out = hull2(ms.map(m => pj(...m)));
+    // two-tone, split down its ridge (apex to the middle of its base): the half toward the light (the view's left) lit,
+    // the other dark — so every spike reads as a solid from any side, never a flat cut-out lost against the wing bones
+    const P3 = (u, v) => { const px = x + u * cos(ln) - v * sin(ln), py = y + u * sin(ln) + v * cos(ln); return pj(...bm(px, Math.max(py, topAt(px) - 0.03), 0)); };
+    const ap = P3(0, h), bs = P3(0, 0);
+    add(C.plate, Math.max(ms.reduce((a, m) => a + depth(m[0], m[2]), 0) / ms.length + 0.01, bodyD + 0.037), () => polyP(out)).draw = () => { // (over the far wing's root, under the near one's)
+      X.save(); X.beginPath(); polyP(out); X.clip(); X.fillStyle = C.plateDark; X.fill();
+      X.fillStyle = C.plateLit; X.beginPath(); X.moveTo(ap[0], ap[1] - 50); X.lineTo(ap[0], ap[1]); X.lineTo(bs[0], bs[1]); X.lineTo(bs[0], bs[1] + 50); X.lineTo(Math.min(ap[0], bs[0]) - 80, bs[1] + 50);
+      X.lineTo(Math.min(ap[0], bs[0]) - 80, ap[1] - 50); X.closePath(); X.fill(); X.restore(); };
+    parts[parts.length - 1].strokeOnly = () => polyP(out); }
+  // the belly, as the 3D model's: a pale ellipsoid pressed into the body, seen only where its surface lies outside the
+  // body's blobs (from the side a strip along the underside, from the front the bottom of the chest, from above nothing).
+  // Traced as a smooth outline: its viewer-facing half, laid out polar (ρ from the silhouette rim at 1 in to the middle at
+  // 0, round by φ); along each spoke the visible run starts at the rim and ends where it enters the body (found by
+  // bisection). Its whole ellipse joins the silhouette (where it pokes below the body, that's the outline).
+  { const B = [0.02 * s1, 0.46 * s2, 0, 0.62 * s1, 0.2 * s2, 0.34 * s1];
+    const bodies = [[-0.52 * s1, 0.72 * s2, 0.36 * s1, 0.36 * s2, 0.4 * s1], [-0.12 * s1, 0.74 * s2, 0.62 * s1, 0.42 * s2, 0.44 * s1], [0.28 * s1, 0.8 * s2, 0.5 * s1, 0.46 * s2, 0.46 * s1]];
+    const hv = [(fx + fy) / Math.SQRT2 * cos(Math.PI / 6), sin(Math.PI / 6), (sx + sy) / Math.SQRT2 * cos(Math.PI / 6)];  // toward the viewer (model), the iso 30°
+    const hb2 = [hv[0] * cp + hv[1] * spc, -hv[0] * spc + hv[1] * cp, hv[2]];                                          // … in the body frame
+    // the unit-sphere frame: w the facing pole (a surface point u faces the viewer when u·w > 0), e1/e2 across it
+    let w = [hb2[0] / B[3], hb2[1] / B[4], hb2[2] / B[5]]; const wl = Math.hypot(...w); w = w.map(v => v / wl);
+    const ax = Math.abs(w[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0], cr = (u, v) => [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    let e1 = cr(w, ax); const l1 = Math.hypot(...e1); e1 = e1.map(v => v / l1); const e2 = cr(w, e1);
+    const at = (r, f) => { const c = cos(f) * r, sn = sin(f) * r, h = Math.sqrt(Math.max(0, 1 - r * r));
+      return [0, 1, 2].map(n => B[n] + B[n + 3] * (c * e1[n] + sn * e2[n] + h * w[n])); };
+    const seen = c => !bodies.some(([x, y, rx, ry, rz]) => ((c[0] - x) / rx) ** 2 + ((c[1] - y) / ry) ** 2 + (c[2] / rz) ** 2 < 1);
+    const scr = (r, f) => pj(...bm(...at(r, f)));
+    const inner = f => { let r = 1; while (r > 0 && seen(at(r - 0.05, f))) r -= 0.05; if (r <= 0) return 0;          // the run's inner end
+      let lo = r - 0.05, hi = r; for (let n = 0; n < 7; n++) { const m = (lo + hi) / 2; if (seen(at(m, f))) hi = m; else lo = m; } return hi; };
+    const NF = 72, fs = Array.from({ length: NF }, (_, n) => n / NF * TAU), rim = fs.map(f => seen(at(1, f)));
+    const edge = (f0, f1) => { let lo = f0, hi = f1; const s0 = seen(at(1, f0)); for (let n = 0; n < 7; n++) { const m = (lo + hi) / 2; if (seen(at(1, m)) === s0) lo = m; else hi = m; } return (lo + hi) / 2; };
+    const loops = [];
+    if (rim.every(Boolean)) {                                                    // the whole rim shows (seen head-on): the ellipse, less any hidden middle
+      const inn = fs.map(inner); loops.push(fs.map(f => scr(1, f)));
+      if (inn.some(r => r > 0.02)) loops.push(fs.map((f, n) => scr(inn[n], f)).reverse());
+    } else if (rim.some(Boolean)) {                                              // runs of spokes whose rim shows: rim out, inner ends back
+      const k0 = rim.indexOf(false);
+      for (let j = 0; j < NF; j++) { const k = (k0 + j) % NF; if (!rim[k] || rim[(k + NF - 1) % NF]) continue;
+        const run = []; let m = k; while (rim[m % NF] && run.length < NF) { run.push(m % NF); m++; }
+        const fa = edge(fs[(k + NF - 1) % NF] + (k === 0 ? -TAU : 0), fs[k]), fb = edge(fs[(m - 1) % NF], fs[(m - 1) % NF] + TAU / NF);
+        const out = [scr(1, fa)], back = [];
+        for (const q of run) { out.push(scr(1, fs[q])); back.push(scr(inner(fs[q]), fs[q])); }
+        loops.push(out.concat([scr(1, fb)], back.reverse())); }
+    }
+    const [ecx, ecy, ea, eb, erot] = ellOf(bm, B[0], B[1], B[2], B[3], B[4], B[5]);
+    // (loops drawn as given — a hidden middle is wound against the rim, so nonzero fill leaves it a hole)
+    const lp = L => { X.moveTo(L[0][0], L[0][1]); for (let n = 1; n < L.length; n++) X.lineTo(L[n][0], L[n][1]); X.closePath(); };
+    if (loops.length) parts.push({ col: C.belly, d: bodyD + 0.02, strokeOnly: () => ellP(ecx, ecy, ea, eb, erot), path: () => { for (const L of loops) lp(L); } }); }
+  // tail: from inside the haunch, three joints (their swing turning it sideways, their lift bending it), the spade
+  { let x = -0.8, y = 0.74, z = 0, yaw = 0, pit = 0;
+    grp = 'tail'; tube(C.body, bm(-0.45, 0.74), bm(-0.8, 0.74), 0.34, 0.26);
+    [[-0.6, -0.16, 0.26, 0.17], [-0.6, -0.2, 0.17, 0.1], [-0.55, 0.02, 0.1, 0.05]].forEach(([dx, dy, r0, r1], k) => {
+      yaw += P.tail[k]; pit += P.tailZ[k]; const L = Math.hypot(dx, dy), ang = Math.atan2(dy, dx) + pit;
+      const nx = x + cos(ang) * L * cos(yaw), ny = y + sin(ang) * L, nz = z + L * sin(yaw);
+      tube(C.body, bm(x, y, z), bm(nx, ny, nz), r0, r1); x = nx; y = ny; z = nz; }); grp = null;
+    // the spade, as the 3D one: a dark arrowhead on the tail's tip pointing on along it — a flattened cone (its
+    // base round the tip, 0.13 across, its point 0.3 on), the outline of its projected corners, so it reads from any side
+    const back = [-cos(pit) * cos(yaw), -sin(pit), sin(yaw)], bl = Math.hypot(...back); back.forEach((v, n) => back[n] = v / bl);
+    const up0 = [0, 1, 0], sdv = [back[1] * up0[2] - back[2] * up0[1], back[2] * up0[0] - back[0] * up0[2], back[0] * up0[1] - back[1] * up0[0]];
+    const sl = Math.hypot(...sdv) || 1; sdv.forEach((v, n) => sdv[n] = v / sl);
+    const upv = [sdv[1] * back[2] - sdv[2] * back[1], sdv[2] * back[0] - sdv[0] * back[2], sdv[0] * back[1] - sdv[1] * back[0]];
+    const at = (d, a, b2) => bm(x + back[0] * d + sdv[0] * a + upv[0] * b2, y + back[1] * d + sdv[1] * a + upv[1] * b2, z + back[2] * d + sdv[2] * a + upv[2] * b2);
+    const cone = [at(0.3, 0, 0)]; for (let n = 0; n < 8; n++) { const t = n / 8 * TAU; cone.push(at(-0.02, cos(t) * 0.1, sin(t) * 0.14)); }
+    const cp2 = hull2(cone.map(m => pj(...m)));
+    add(C.plate, cone.reduce((a, m) => a + depth(m[0], m[2]), 0) / cone.length + 0.02, () => polyP(cp2)); }
+  // neck and head: the neck swings by P.neck, turns by P.neckY (a yaw at its root), the head by P.head, the jaw by P.jaw
+  const nr = P.neck, ny = P.neckY;
+  const nk = (x, y) => { const lx = x * cos(nr) - y * sin(nr), ly = x * sin(nr) + y * cos(nr); return bm(0.6 + lx * cos(ny), 0.95 + ly, -lx * sin(ny)); };
+  const hr = nr + P.head, hb = [0.5 * cos(nr) - 0.78 * sin(nr), 0.5 * sin(nr) + 0.78 * cos(nr)];
+  const hdp = (x, y, z = 0) => { const lx = hb[0] + x * cos(hr) - y * sin(hr), ly = hb[1] + x * sin(hr) + y * cos(hr); return bm(0.6 + lx * cos(ny) - z * sin(ny), 0.95 + ly, -lx * sin(ny) + z * cos(ny)); };
+  const jaw2 = Math.min(0.6, P.jaw), jr = hr - jaw2, jb = [0.08, -0.12];                             // (as the 3D jaw, capped: never gaping into a big pale patch)
+  const jwp = (x, y, z = 0) => { const hx = jb[0] + x * cos(jr - hr) - y * sin(jr - hr), hy = jb[1] + x * sin(jr - hr) + y * cos(jr - hr); return hdp(hx, hy, z); };
+  { const pts = [[-0.25, -0.2], [0, 0], [0.18, 0.3], [0.3, 0.58], [0.42, 0.74]].map(q => nk(...q)), r = [0.3, 0.26, 0.22, 0.18, 0.15];
+    grp = 'neck'; for (let i = 0; i < 4; i++) tube(C.body, pts[i], pts[i + 1], r[i], r[i + 1]); }
+  // the mouth, simply: the pale lower jaw (as the 3D model's) swings down on its hinge under the snout — a rigid oval
+  // turning, nothing else drawn, so it never stretches or warps as it opens
+  { const [cx, cy, a2, b2, rot] = ellOf(jwp, 0.2, -0.02, 0, 0.2, 0.045, 0.09), sm = hdp(0.32, -0.02);   // the jaw: always just behind the snout
+    add(C.belly, depth(sm[0], sm[2]) - 0.005, () => ellP(cx, cy, a2, b2, rot)); }                     // (it hangs under it: the snout covers its top from every side)
+  grp = 'face';                                                                                       // (its own band: in the neck's it'd fall inside the neck)
+  blobF(C.body, hdp, 0.06, 0.02, 0, 0.24, 0.19, 0.2);                                                // skull
+  blobF(C.body, hdp, 0.32, -0.02, 0, 0.24, 0.12, 0.14); grp = null;                                  // snout
+  // the horns, exactly the 3D model's: an even round tube (radius 0.042, round-ended) along its curve from the top back
+  // of the skull, both of them, each sorted by its own depth (the far one's root tucks behind the skull, as in 3D)
+  for (const zs of [-1, 1]) { const q = t => hdp((1 - t) ** 2 * -0.02 + 2 * (1 - t) * t * -0.15 + t * t * -0.28, (1 - t) ** 2 * 0.15 + 2 * (1 - t) * t * 0.27 + t * t * 0.25,
+      zs * ((1 - t) ** 2 * 0.1 + 2 * (1 - t) * t * 0.15 + t * t * 0.19));
+    for (let k = 0; k < 3; k++) tube(C.horn, q(k / 3), q((k + 1) / 3), 0.042, 0.042); }
+  // legs: the shared reach in the body frame (x, y), each on its side (z), splaying out as it lies down
+  const leg = (i, z) => {
+    const hind = i < 2, L = DRAGON_LEG[hind ? 'hind' : 'fore'], hx = hind ? -0.45 : 0.36, hy = 0.62, st = dragonStride(a.phase, i);
+    const hw = bm(hx, hy), tw = [hw[0] + st.x * DRAGON_STRIDE * P.g, DRAGON_FOOT + DRAGON_LIFT * 1.8 * st.up * P.g];
+    const bx = tw[0] - P.bodyX, by = tw[1] - P.bodyY; let tx = bx * cp + by * spc - hx, ty = -bx * spc + by * cp - hy;
+    if (!hind && P.reach > 0.2) { const pw = P.ck * 5.5 + (z > 0 ? 0 : Math.PI), px = 0.2 + 0.14 * sin(pw), py = -0.3 + 0.1 * cos(pw), w = Math.min(1, (P.reach - 0.2) * 2);
+      tx += (px - tx) * w; ty += (Math.max(ty, py) - ty) * w; }
+    let [h, k] = dragonLegIK(L, tx, ty); const T = DRAGON_TUCK[hind ? 'hind' : 'fore']; h += (T.hip - h) * P.sl; k += (T.knee - k) * P.sl;
+    const kx = hx + sin(h) * L.th, ky = hy - cos(h) * L.th, ax = kx + sin(h + k) * L.sh, ay = ky - cos(h + k) * L.sh;
+    const out = T.out * P.sl * Math.sign(z) * 0.5, zk = z + out * 0.6, za = z + out;
+    const col = C.body, r0 = hind ? 0.17 : 0.13, r1 = hind ? 0.11 : 0.095; grp = 'leg' + i;
+    blob(col, bm(hx, hy - 0.03, z), hind ? 0.21 : 0.16, hind ? 0.22 : 0.17, hind ? 0.17 : 0.14);   // the haunch / shoulder at the leg's top (as 3D)
+    tube(col, bm(hx, hy, z), bm(kx, ky, zk), r0, r1, -0.05); tube(col, bm(kx, ky, zk), bm(ax, ay, za), r1, 0.065, -0.04);
+    const A = bm(ax, ay, za), fa = -P.pitch + dragonStride(a.phase, i).roll * P.g * (1 - P.sl);
+    const ft = (x, y) => [A[0] + x * cos(fa) - y * sin(fa), A[1] + x * sin(fa) + y * cos(fa), za];      // the foot, flat on the ground
+    const fF = (x, y, z) => { const q = ft(x, y); return [q[0], q[1], za + z]; };                    // the foot's frame (turned with it)
+    blobF(col, fF, 0.07, -DRAGON_FOOT * 0.5, 0, 0.17, DRAGON_FOOT * 0.55, 0.14); grp = null;         // a broad round foot
+    for (const cz of [-0.06, 0.06]) tube(C.horn, fF(0.19, -DRAGON_FOOT * 0.62, cz), fF(0.27, -DRAGON_FOOT * 0.95, cz * 1.15), 0.04, 0.014, 0.02); // two fat claws
+  };
+  leg(0, -0.34); leg(1, 0.34); leg(2, -0.32); leg(3, 0.32);
+  // wings: the shared joints; the plane stood up by its angle, out from its side as it spreads
+  const wingAng = (1.35 + (0.35 + P.beat - 1.35) * P.open) * (1 - P.sl) + (0.45 + P.chest * 1.5) * P.sl;
+  for (const sd of [-1, 1]) {
+    const J = dragonWingJoints(1 - P.open, P.sl, sd), up = sin(wingAng), outw = cos(wingAng);
+    const at = q => bm(0.1 + q[0], 1.08 + q[1] * up, sd * (0.32 + q[1] * outw));
+    const Q = {}; for (const k in J) Q[k] = at(J[k]);
+    const fo = Math.max(0, Math.min(1, (P.open - 0.15) / 0.35));                                       // folded: one clean fold; the hand opens out of it
+    const n0 = parts.length; grp = 'wing' + (sd > 0 ? 1 : 0);                                        // (the membrane's band: along its trailing edge)
+    poly(C.membrane, [Q.S, Q.E, Q.W, fo > 0 ? Q.F2 : Q.W, Q.M3, Q.B], 0.05 * sd);
+    if (fo > 0) poly(C.membrane, [Q.W, Q.F0, Q.M01, Q.F1, Q.M23, Q.F2], 0.05 * sd); grp = null;
+    tube(C.bone, Q.S, Q.E, 0.045, 0.04, 0.06 * sd); tube(C.bone, Q.E, Q.W, 0.04, 0.032, 0.06 * sd);
+    for (const f of ['F0', 'F1', 'F2']) tube(C.bone, Q.W, Q[f], 0.024, 0.018, 0.06 * sd);          // dark bones rim the wing (as 3D): its edge reads even folded
+    // (it's rooted on top of the back: the far wing too stands over the barrel, so it never sorts behind it — its
+    // root stays attached to the body instead of the membrane floating free above it)
+    // the far one (by where its root sits, this view) just under the back plates, the near one over them
+    const r0 = at([0, 0]), r1 = bm(0.1, 1.08, -sd * 0.32), far = depth(r0[0], r0[2]) < depth(r1[0], r1[2]);
+    for (let n = n0; n < parts.length; n++) parts[n].d = Math.max(parts[n].d, bodyD + (far ? 0.03 : 0.045));
+  }
+  // the flame: a flickering cone from the jaws along the head's line — a part like the rest, sorted just past the mouth
+  // (seen from behind, the head and body cover it; from the front it's over everything), never outlined
+  if (P.flame > 0 && !window._maskDraw) {
+    const len = 2.1 * P.flame, f0 = pj(...jwp(0.45, 0.02)), f1 = pj(...jwp(0.45 + len, 0.02)), fm = jwp(0.75, 0.02);
+    const dx = f1[0] - f0[0], dy = f1[1] - f0[1], l = Math.hypot(dx, dy) || 1, nx = -dy / l, ny2 = dx / l, fl = n => sin(P.ck * 30 + n * 2.1) * 1.5;
+    const cone = (col, w, k) => { const tx = f0[0] + dx * k, ty = f0[1] + dy * k; X.fillStyle = col; X.beginPath(); X.moveTo(f0[0], f0[1]);
+      X.quadraticCurveTo(f0[0] + dx * k * 0.5 + nx * w * 0.5, f0[1] + dy * k * 0.5 + ny2 * w * 0.5 + fl(1), tx + nx * w, ty + ny2 * w + fl(2));
+      X.quadraticCurveTo(tx + dx / l * 3, ty + dy / l * 3 + fl(3), tx - nx * w, ty - ny2 * w + fl(4));
+      X.quadraticCurveTo(f0[0] + dx * k * 0.5 - nx * w * 0.5, f0[1] + dy * k * 0.5 - ny2 * w * 0.5 + fl(5), f0[0], f0[1]); X.closePath(); X.fill(); };
+    parts.push({ d: depth(fm[0], fm[2]), draw: () => { X.save(); X.globalAlpha *= 0.9; cone('#c8280a', 0.5 * K, 1); cone('#ff8a1e', 0.34 * K, 0.85); cone('#ffe36a', 0.18 * K, 0.6); X.restore(); } });
+  }
+  // --- paint: every part stroked black (the silhouette), then filled far to near (flat colours: kept simple) ---
+  parts.sort((p, q) => p.d - q.d);
+  // the bear's idiom, lightly: a flat darker band along each group's underside — the group's outline less itself lifted
+  // (trunk, neck+head, tail, each leg: one band per group, so tube joints don't scallop). Masked on a scratch canvas,
+  // laid on as its group's nearest part is painted (nearer parts then cover it).
+  const last = new Map(); for (const pt of parts) if (pt.g) last.set(pt.g, pt);
+  const shadeGroup = g => { if (window._maskDraw) return;
+    const ms = parts.filter(p => p.g === g && p.bb && (p.col === C.body || p.col === C.dark || p.col === C.membrane)); if (!ms.length) return;
+    const lift = DRAGON_SHADE[g.replace(/\d/, '')] * K, m = X.getTransform();
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of ms) for (const [u, v] of [[p.bb[0], p.bb[1]], [p.bb[2], p.bb[1]], [p.bb[0], p.bb[3]], [p.bb[2], p.bb[3]]]) {
+      const dx = m.a * u + m.c * v + m.e, dy = m.b * u + m.d * v + m.f; x0 = Math.min(x0, dx); y0 = Math.min(y0, dy); x1 = Math.max(x1, dx); y1 = Math.max(y1, dy); }
+    x0 = Math.floor(x0) - 2; y0 = Math.floor(y0) - 2; const w = Math.ceil(x1) + 2 - x0, h = Math.ceil(y1) + 2 - y0;
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return;
+    if (!dragonShadeC) dragonShadeC = document.createElement('canvas');
+    if (dragonShadeC.width < w || dragonShadeC.height < h) { dragonShadeC.width = Math.max(dragonShadeC.width, w); dragonShadeC.height = Math.max(dragonShadeC.height, h); }
+    const O = dragonShadeC.getContext('2d'), X0 = X; O.setTransform(1, 0, 0, 1, 0, 0); O.clearRect(0, 0, w, h);
+    O.setTransform(m.a, m.b, m.c, m.d, m.e - x0, m.f - y0); X = O;                                   // (the path helpers draw on X)
+    try { O.fillStyle = DRAGON_SHADE.col; O.beginPath(); for (const p of ms) p.path(); O.fill();
+      O.globalCompositeOperation = 'destination-out';
+      // parts already painted in front of a group member (a horn over the skull) keep their colour: cut from the band
+      const d0 = Math.min(...parts.filter(p => p.g === g).map(p => p.d)), upto = parts.indexOf(last.get(g));
+      O.beginPath(); for (let j = 0; j < upto; j++) { const p = parts[j]; if (p.g !== g && p.d > d0 && !p.clip && (!p.draw || p.strokeOnly)) (p.strokeOnly || p.path)(); } O.fill();
+      O.translate(0, -lift); O.beginPath(); for (const p of ms) p.path(); O.fill();
+      O.globalCompositeOperation = 'source-over'; } finally { X = X0; }
+    X.save(); X.setTransform(1, 0, 0, 1, 0, 0); X.globalAlpha *= DRAGON_SHADE.alpha; X.drawImage(dragonShadeC, 0, 0, w, h, x0, y0, w, h); X.restore(); };
+  X.lineJoin = 'round'; X.strokeStyle = '#000'; X.lineWidth = 2.2 / UNIT_SCALE;
+  for (const pt of parts) if (!pt.clip && (!pt.draw || pt.strokeOnly)) { X.beginPath(); (pt.strokeOnly || pt.path)(); X.stroke(); }
+  for (const pt of parts) {
+    if (pt.draw) { pt.draw(); continue; }
+    if (pt.clip) { X.save(); X.beginPath(); pt.clip(); X.clip(); X.fillStyle = pt.col; X.beginPath(); pt.path(); X.fill(); X.restore(); continue; }
+    X.fillStyle = pt.col; X.beginPath(); pt.path(); X.fill();
+    if (pt.g && last.get(pt.g) === pt) shadeGroup(pt.g);
+    if (pt.seam) { X.save(); X.strokeStyle = pt.col; X.lineWidth = 0.8; X.stroke(); X.restore(); }  // (closes the hairline seams between cells)
+  }
+  // the eyes: each set in its side of the skull, looking out sideways and a little forward (turned with the head). An
+  // eye shows when it looks toward the viewer — and the far one only when the head faces the viewer nearly head-on
+  // (the eyes side by side in depth); otherwise the skull hides it. A plain yellow dot on the skull's surface.
+  // shut (asleep, a blink) it squashes to a thin slit along the head, as the 3D eye's scale.y
+  { const o0 = hdp(0, 0, 0), dirD = v => { const m = hdp(...v); return depth(m[0] - o0[0], m[2] - o0[2]) + (m[1] - o0[1]) * 0.5; }; // (+ up: the view looks down)
+    const E = zs => hdp(0.17, 0.08, zs * 0.16), dE = zs => { const m = E(zs); return depth(m[0], m[2]); };
+    for (const zs of [-1, 1]) {
+      if (dirD([0.35, 0.1, zs * 0.93]) < 0.3) continue;                                             // looking away
+      if (dE(zs) < dE(-zs) && dE(-zs) - dE(zs) > 0.09) continue;                                     // the far eye, behind the skull
+      const [ex, ey] = pj(...E(zs)), [fx2, fy2] = pj(...hdp(0.3, 0.08, zs * 0.16)), rot = Math.atan2(fy2 - ey, fx2 - ex);
+      X.fillStyle = C.eye; X.beginPath(); X.ellipse(ex, ey, 1.1 + 0.3 * P.eyeShut, Math.max(0.35, 1.1 * (1 - 0.92 * P.eyeShut)), fx2 === ex ? 0 : rot, 0, TAU); X.fill();
+    } }
+  X.restore();
+}
+
+// Sheep body — the last self-contained archetype block; see drawBearBody.
+function drawSheepBody(e){
+  let tc = teamColor(e.team);
+  // Sheep — scalloped wool cloud; head tracks movement direction
+  let waddle = e.path.length > 0 ? Math.sin(animTick * 0.2 + e.id) * 0.06 : 0;
+  let breath = e.path.length === 0 ? Math.sin(animTick * 0.06 + e.id) * 0.12 : 0;
+
+  X.save();
+  X.rotate(waddle);
+
+  // 4-leg walk cycle: outlined stubby legs with hooves
+  let hw1 = e.path.length > 0 ? Math.sin(animTick * 0.45 + e.id) * 3.0 : 0;
+  let hw2 = -hw1;
+  let legPts = [[-4, 0, hw1], [-1, 1, hw2], [2, 1, hw1], [5, 0, hw2]];
+  X.beginPath();
+  legPts.forEach(p => { X.moveTo(p[0], p[1]); X.lineTo(p[0] + p[2], 5); });
+  X.strokeStyle='#000'; X.lineWidth=2.6/UNIT_SCALE; X.lineCap='round'; X.stroke();
+  X.strokeStyle='#8a8378'; X.lineWidth=1.3/UNIT_SCALE; X.stroke(); X.lineCap='butt';
+  X.fillStyle='#241f18';
+  legPts.forEach(p => { X.beginPath(); X.ellipse(p[0] + p[2], 5.3, 1.2, 0.9, 0, 0, Math.PI*2); X.fill(); });
+
+  // Waggable wool-puff tail at the rear
+  let tailRate = e.eatingGrass ? 0.35 : (e.path.length > 0 ? 0.25 : 0.08);
+  let tailAngle = Math.sin(animTick * tailRate + e.id) * 0.4;
+  X.save();
+  X.translate(-7.5, -4);
+  X.rotate(tailAngle - 0.2);
+  X.fillStyle='#000';
+  X.beginPath(); X.arc(-1.5, 0, 2.6, 0, Math.PI*2); X.fill();
+  X.fillStyle='#f2eddd';
+  X.beginPath(); X.arc(-1.5, 0, 1.7, 0, Math.PI*2); X.fill();
+  X.restore();
+
+  // Scalloped wool cloud: black silhouette pass, then wool fill pass
+  let puffs = [[-4.5,-3.5,3.4],[-1.5,-6.5,3.5],[2.5,-6,3.4],[5,-3,3.2],[2,-0.5,3.3],[-2,-0.5,3.4],[0,-3.5,4.4]];
+  X.fillStyle='#000';
+  puffs.forEach(p => { X.beginPath(); X.arc(p[0], p[1], p[2]+1.1+breath, 0, Math.PI*2); X.fill(); });
+  X.fillStyle='#f2eddd';
+  puffs.forEach(p => { X.beginPath(); X.arc(p[0], p[1], p[2]+breath, 0, Math.PI*2); X.fill(); });
+  // Wool shading: highlight on top, ground shade underneath
+  X.fillStyle='rgba(255,255,255,0.5)';
+  X.beginPath(); X.arc(-1, -6.5, 2.6, 0, Math.PI*2); X.fill();
+  X.fillStyle='rgba(110,95,70,0.20)';
+  X.beginPath(); X.ellipse(0, 1.6, 5.8, 2, 0, 0, Math.PI*2); X.fill();
+
+  let earWiggle = e.eatingGrass ? Math.sin(animTick * 0.5 + e.id) * 1.2 : Math.sin(animTick * 0.1 + e.id) * 0.4;
+
+  // Sheep head: dark face, droopy ears, wool tuft on top, team bandana.
+  // mode: 'front' (two eyes), 'side' (one eye), 'back' (no face)
+  const sheepHead = (hx, hy, mode) => {
+    X.strokeStyle='#000'; X.lineWidth=1/UNIT_SCALE;
+    // Team bandana under the chin
+    X.fillStyle=tc;
+    X.beginPath(); X.ellipse(hx, hy+3.6, 3, 1.8, 0, 0, Math.PI*2); X.fill();
+    // Droopy ears
+    X.fillStyle = mode==='back' ? '#4a463e' : '#57534a';
+    X.save(); X.translate(hx-2.6, hy-0.6+earWiggle); X.rotate(-0.5);
+    X.beginPath(); X.ellipse(0, 0, 2.0, 1.1, 0, 0, Math.PI*2); X.fill(); X.stroke(); X.restore();
+    X.save(); X.translate(hx+2.6, hy-0.6-earWiggle); X.rotate(0.5);
+    X.beginPath(); X.ellipse(0, 0, 2.0, 1.1, 0, 0, Math.PI*2); X.fill(); X.stroke(); X.restore();
+    // Head
+    X.fillStyle = mode==='back' ? '#3a362f' : '#4a463e';
+    X.beginPath(); X.ellipse(hx, hy, 3, 3.4, 0, 0, Math.PI*2); X.fill(); X.stroke();
+    // Wool tuft on top of the head
+    X.fillStyle='#000';
+    X.beginPath(); X.arc(hx, hy-3.2, 2.2, 0, Math.PI*2); X.fill();
+    X.fillStyle='#f2eddd';
+    X.beginPath(); X.arc(hx, hy-3.2, 1.6, 0, Math.PI*2); X.fill();
+  };
+
+  let headX = 0, headY = 0;
+  if (e.eatingGrass) {
+    let chew = Math.sin(animTick * 0.6);
+    headX = 6; headY = 2 + chew;
+    sheepHead(headX, headY, 'side');
+  } else if (e.dir === 1) {
+    // Strictly South: head center-front
+    headX = 0; headY = 1.5;
+    sheepHead(headX, headY, 'front');
+  } else if (e.dir === 5) {
+    // Strictly North: head center-back, no face
+    headX = 0; headY = -8;
+    sheepHead(headX, headY, 'back');
+  } else {
+    // Side and diagonal directions
+    let useDir = mirroredDir(e);
+    if (useDir === 7)      { headX = 6.5; headY = -3.5; sheepHead(headX, headY, 'side'); }
+    else if (useDir === 0) { headX = 5.5; headY = -1.5; sheepHead(headX, headY, 'side'); }
+    else                   { headX = 3.5; headY = -7.5; sheepHead(headX, headY, 'back'); }
+  }
+
+  if(e.eatingGrass){
+    X.strokeStyle='#4e8c2d'; X.lineWidth=1.2/UNIT_SCALE;
+    X.beginPath();X.moveTo(headX,headY+1.2);X.lineTo(headX+4,headY+3);X.stroke();
+    X.beginPath();X.moveTo(headX-0.5,headY+1.5);X.lineTo(headX+3,headY+4);X.stroke();
+    
+    // Spawn tiny grass particle puffs (not in the outline mask pass —
+    // a SELECTED grazing sheep would double-spawn them). Counter-advance
+    // guard (the workSwingCycles pattern): a bare tick%N renders the
+    // same tick 2-3 rAF frames in a row and fired a triple puff.
+    let gcyc = Math.floor(tick / T30(24));
+    if(!window._maskDraw && grazeCycles.get(e.id) !== gcyc){
+      grazeCycles.set(e.id, gcyc);
+      spawnParticles(e.x + (e.facing * 0.25), e.y + 0.1, '#4e8c2d', 1, 0.008, 0.9);
+    }
+  }
+  X.restore();
+}
+
 function drawUnit(e){
   if(e.garrisonedIn)return; // hidden inside a building
-  let iso=toIso(e.x,e.y);
-  let sx=Math.round(iso.ix-camX+W/2), sy=Math.round(iso.iy-camY+topH+H/2+HALF_TH);
+  const faceOnView = e.dir === 1 || e.dir === 5; // S/N — forward is the view axis
+  // the per-dir rig bases, fixed for the whole draw: F = the facing's
+  // screen projection, R = the lateral (unit-right) axis
+  const F = RIG[e.dir], R = RIG[(e.dir + 2) & 7];
+  let scr=mapToScreen(e.x,e.y);
+  let sx=Math.round(scr.sx), sy=Math.round(scr.sy+HALF_TH);
   if(isOffscreen(sx,sy,50))return;
   // Group spread: offset based on unit ID so stacked units are visible
   let { ox, oy } = getUnitGroupOffset(e.id);
   sx += ox; sy += oy;
   let tc=teamColor(e.team);
-  let anim=Math.sin(tick*0.15+e.id*2);
   let isActive=e.task||e.target||e.path.length>0;
   // "Moving" for animation = following a path OR pressing into contact this
   // tick (js/logic.js pressToContact sets e.pressWalk=tick when it steps). A
   // pressing unit walks at its normal pace now, so it should show the walk
   // cycle (legs), not the planted attack/idle pose, until it settles at contact.
-  let moving = e.path.length>0 || e.pressWalk===tick;
+  let moving = isUnitMoving(e);
 
   // Shadow — not part of the body silhouette: the outline mask pass must
   // skip it or the selection ring traces the shadow blob too.
@@ -1805,7 +3116,19 @@ function drawUnit(e){
   if(e.facing===undefined) e.facing = 1;
   let targetDx = 0;
   let tx = -1, ty = -1;
-  if(e.target){
+  // Facing priority: the PATH wins while the unit is actually walking —
+  // facing the target first made a unit on a detour route (pathing around a
+  // wall/forest toward a target on the far side) moonwalk: body toward the
+  // target, feet going the other way (repro: aoe2-game-test01.json, knight
+  // walking E around an obstacle while facing its ram target to the W).
+  // AoE2 units face their travel direction in transit and square up to the
+  // target only when the walk ends (in range / at the work site).
+  if(e.path && e.path.length > 0){
+    // Look 3 steps ahead to smooth out diagonal paths that alternate N+E or S+W steps
+    let ahead = Math.min(3, e.path.length - 1);
+    tx = e.path[ahead].x;
+    ty = e.path[ahead].y;
+  } else if(e.target){
     let t = entitiesById.get(e.target);
     if(t) { tx = t.x; ty = t.y; }
   } else if(e.buildTarget){
@@ -1814,14 +3137,10 @@ function drawUnit(e){
   } else if(e.gatherX !== undefined && e.gatherY !== undefined && e.task && e.task !== 'return'){
     tx = e.gatherX + 0.5;
     ty = e.gatherY + 0.5;
-  } else if(e.path && e.path.length > 0){
-    // Look 3 steps ahead to smooth out diagonal paths that alternate N+E or S+W steps
-    let ahead = Math.min(3, e.path.length - 1);
-    tx = e.path[ahead].x;
-    ty = e.path[ahead].y;
   }
   if(e.facingNorth===undefined) e.facingNorth = false;
   let dx = 0, dy = 0;
+  if(e.faceAng!==undefined){ tx = e.x + Math.cos(e.faceAng); ty = e.y + Math.sin(e.faceAng); } // the dragon faces its own slow heading (its fire goes that way)
   if(tx !== -1 && ty !== -1){
     dx = tx - e.x;
     dy = ty - e.y;
@@ -1863,27 +3182,18 @@ function drawUnit(e){
       e.dir = dir;
     }
 
-    // Map 8-direction index (0: SE, 1: S, 2: SW, 3: W, 4: NW, 5: N, 6: NE, 7: E) to quadrants:
-    if (dir === 0 || dir === 1 || dir === 7) {
-      e.facing = 1; e.facingNorth = false; // SE, S, E (facing front-right)
-    } else if (dir === 2 || dir === 3) {
-      e.facing = -1; e.facingNorth = false; // SW, W (facing front-left)
-    } else if (dir === 4) {
-      e.facing = -1; e.facingNorth = true; // NW (facing back-left)
-    } else if (dir === 5 || dir === 6) {
-      e.facing = 1; e.facingNorth = true; // N, NE (facing back-right)
-    }
+    setFacingFromDir(e, dir);
   }
   e.lastX = e.x;
   e.lastY = e.y;
 
   // Torso / Head bobbing
-  let bob=moving?Math.sin(tick*0.3+e.id)*1.5:0;
-  let sbob=moving?Math.sin(tick*0.2+e.id)*1:0;
+  let bob=moving?Math.sin(animTick*0.3+e.id)*1.5:0;
+  let sbob=moving?Math.sin(animTick*0.2+e.id)*1:0;
 
   // Save context and apply horizontal flipping based on facing direction
   X.save();
-  if(e.utype==='sheep'||e.utype==='bear') X.translate(sx, sy + sbob);
+  if(e.utype==='sheep'||e.utype==='bear'||e.utype==='dragon') X.translate(sx, sy + sbob);
   // Vehicles don't head-bob — the ram applies its own subtle rolling sway
   else if(e.utype==='sheep_carcass'||e.utype==='ram'||e.utype==='tradecart') X.translate(sx, sy);
   else X.translate(sx, sy + bob);
@@ -1906,7 +3216,7 @@ function drawUnit(e){
       X.rotate(progress * (Math.PI / 2.2));
       
       // Draw 4 legs twitching/kicking
-      let legKick = Math.sin(tick * 0.7 + e.id) * 3 * (1 - progress);
+      let legKick = Math.sin(animTick * 0.7 + e.id) * 3 * (1 - progress);
       X.strokeStyle='#000000'; X.lineWidth=1.8/UNIT_SCALE;
       X.beginPath();
       X.moveTo(-4, 0); X.lineTo(-4 + legKick, 5 * (1 - progress));
@@ -2005,132 +3315,826 @@ function drawUnit(e){
   } else if(e.utype==='tradecart'){
     drawTradeCartBody(e);
   } else if(e.utype==='bear'){
-    // Bear — heavy quadruped in the sheep's style: one black silhouette
-    // pass, then fur fill. Side profile; X.scale(e.facing,…) flips it.
-    let attacking = inActionRange(e) && !moving;
-    // Chase/attack read: forward lunge while mauling, slight prowl sway walking
-    let lunge = attacking ? Math.max(0, Math.sin(tick*0.35+e.id)) * 3 : 0;
-    let sway = moving ? Math.sin(tick*0.25+e.id)*0.05 : 0;
-    let breath = (!moving && !attacking && !e.corpseRot) ? Math.sin(tick*0.05+e.id)*0.25 : 0;
-
-    X.save();
-    X.rotate(sway);
-    X.translate(lunge, 0);
-    // Cartoon proportions: one huge boulder of a body on tiny stub legs.
-    X.scale(1.4, 1.4);
-
-    // Stub-leg walk cycle: comically short, thick legs mostly hidden
-    // under the body mass — just paws scuttling along
-    let lw1 = moving ? Math.sin(tick*0.5+e.id)*1.8 : 0;
-    let lw2 = -lw1;
-    let legPts = [[-6,2,lw1],[-3,2.5,lw2],[2.5,2.5,lw1],[5.5,2,lw2]];
-    X.beginPath();
-    legPts.forEach(p=>{ X.moveTo(p[0],p[1]); X.lineTo(p[0]+p[2],5); });
-    X.strokeStyle='#000'; X.lineWidth=4.2/UNIT_SCALE; X.lineCap='round'; X.stroke();
-    X.strokeStyle='#4e3520'; X.lineWidth=2.6/UNIT_SCALE; X.stroke(); X.lineCap='butt';
-    X.fillStyle='#241a10';
-    legPts.forEach(p=>{ X.beginPath(); X.ellipse(p[0]+p[2],5.2,1.6,1,0,0,Math.PI*2); X.fill(); });
-
-    // Direction resolution (same scheme as the sheep): the canvas is already
-    // mirrored via X.scale(e.facing,…), so left-pointing dirs map onto their
-    // right-pointing twins and we only author 4 poses:
-    //   'front' (S: face to camera), 'back' (N: rump to camera),
-    //   'side'  (E/SE profile),      'backside' (NE: profile from behind)
-    let useDir = mirroredDir(e);
-    let pose = e.dir === 1 ? 'front' : e.dir === 5 ? 'back' :
-               (useDir === 6) ? 'backside' : 'side';
-    // Profile head sits a touch lower when heading SE (downhill toward camera)
-    let hx = useDir === 0 ? 7.8 : 8.6;
-    let hy = useDir === 0 ? -3.2 : -4.2;
-
-    // Body silhouette pass (black, slightly inflated), then fur fill —
-    // one giant boulder body with a high shoulder hump; head/ears/tail
-    // move with the pose, the boulder itself barely changes (that's the
-    // luxury of cartoon mass: it reads from every angle).
-    const bearShapes = (grow)=>{
-      if(pose==='front'||pose==='back'){
-        X.beginPath(); X.ellipse(-0.2,-4.5,8.4+grow+breath,7.4+grow+breath,0,0,Math.PI*2); X.fill(); // body (narrower head-on)
-        X.beginPath(); X.arc(0,-9.8,5+grow+breath,0,Math.PI*2); X.fill();       // hump reads as shoulders
-        if(pose==='front'){
-          X.beginPath(); X.arc(0,-4.2,4.4+grow,0,Math.PI*2); X.fill();          // head, face to camera
-          X.beginPath(); X.arc(-3.4,-8.2,1.7+grow,0,Math.PI*2); X.fill();       // ears
-          X.beginPath(); X.arc(3.4,-8.2,1.7+grow,0,Math.PI*2); X.fill();
-        } else {
-          X.beginPath(); X.arc(0,-11.2,3.6+grow,0,Math.PI*2); X.fill();         // back of head over the hump
-          X.beginPath(); X.arc(-3,-13.6,1.6+grow,0,Math.PI*2); X.fill();        // ears
-          X.beginPath(); X.arc(3,-13.6,1.6+grow,0,Math.PI*2); X.fill();
-          X.beginPath(); X.arc(0,1.2,2.2+grow,0,Math.PI*2); X.fill();           // stub tail on the rump
-        }
-      } else {
-        X.beginPath(); X.ellipse(-0.5,-4.5,9.6+grow+breath,7.4+grow+breath,0,0,Math.PI*2); X.fill(); // huge body
-        X.beginPath(); X.arc(-3.5,-9.5,4.6+grow+breath,0,Math.PI*2); X.fill();  // shoulder hump
-        X.beginPath(); X.arc(-10.2,-4,2+grow,0,Math.PI*2); X.fill();            // stub tail
-        if(pose==='backside'){
-          X.beginPath(); X.arc(6.4,-7.2,3.2+grow,0,Math.PI*2); X.fill();        // head turned away, higher
-          X.beginPath(); X.arc(4.8,-10.4,1.6+grow,0,Math.PI*2); X.fill();       // ear
-        } else {
-          X.beginPath(); X.arc(hx,hy,3.4+grow,0,Math.PI*2); X.fill();           // head (small, set low)
-          X.beginPath(); X.ellipse(hx+2.8,hy+0.8,2.2+grow,1.6+grow,0.2,0,Math.PI*2); X.fill(); // snout
-          X.beginPath(); X.arc(hx-1.6,hy-3.2,1.6+grow,0,Math.PI*2); X.fill();   // tiny ear
-        }
-      }
-    };
-    X.fillStyle='#000';
-    bearShapes(1.1);
-    X.fillStyle='#6b4a2c';
-    bearShapes(0);
-    // Fur shading: light along the massive back, ground shade under the belly
-    X.fillStyle='rgba(255,235,200,0.28)';
-    if(pose==='front'||pose==='back') X.beginPath(), X.ellipse(0,-10.2,4.4,2.4,0,0,Math.PI*2), X.fill();
-    else X.beginPath(), X.ellipse(-2.5,-9.5,5.8,2.6,0.15,0,Math.PI*2), X.fill();
-    X.fillStyle='rgba(40,25,10,0.30)';
-    X.beginPath(); X.ellipse(-0.5,0.8,7.6,2.2,0,0,Math.PI*2); X.fill();
-
-    // Face per pose: tan muzzle, black nose, tiny eyes (cartoon rule: the
-    // smaller the eyes on the bigger the body, the better), inner ears
-    if(pose==='front'){
-      X.fillStyle='#4a3018';
-      X.beginPath(); X.arc(-3.4,-8.2,0.9,0,Math.PI*2); X.fill();  // inner ears
-      X.beginPath(); X.arc(3.4,-8.2,0.9,0,Math.PI*2); X.fill();
-      X.fillStyle='#c9a578';
-      X.beginPath(); X.ellipse(0,-2.6,2.4,1.9,0,0,Math.PI*2); X.fill(); // muzzle
-      X.fillStyle='#000';
-      X.beginPath(); X.arc(0,-3.4,1.05,0,Math.PI*2); X.fill();    // nose
-      X.beginPath(); X.arc(-1.9,-5.4,0.65,0,Math.PI*2); X.fill(); // eyes
-      X.beginPath(); X.arc(1.9,-5.4,0.65,0,Math.PI*2); X.fill();
-    } else if(pose==='back'){
-      X.fillStyle='#4a3018';
-      X.beginPath(); X.arc(-3,-13.6,0.85,0,Math.PI*2); X.fill();  // inner ears
-      X.beginPath(); X.arc(3,-13.6,0.85,0,Math.PI*2); X.fill();
-      X.fillStyle='#c9a578';
-      X.beginPath(); X.arc(0,1.2,1.3,0,Math.PI*2); X.fill();      // tail tuft
-    } else if(pose==='backside'){
-      X.fillStyle='#4a3018';
-      X.beginPath(); X.arc(4.8,-10.4,0.85,0,Math.PI*2); X.fill(); // inner ear
-    } else {
-      X.fillStyle='#c9a578';
-      X.beginPath(); X.ellipse(hx+2.8,hy+0.8,1.6,1.1,0.2,0,Math.PI*2); X.fill();
-      X.fillStyle='#000';
-      X.beginPath(); X.arc(hx+4.3,hy+0.5,1,0,Math.PI*2); X.fill();    // nose
-      X.beginPath(); X.arc(hx+0.4,hy-0.8,0.65,0,Math.PI*2); X.fill(); // eye
-      X.fillStyle='#4a3018';
-      X.beginPath(); X.arc(hx-1.6,hy-3.2,0.85,0,Math.PI*2); X.fill(); // inner ear
-    }
-
-    // Mauling: open jaw flash while lunged forward
-    if(attacking && lunge > 1.5){
-      X.strokeStyle='#000'; X.lineWidth=1.2/UNIT_SCALE;
-      X.fillStyle='#a03030';
-      if(pose==='front'){
-        X.beginPath(); X.ellipse(0,-1.6,1.5,1.1,0,0,Math.PI*2); X.fill(); X.stroke(); // open mouth
-      } else if(pose==='side'){
-        X.beginPath(); X.moveTo(hx+2.4,hy+1.5); X.lineTo(hx+5.2,hy+3); X.lineTo(hx+2.7,hy+2.6); X.closePath(); X.fill(); X.stroke();
-      }
-    }
-    X.restore();
+    drawBearBody(e);
+  } else if(e.utype==='dragon'){
+    drawDragonBody(e);
   } else if(e.utype!=='sheep'){
-    let humanXOffset = isMountedUnit(e.utype) ? -3 : 0;
+    // Seated over the saddle center; face-on (S) the saddle reads at
+    // body center, so the rider sits right of the -2 profile seat.
+    // face-on riders sit CENTERED on the horse (S 0.5 / N 0 — the head
+    // is centered there too); the side/diagonal views keep the saddle
+    // seat back at −2
+    let humanXOffset = isMountedUnit(e.utype) ? (e.dir === 1 ? 0.5 : e.dir === 5 ? 0 : -2) : 0;
     let humanYOffset = isMountedUnit(e.utype) ? -11 : 0;
+    let eq = unitEquipment(e); // null for non-soldiers (villager)
+    let weaponTier = eq ? eq.weapon : 0;
+
+    // ---- hand-pose seam ----
+    // TRUE screen-space angle from this unit to its combat target. Used to
+    // point aimed weapons (bow, spear) along the real attack line. Callers
+    // must first UNDO the facing mirror (X.scale(e.facing,1) inside the
+    // already-mirrored context cancels it) and then rotate by this — never
+    // clamp the angle to the mirrored frame (a clamp renders steep or
+    // across-the-body shots up to ~130° off). When the target entity is
+    // gone mid-swing (or a preview has none), fall back to the FACING
+    // projected through the rig — NOT horizontal: a horizontal fallback
+    // made the NW/NE diagonals swing sideways instead of up-screen.
+    const facingAim = () => Math.atan2(RIG[e.dir].sy, RIG[e.dir].sx);
+    // Character mode (pov3d) redraws a unit turned to face its camera and sets
+    // window._povAimRot so the target offset turns with the body (viewer-only).
+    const targetCenter = (t) => {
+      const c = t.type === 'building' ? { x: t.x + (t.w || 1) / 2, y: t.y + (t.h || 1) / 2 } : { x: t.x, y: t.y };
+      const r = window._povAimRot;
+      if (!r) return c;
+      const dx = c.x - e.x, dy = c.y - e.y, cs = Math.cos(r), sn = Math.sin(r);
+      return { x: e.x + dx * cs - dy * sn, y: e.y + dx * sn + dy * cs };
+    };
+    let aimAngle = () => {
+      let t = entitiesById.get(e.target);
+      if (!t) return facingAim();
+      let tc = targetCenter(t);
+      let dix = ((tc.x - e.x) - (tc.y - e.y)) * HALF_TW;
+      let diy = ((tc.x - e.x) + (tc.y - e.y)) * HALF_TH;
+      if (dix === 0 && diy === 0) return facingAim();
+      return Math.atan2(diy, dix);
+    };
+    // Archer variant: the LAUNCH tangent of the ballistic arc, not the flat
+    // line to the target — the nocked arrow releases exactly along the real
+    // arrow's initial flight line. Constants (35, /5, startH 12, endH 8)
+    // must stay in sync with spawnProjectile/drawProjectiles.
+    let aimAngleBallistic = () => {
+      let t = entitiesById.get(e.target);
+      if (!t) return facingAim();
+      let tc = targetCenter(t);
+      let dix = ((tc.x - e.x) - (tc.y - e.y)) * HALF_TW;
+      let diy = ((tc.x - e.x) + (tc.y - e.y)) * HALF_TH;
+      let A = 35 * (Math.hypot(tc.x - e.x, tc.y - e.y) / 5); // arc amplitude
+      diy -= Math.PI * A + (8 - 12); // + endH − startH (units launch at 12, impact at 8)
+      if (dix === 0 && diy === 0) return facingAim();
+      return Math.atan2(diy, dix);
+    };
+    // ---- ARM-STATE MODEL ----
+    // Arms are BODY sides (s: −1 left, +1 right); this maps a body side
+    // to its mirrored-frame hand target. Profiles (lateral axis edge-on)
+    // keep FIXED sides (left→rear, right→front — the approved reads).
+    // One helper replaces every front/rear choice heuristic; it
+    // reproduces all 8 previously hand-picked sword-arm choices.
+    const armFrameSide = (s) => {
+      let v = e.facing * s * RIG[(e.dir + 2) & 7].sx;
+      if (v > 0.1) return 'front';
+      if (v < -0.1) return 'rear';
+      return s > 0 ? 'front' : 'rear';
+    };
+    // ---- SHARED PARTS-PASS RULES (one copy for every humanoid family;
+    // per-family riders come in as flags — see each parts block) ----
+    // frame-forward sign for tool mirroring: facing-projected forward,
+    // ties broken by the lateral axis depth.
+    const frameFwdSign = () => {
+      let v = e.facing * RIG[e.dir].sx;
+      return v > 0.05 ? 1 : v < -0.05 ? -1 : (RIG[e.dir].d >= 0 ? 1 : -1);
+    };
+    // held-item sort depth from a mount; at the dead-on profiles the
+    // forward depth ties with the body, so profileHeld pins it just over
+    // (lat parameter for the militia's mode-adjusted lateral)
+    const mountHeldD = (M, R, F, lat = M.lat) =>
+      (Math.abs(F.d) < 0.05 && M.profileHeld !== undefined) ? M.profileHeld
+        : lat * R.d + M.fwd * F.d;
+    // ONE arm-depth rule: grip/support arms span THEIR OWN shoulder to
+    // the held item; the shoulder side decides occlusion AT ALL TIMES
+    // (user calls) — a camera-side shoulder's arm reaches around visibly,
+    // its hand wrapping the handle viewer-side over body AND weapon; a
+    // far shoulder's arm tucks BEHIND the torso (its fist still sweeps
+    // past the silhouette). Pins win; shield hands sit just under their
+    // plate; carry arms ride the load; idle arms hang. o riders:
+    //   farGripPin    (mounted)  far grip arm pinned just under the sword
+    //   farBehindHeld (militia)  far arm deepens UNDER a behind-body sword
+    //   flankClamp    (mounted)  the idle rein arm hangs ON the flank
+    //   shieldGap     per-family gap under the plate
+    const armDepthRule = (s, o) => {
+      let st = anim.armState ? anim.armState[s] : 'idle';
+      if (st === 'grip' || st === 'support') {
+        if (o.farGripPin && st === 'grip' && anim.gripS * o.R.d < -0.05)
+          return o.held - 0.1;
+        let d = (s * 4.5 * o.R.d + o.held) / 2;
+        if (s * o.R.d > 0.05) d = Math.max(d, o.held + 0.1, 0.02);
+        else if (s * o.R.d < -0.05)
+          d = d > 0.005 ? 0.005 : o.farBehindHeld ? Math.min(d, o.held - 0.1) : d;
+        return d;
+      }
+      if (st === 'shield') return o.shield - o.shieldGap;
+      // carry arms follow the IDLE convention: the far-shoulder arm
+      // tucks BEHIND the body (its fist re-emerges at the handle/load —
+      // the bigger forward barrow rig puts the far grip past the
+      // silhouette, so the fist reads), the near arm rides over the
+      // carried thing.
+      if (st === 'carry') {
+        // barrow at dead-away N: arms AND shoulders render behind the
+        // body with the barrow (user call) — near arm still over far.
+        // N is where sx≈0 with sy<0 (F.d is strongly NEGATIVE there,
+        // not ~0 — the first cut keyed on d and never fired)
+        if ((anim.barrow || anim.plowRig) && Math.abs(o.F.sx) < 0.05 && o.F.sy < -0.05)
+          return anim.carryD + 0.03 + (s > 0 ? 0.01 : 0);
+        return s * o.R.d < -0.05 ? 0.005
+          : (anim.barrow || anim.plowRig) ? Math.max(anim.carryD + 0.03, 0.02)
+          : anim.carryD + 0.03;
+      }
+      let hang = s * 4.5 * o.R.d + 0.15 * o.F.d;
+      return o.flankClamp && hang < 0.01 ? 0.005 : hang;
+    };
+    // the plate straps OUTSIDE its (idle) arm; nearOnly skips far-side
+    // (behind-the-horse) braces so the flank clamp can't drag them on top
+    const strapShieldOut = (shield, armDepth, nearOnly) => {
+      if (anim.shieldState && (!nearOnly || shield > 0) &&
+          anim.armState[-anim.gripS] !== 'shield') {
+        let ad = armDepth(-anim.gripS);
+        if (shield < ad + 0.03) shield = ad + 0.03;
+      }
+      return shield;
+    };
+    // ascending depth sort IS the draw order
+    const runParts = (parts) => {
+      parts.sort((a, b) => a[0] - b[0]);
+      for (let i = 0; i < parts.length; i++) parts[i][1]();
+    };
+
+    // Per-frame animation snapshot shared by the ARM pass (body layer) and
+    // the GRIP anchors (held layer) — the two draw at different times per
+    // facing, so any phase math they share must live here, not in either
+    // closure. Pure reads only (safe under the outline mask pass); sounds/
+    // particles stay in drawHeldLayer behind their _maskDraw guards.
+    const anim = { armSwing: moving ? Math.sin(animTick*0.4+e.id)*1.5 : 0 };
+    // TRUE PROFILE views (E/W): the body is seen exactly side-on —
+    // legs align under the center and the shoulders sit ON the
+    // centerline (consumers: legs in drawBodyLayer, shoulders in
+    // computeHandTargets). Other dirs keep the 3/4 read.
+    anim.profile = e.dir === 3 || e.dir === 7;
+    // POSE-RIG shoulders — EVERY humanoid (villager convention adopted
+    // unit-wide): both shoulders project to the rotated rim (face-on
+    // wide, diagonals tucked, profiles on the centerline) and the near
+    // shoulder rides slightly lower, damped like the weapon mounts
+    // (RIG_YK). The FAR arm keeps its true anchor even where the body
+    // hides it. (Arm layering itself is the parts pass — the old
+    // farArm flag is gone.)
+    {
+      // sPlus = which body side (±lat) lands on the mirrored frame's +x
+      let sPlus = R.sx > 0.1 ? e.facing : R.sx < -0.1 ? -e.facing : 0;
+      anim.shDx = Math.abs(R.sx);        // shoulder rim scale per dir
+      anim.shDy = sPlus * R.sy * RIG_YK; // frame-front shoulder drop, per unit of rim width
+    }
+    // One spelling of "mid-attack-animation" for every weapon branch
+    // (inActionRange already honors the gallery's __animAttack preview).
+    if (MILITARY.has(e.utype))
+      anim.swinging = !e.corpseRot && inActionRange(e) && e.path.length===0;
+    if (e.utype === 'villager') {
+      // "At the work site" — a villager whose task is already back to
+      // chop/mine but who is still STANDING AT THE DROP-OFF must not flash
+      // the tool or swing it; require actual proximity to the work.
+      let atSite = true;
+      if (e.task === 'chop' || e.task === 'mine_gold' || e.task === 'mine_stone') {
+        atSite = e.gatherX >= 0 && atGatherTile(e, e.gatherX, e.gatherY);
+      } else if (e.task === 'build' && e.buildTarget) {
+        let bt = entitiesById.get(e.buildTarget);
+        atSite = !!bt && atBuildSite(e, bt);
+      } else if (e.target) {
+        atSite = inActionRange(e);
+      }
+      anim.atSite = atSite;
+      anim.working = isActive && e.path.length===0 && atSite;
+      // ON-PLOT STROLL (the sim's farm stroll legs): a farmer walking
+      // between tiles of its own 2×2 plot keeps its farm tool — rolling
+      // plow / held scythe — not the hauling reads (barrow / overhead
+      // carry). Off-plot trips (to the mill and back) haul as usual;
+      // the Chebyshev bound is what separates the two.
+      anim.farmWalk = e.task==='farm' && moving && e.gatherX >= 0 &&
+        Math.max(Math.abs(e.x - e.gatherX), Math.abs(e.y - e.gatherY)) < 1.8;
+      anim.gripTask = e.task==='chop'||e.task==='mine_gold'||e.task==='mine_stone'||e.task==='build';
+      // Shaped work swing: slow wind-up (70% of the cycle), fast strike
+      // (30%). swing is the tool's rotation: -1.1 raised, +0.5 at impact.
+      anim.phRaw = animTick*0.055 + e.id*0.37;
+      let ph = ((anim.phRaw % 1) + 1) % 1;
+      let u = ph < 0.7 ? ph/0.7 : 1-(ph-0.7)/0.3;
+      // gripTask-gated like every consumer — a working forager/farmer has
+      // no swinging tool, and an ungated value invites wiring one on.
+      // DRAMATIC overhead arc (the sword-swing treatment): the windup
+      // raises the tool head well over the shoulder before the strike;
+      // the impact angle (+0.5) is unchanged, so sound/particle sync and
+      // the work cycle counter are untouched.
+      anim.swing = (anim.working && anim.gripTask) ? (0.5 - 2.4*u) : 0;
+      // Bow Saw replaces the chopping AXE with a literal bow saw: the
+      // motion becomes a horizontal SAWING stroke (translation along the
+      // blade), not a rotation — sawOff drives tool + hand + body alike.
+      anim.sawing = anim.working && e.task === 'chop' && hasUpgrade(e.team, 'bow_saw');
+      anim.sawOff = anim.sawing ? Math.sin(anim.phRaw * Math.PI * 2) * 3.8 : 0;
+      if (anim.sawing) anim.swing = 0; // the saw never rotates
+      // Heavy Plow replaces the farm SCYTHE with a literal wheeled PLOW
+      // (the Bow Saw treatment): the motion becomes a PUSH along the
+      // facing — slow drive forward on the work cycle's 70%, quick reset
+      // drag on the 30% — plowOff drives tool + hands + body alike.
+      anim.plowing = anim.working && e.task === 'farm' && hasUpgrade(e.team, 'heavy_plow');
+      anim.plowOff = anim.plowing ? u*4 - 2 : 0;
+      // the plow RIDES the barrow rig (same projected frame, wheel,
+      // grips, depth rules): a wheelbarrow minus the tray plus a share.
+      // On stroll legs the rig stays out (wheel rolling, no dig stroke).
+      anim.plowRig = anim.plowing || (anim.farmWalk && hasUpgrade(e.team, 'heavy_plow'));
+      // Farmers below Heavy Plow work a SCYTHE: a horizontal sweep
+      // (rotation about the grip anchor) at the standard work-cycle
+      // rate; sweep drives tool + hand from one value.
+      anim.scythe = (anim.working || anim.farmWalk) && e.task === 'farm' && !anim.plowRig;
+      anim.sweep = anim.scythe && anim.working ? Math.sin(anim.phRaw * Math.PI * 2) * 0.3 : 0; // held static on stroll legs
+      // The rock accompanies the TOOL swing only (gripTask + the plow):
+      // 'working' alone is true for any truthy task standing at-site
+      // (foragers, fighters, the gallery's dummy task) — no shake there.
+      if (anim.working && (anim.gripTask || anim.plowing)) { // upper body rocks gently, legs planted
+        // gentle: the DRAMA lives in the oversized saw's travel, the
+        // body keeps the same quiet work rock as every other task
+        if (anim.sawing) { anim.upperLean = 0.02*anim.sawOff; anim.upperLunge = 0.31*anim.sawOff; }
+        // the plow push leans the body INTO the drive (legs follow via
+        // the attack-legwork rule — a real digging step)
+        else if (anim.plowing) { anim.upperLean = 0.03*anim.plowOff; anim.upperLunge = 0.5*anim.plowOff; }
+        // rock rescaled for the wider overhead swing (±2.4 vs the old
+        // ±1.6) — same perceived body sway, no twitch
+        else { anim.upperLean = 0.05*anim.swing; anim.upperLunge = 0.12*anim.swing; }
+        anim.upperPivot = -2.5; anim.stance = 1.2;
+      }
+      anim.pick = Math.sin(animTick*0.18+e.id);
+      anim.carcassTarget = !e.task&&e.target&&entitiesById.get(e.target)?.utype==='sheep_carcass';
+      let jabPh = ((animTick*0.06 + e.id*0.41) % 1 + 1) % 1;
+      anim.jab = jabPh < 0.25 ? jabPh/0.25 : 1-(jabPh-0.25)/0.75; // 0..1 spike
+      // TOOL RIG — the weapon conventions adopted: tools live in the
+      // LEFT hand (rig convention), swung TWO-HANDED (grip + support on
+      // the shaft, like the militia's B mode); the anchor projects from
+      // the tool mount per dir, and the face-on views (S/N) shift it to
+      // the grip side exactly like the sword's rule — a centered screen-
+      // plane swing would read sideways. Saws/scythes stay one-handed
+      // in art terms (their support hand is on the frame/snath grip).
+      // grip side follows the NEAR shoulder per dir: with a fixed left
+      // grip the viewer-side arm held the handle TOP at NW but the
+      // BOTTOM at NE — mirror pairs read asymmetric (user caught NE).
+      // Tools have no visible handedness, so the near hand always takes
+      // the grip; face-on (R.d 0) keeps the left-grip convention, which
+      // drives the S/N grip-side shift.
+      {
+        let Rd = RIG[(e.dir + 2) & 7].d;
+        anim.gripS = Math.abs(Rd) > 0.05 ? (Rd > 0 ? 1 : -1) : -1;
+      }
+      let toolHeld = (anim.working && anim.gripTask) || anim.sawing || anim.scythe;
+      anim.armState = {};
+      // the LOAD shows only while HAULING (collected, walking to the
+      // drop-off) — never during ANY work action (user call, keeps the
+      // reads simple): tool swings stay two-handed, and butchering/
+      // foraging keep their poses too (they work via TARGET, not task —
+      // a toolHeld-only gate let the carry pose hijack the butcher jab,
+      // user caught it). anim.working covers them all.
+      anim.carryShow = e.carrying > 0 && !anim.working && !anim.farmWalk;
+      // WHEELBARROW (the tech's literal tell): hauling villagers push a
+      // barrow — load in the tray outbound, EMPTY on the walk back to
+      // the resource (user call; builders keep bare hands). Never on the
+      // plot itself (farmWalk): the farm tool is the read there, and the
+      // plow rig has no tray for the wheat anyway.
+      anim.barrow = hasUpgrade(e.team, 'wheelbarrow') && !anim.working && !anim.farmWalk &&
+        (e.carrying > 0 || (e.path.length > 0 && BARROW_TASKS.has(e.task)));
+      anim.armState[anim.gripS] = (anim.barrow || anim.plowRig || anim.carryShow) ? 'carry'
+        : toolHeld ? 'grip' : 'idle';
+      anim.armState[-anim.gripS] = (anim.barrow || anim.plowRig || anim.carryShow) ? 'carry'
+        : (toolHeld && !anim.sawing && !anim.scythe) ? 'support' : 'idle';
+      {
+        let M = RIG_MOUNTS.villager.tool;
+        anim.heldD = mountHeldD(M, R, F);
+        // face-on side shift kept SMALL — 4 read as the tool drifting off
+        // the body; near-center with just enough offset to clear the head
+        let mLat = faceOnView ? 2 * anim.gripS : 0;
+        anim.toolRest = { x: e.facing * (mLat * R.sx + M.fwd * F.sx),
+                          y: (mLat * R.sy + M.fwd * F.sy) * RIG_YK - M.up };
+        // CARRY RIG: overhead — centered above the head, the SAME spot
+        // in every direction. Facing the camera the assembly rides over
+        // everything; dead-away (N) the load AND both raised arms render
+        // BEHIND the character (user call) — the carry-arm rule
+        // (carryD + 0.03) follows the flip automatically.
+        // With the BARROW the anchor is the unit's GROUND CENTER — the
+        // barrow rig (drawBarrow/barrowGrips) owns all directionality
+        // through its projected axes; sorting by the forward sign.
+        if (anim.barrow || anim.plowRig) {
+          anim.carryRest = { x: 0, y: 4.6 };
+          // sort by the barrow's own push axis, not F.d — at dead-away
+          // N the face depth is ~0 but the barrow still extends
+          // up-screen and must draw behind the body
+          anim.carryD = barrowAxes(e).ax.u.y < -0.05 ? -2 : 2;
+          // the WHEEL stays planted; the tray ROCKS about the axle as
+          // the bobbing hands lift and drop the handles (user call) —
+          // one tilt for frame, load and fists alike
+          // lever-aware: the grips ride ~20 behind the axle, so a
+          // small angle already moves them visibly — 0.013 keeps the
+          // rock under ~0.4px (0.05 swung a full bob-height at E/W and
+          // the hands read as bouncing, user caught it)
+          anim.barrowTilt = anim.plowRig ? 0 : moving ? bob * 0.013 : 0;
+        } else {
+          anim.carryRest = { x: 0, y: -CARRY_UP };
+          anim.carryD = F.d < -0.9 ? -2 : 2;
+        }
+      }
+    } else if (e.utype === 'militia' || e.utype === 'spearman' || isMountedUnit(e.utype)) {
+      // Sword pose seam — the spearman rides it WHOLESALE (user call:
+      // exact replication, spear art in the sword's hands; only the
+      // swing choreography is spear-tuned later) — TWO models by view,
+      // both anchored on GRIP_REST
+      // so idle IS the swing's frame at its neutral phase (offset-free
+      // body coords; consumers add humanX/YOffset):
+      //  side/diagonal — the grip ORBITS (φ linear in the swing angle:
+      //    windup over the shoulder, strike forward-down) and the whole
+      //    arc AIMS at the target;
+      //  face-on (S/N) — a forward CHOP through the VIEW PLANE: the pose
+      //    is ONE elevation angle θ (0 = the vertical rest, π/2 = at the
+      //    camera, CHOP.REACH = driven down past the target, negative =
+      //    tipped back over the shoulder), drawn as the EDGE-ON art
+      //    scaled by cos θ — the blade never sweeps sideways.
+      anim.faceOn = faceOnView;
+      // POSE RIG: the rest anchor, binding arm and sort depth all derive
+      // from ONE 3D sword mount projected through the per-dir basis (see
+      // the RIG consts).
+      {
+        let M = SWORD_MOUNT; // militia, spearman AND mounted share it
+        // ARM-STATE RESOLVER. The SWORD placement per dir is CANONICAL
+        // (one mount; it NEVER moves with the mode — user call). The mode picks the ARMS only: 'L' left-hand grip
+        // (default), 'R' right-hand (the other arm reaches the same
+        // grip), 'B' both (grip + support; dark-age militia default).
+        // Every arm is in exactly ONE state — grip | support | shield |
+        // idle — and an idle arm is IDENTICAL to the idle pose at all
+        // times, attacks included (no counterswing, no special cases).
+        // window.__weaponArm (gallery [L]/[R]/[B] toggle) forces a mode.
+        let armMode = window.__weaponArm ||
+            (!isMountedUnit(e.utype) && !(eq && eq.shield) ? 'B' : 'L');
+        anim.gripS = armMode === 'R' ? 1 : -1; // body side of the gripping hand
+        anim.twoHand = armMode === 'B';
+        anim.armState = {};
+        anim.armState[anim.gripS] = 'grip';
+        anim.armState[-anim.gripS] = anim.twoHand ? 'support'
+            : (eq && eq.shield && !e.facingNorth) ? 'shield' : 'idle';
+        let mLat = M.lat, mFwd = M.fwd, mUp = M.up;
+        // face-on views (S/N), militia AND mounted: one-handed grips
+        // shift the sword (and its arm) to the GRIP hand's side, shield-
+        // spaced — L right / R left on screen — clearing the centered
+        // horse head / body line; two-handed stays DEAD-CENTER (user
+        // call; the one deliberate mode-dependent placement)
+        if (faceOnView) mLat = anim.twoHand ? 0 : 6.2 * anim.gripS;
+        var rest0 = { x: e.facing * (mLat * R.sx + mFwd * F.sx),
+                      y: (mLat * R.sy + mFwd * F.sy) * RIG_YK - mUp };
+        // sort depth resolved ONCE here for the parts pass
+        anim.heldD = mountHeldD(M, R, F, mLat);
+        // ---- SHIELD RIG ----
+        // BRACED on the off forearm when that arm is in shield state;
+        // SLUNG across the back when nobody can brace it (facing away,
+        // or mode B — both hands on the sword). Position projects from
+        // the mount like the sword's rest0; the plate's outward normal
+        // is the LATERAL axis, so face (front iff normal toward camera)
+        // and width foreshortening derive from R.d — full face at the
+        // profiles, floored at 0.55 face-on so it never goes sliver.
+        if (eq && eq.shield) {
+          let side = -anim.gripS, SM = SHIELD_MOUNT;
+          anim.shieldState = 'braced'; // strapped to the off forearm in EVERY view
+          anim.shieldRest = { x: e.facing * (side * SM.lat * R.sx + SM.fwd * F.sx),
+                              y: (side * SM.lat * R.sy + SM.fwd * F.sy) * RIG_YK - SM.up };
+          anim.shieldD = side * SM.lat * R.d + SM.fwd * F.d;
+          anim.shieldFace = side * R.d > 0 ? 'front' : 'back';
+          anim.shieldWK = 0.55 + 0.45 * Math.abs(R.d);
+          // S/N: the plate's normal is perpendicular to the view —
+          // EDGE-ON, drawn as a thin strip (the sword's convention)
+          anim.shieldEdge = Math.abs(R.d) < 0.3;
+        } else anim.shieldState = null;
+        // the gripping hand's frame target (derived — armFrameSide
+        // reproduces every previously hand-picked choice)
+        anim.swArm = armFrameSide(anim.gripS);
+      }
+      // idle blade leans ~30° toward the facing (user call); the S/N
+      // edge views stay dead vertical — the chop model pivots there
+      anim.restRot = anim.faceOn ? 0 : 0.52;
+      // θ → blade scale + grip. fwdChop(0) IS the rest pose (fwdK 1,
+      // grip = rest0), so idle/engage continuity is structural.
+      const fwdChop = (th) => {
+        anim.swordRot = 0; anim.swordAimM = 0;
+        anim.fwdK = Math.cos(th) * (th > Math.PI/2 ? CHOP.DOWN_K : 1);
+        anim.grip = { x: rest0.x, // straight down — never inward
+                      y: rest0.y + CHOP.DROP*(1 - Math.cos(Math.max(0, th)))
+                                 - CHOP.RISE*Math.sin(-Math.min(0, th)) };
+      };
+      if (anim.swinging) {
+        let ssa = swordSwingAngle(e); // one phase read per frame — everything derives from it
+        anim.s = Math.sin(ssa);
+        if (anim.faceOn) {
+          if (e.utype === 'spearman') {
+            // face-on STAB: no overhead cock (the chop's rise/sweep read
+            // as swinging) — the SPRING drive runs the show instead.
+            let t = Math.sin(0.5) - anim.s;
+            let drive = t < 0 ? 7*t : 5*Math.pow(t, 1.6);
+            // straight POKES, elevation FIXED (an elevation sweep read
+            // as swinging, user call); the spring drive pushes along the
+            // view axis. S: the shaft FLIPS tip-down (rot π) — the enemy
+            // stands down-screen, an up-pointing poke never read as an
+            // attack — heavily foreshortened, tip striking toward the
+            // viewer, butt clearing the chin. N: tip up, driving away.
+            if (e.dir === 1) {
+              fwdChop(0.9);
+              anim.swordRot = Math.PI;
+              anim.grip.y += 0.55*drive;
+            } else {
+              fwdChop(0.7);
+              anim.grip.y -= 0.55*drive;
+            }
+          } else {
+            // elevation runs from the rest pose at the cycle's neutral
+            // (t = −anim.s, t0 at the rest angle 0.5) up to CHOP.REACH at
+            // the strike; the windup goes negative — blade tips back.
+            let t = -anim.s, t0 = -Math.sin(0.5);
+            fwdChop((t - t0) / (1 - t0) * CHOP.REACH);
+          }
+        } else if (e.utype === 'spearman') {
+          // SPEAR STAB — a PIERCE, not a sweep: the shaft lies DEAD
+          // LEVEL (aimM 0; the facing mirror gives left/right — the iso
+          // aim slope ran the back of the shaft up OVER the shoulder on
+          // the S-side diagonals, user call) at a height pinned just
+          // UNDER the shoulder line, constant 90° the whole engagement.
+          // Only the linear drive animates, like a SPRING: it compresses
+          // back past the rest point, then releases in an accelerating
+          // extension — t^1.6 keeps the early travel slow and the last
+          // stretch a SNAP.
+          // Tilted thrust knobs (live-tunable from the gallery's SPEAR
+          // TUNE panel via window.__spearTune; untouched knobs keep
+          // these defaults): TILT the shaft angle on the diagonals;
+          // SLEN = foreshortening along the shaft — a tilted thrust
+          // points INTO the iso depth, so it projects shorter, shrinking
+          // the butt-over-shoulder AND tip-into-ground overshoots at
+          // once; BACK/FWD/EXP the spring drive; TY the line height
+          // (all dirs); DROP = how much LOWER the tilted diagonals ride
+          // than the level profiles (one height dial per concern — the
+          // old rotation-pivot knob had degenerated into a second,
+          // overlapping height, user caught it).
+          let TN = window.__spearTune || 0;
+          // per-dir tilt: down-forward on the S-side diagonals, up-forward
+          // on the N-side (pointing at an up-screen enemy), dead level at
+          // the E/W profiles — the sign rides the facing's screen slope
+          // (F.sy, mirror-invariant), the magnitude is the TILT knob.
+          let tiltBase = TN.tiltDeg !== undefined ? TN.tiltDeg*Math.PI/180 : Math.PI/4;
+          let fsy = RIG[e.dir].sy;
+          let tilt = (fsy > 0.05 ? 1 : fsy < -0.05 ? -1 : 0) * tiltBase;
+          // per-side height offsets from LINE HEIGHT: the down- and
+          // up-tilts arrange the shaft oppositely around the shoulder
+          // (S-side butt-high behind, N-side tip-high ahead) — one
+          // shared offset kept fixing one side and breaking the other.
+          let DROP  = TN.drop  !== undefined ? TN.drop  : 3.5; // S-side (down-tilts)
+          let DROPN = TN.dropN !== undefined ? TN.dropN : -2;  // N-side (up-tilts)
+          anim.spearLen = tilt ? (TN.slen !== undefined ? TN.slen : 0.75) : 1;
+          anim.swordAimM = tilt;
+          let t = Math.sin(0.5) - anim.s; // −0.43 compressed … +1.48 extended
+          let drive = t < 0 ? (TN.back !== undefined ? TN.back : 7)*t
+                            : (TN.fwd !== undefined ? TN.fwd : 5)*Math.pow(t, TN.exp !== undefined ? TN.exp : 1.6);
+          let cr = Math.cos(tilt), nr = Math.sin(tilt);
+          // HOLD-IN: the hold base pulled toward the chest (fraction of
+          // the sword mount's forward offset) — at full offset the arms
+          // were ALREADY stretched straight before the drive, so the
+          // spring read as rubber; pulled in, compression = bent elbows
+          // and full extension lands exactly on the snap.
+          let bx = rest0.x * (TN.basek !== undefined ? TN.basek : 0.4);
+          // up-tilts ride a touch FORWARD: their extension climbs, so the
+          // same path read as starting BEHIND the body and ending at
+          // center (caught at NE vs SW) — biased ahead, compression sits
+          // at the center and the drive reads forward like the S-side.
+          if (nr < -0.05) bx += 2.5;
+          // TY is authoritative (no rest0.y floor — it blocked exploring
+          // overhead lines; crown ~ -18.6, shoulder -8, waist -3)
+          // The drive follows the tilt line through the WHOLE cycle: any
+          // phase-split height term made the grip bounce mid-cycle and
+          // each stab read as two motions.
+          anim.grip = { x: bx + drive*cr,
+                        y: (TN.ty !== undefined ? TN.ty : -6.4)
+                           + drive*nr + (nr > 0.05 ? DROP : nr < -0.05 ? DROPN : 0) };
+          anim.swordRot = Math.PI/2;
+        } else {
+          // wide DRAMATIC arc (user call): the grip rises up over the
+          // head at the windup and drives down through the strike; the
+          // neutral angle (0.5) still lands exactly on the rest anchor
+          let phi = -0.63 - 1.3*ssa;
+          // Radius: extended at the strike, and BOOSTED past the neutral
+          // on the windup side so the HAND genuinely rises OVER the head
+          // — the fist crests slightly above and behind it at full windup
+          // (a short cocked radius left the overhead drama all wrist —
+          // the arm barely moved, user caught it). The boost is zero AT
+          // the neutral (s = sin 0.5), so the orbit still lands exactly
+          // ON the rest anchor and engage can't pop.
+          let base = isMountedUnit(e.utype) ? 3.4 : 4.2;
+          let r = base - 1.2*anim.s + 18*Math.max(0, anim.s - 0.479);
+          let r0 = base - SWING_NEUTRAL.rs;
+          let ox = -r0*SWING_NEUTRAL.cos + r*Math.cos(phi);
+          let oy = -r0*SWING_NEUTRAL.sin + r*Math.sin(phi);
+          // The arc AIMS at the target (like the spear/bow): the offset
+          // is authored with +x = attack direction, rotated by the aim
+          // mapped INTO the mirrored body frame — the atan2 fold keeps
+          // "up" up for either facing.
+          let aim = aimAngle();
+          anim.swordAimM = Math.atan2(Math.sin(aim), e.facing*Math.cos(aim));
+          let cr = Math.cos(anim.swordAimM), nr = Math.sin(anim.swordAimM);
+          anim.grip = { x: rest0.x + ox*cr - oy*nr, y: rest0.y + ox*nr + oy*cr };
+          // blade sweep: OVER THE HEAD at the windup (tipped back ~−69°),
+          // down through vertical, HORIZONTAL (90°) at the strike — never
+          // past it into the ground. Quadratic in ssa through all three
+          // user-set constraints incl. neutral(0.5) = the ~30° rest lean
+          // (engage can't pop). (ssa: windup ~1.15 → strike −1.35.)
+          anim.swordRot = 1.366 - 1.275*ssa - 0.831*ssa*ssa;
+        }
+        // Weight shifts back on windup, into the strike — but the BODY is
+        // segmented: legs plant (stance), the torso leans hard from the
+        // hips, the head counter-rotates to stay level. Mounted: the horse
+        // gets only a small global surge; the rider does the leaning from
+        // the saddle.
+        let lean = 0.07 - 0.14*anim.s;
+        if (isMountedUnit(e.utype)) {
+          anim.lean = lean*0.18; anim.lunge = -0.5*anim.s;      // horse surge
+          anim.upperLean = lean*0.8; anim.upperPivot = -12;     // rider from the saddle
+        } else {
+          // spearman: NO lean — the upperly rotation tilted the level
+          // pierce line (caught at E/W); the lunge alone drives the body
+          anim.upperLean = e.utype === 'spearman' ? 0 : lean;
+          anim.upperLunge = -1.0*anim.s; // torso from the hips
+          anim.upperPivot = -2.5; anim.stance = 1.6;
+        }
+      } else { anim.s = 0; anim.grip = { x: rest0.x, y: rest0.y }; }
+    } else if (e.utype === 'archer') {
+      // Draw cycle rides the REAL reload timer, so the nocked arrow
+      // releases exactly when the real arrow leaves (works on MP guests).
+      let rof = (UNITS.archer && UNITS.archer.rof) || T30(60), cd = e.atkCooldown || 0;
+      anim.drawT = Math.min(1, Math.max(0, 1 - cd/(rof*0.85)));
+      anim.justFired = cd > rof*0.85;
+      anim.snapT = Math.max(0, (cd - rof*0.85)/(rof*0.15)); // string still snapping forward
+      // draw starts ON the brace string (x 4.6, matching the rest bow)
+      // and anchors at the chest — the old -6 full draw dragged the rear
+      // arm way past the shoulder (overstretched, user call)
+      anim.pull = 4.6 - 7.6*anim.drawT;
+      // arm states: bow always in the left fist; the right hand is on
+      // the string only while drawing — otherwise it IS the idle arm
+      anim.gripS = -1;
+      anim.armState = { '-1': 'grip',
+        '1': (anim.swinging && !anim.justFired) ? 'support' : 'idle' };
+      {
+        let M = RIG_MOUNTS.archer.bow;
+        anim.heldD = mountHeldD(M, R, F);
+      }
+      if (anim.swinging) {
+        anim.theta = aimAngleBallistic();
+        anim.upperLean = -0.10*anim.drawT;  // torso braces back into the draw
+        anim.upperLunge = -0.5*anim.drawT;
+        anim.upperPivot = -2.5; anim.stance = 1.4;
+      }
+    }
+
+    // The head counter-rotates against the torso lean (stays near level —
+    // eyes on the target) — the tell that the body is segmented.
+    if (anim.upperLean) anim.headLean = -0.4*anim.upperLean;
+
+    // One arm subpath shoulder→hand through a bent elbow. bend is signed
+    // (elbow toward the left normal of shoulder→hand; the facing mirror
+    // flips it with the context) and straightens as the arm extends. The
+    // quadratic passes THROUGH the elbow at t=0.5, hence ctrl = mid + 2·n·off.
+    const armPath = (sx0, sy0, hx, hy, bend, reach = 8) => {
+      let dx = hx-sx0, dy = hy-sy0, d = Math.hypot(dx, dy) || 0.01;
+      let off = bend ? bend * 2.6 * Math.max(0, 1 - d/reach) : 0;
+      X.moveTo(sx0, sy0);
+      // a zero-bend arm is a true line — a degenerate quadratic rasterizes
+      // with subtly different antialiasing
+      if (!off) X.lineTo(hx, hy);
+      else X.quadraticCurveTo((sx0+hx)/2 - dy/d*2*off, (sy0+hy)/2 + dx/d*2*off, hx, hy);
+    };
+
+    // Where each hand IS this frame, in the mirrored body frame — the arm
+    // pass draws to these, the held layer anchors its items on the same
+    // values, so hands and grips can never drift apart. Memoized per
+    // drawUnit invocation (anim is frozen for the frame; mounted units
+    // draw their two arms in separate passes and would recompute).
+    let _hands = null;
+    const handTargets = () => _hands || (_hands = computeHandTargets());
+    const computeHandTargets = () => {
+      let hxo = humanXOffset, hyo = humanYOffset;
+      // Lego-style shoulders: anchors sit ON the torso rim (narrower dress
+      // rim for the female villager), never inside it — wide in every view
+      // (tucked per-view shoulders were tried and rejected), and an arm
+      // drawn behind the torso still shows its shoulder cap and hanging
+      // length instead of vanishing into the body's cover.
+      let shx = (e.utype==='villager' && e.female) ? 3.9 : 4.5;
+      // rig-projected shoulders for EVERY humanoid — rim width and
+      // near/far drop scale with the direction (anim.shDx/shDy from the
+      // pose seam); profiles collapse to the centerline via shDx = 0
+      let shdy = anim.shDy * shx;
+      shx *= anim.shDx;
+      let shF = shx+hxo, shR = -shx+hxo;
+      let shFy = -8 + shdy + hyo, shRy = -8 - shdy + hyo;
+      // SE reads slightly TURNED: the sword-side shoulder rides a touch
+      // toward the facing (user call). Two-handed (dark-age) also applies
+      // it at SW — the same shift in the mirrored frame — so the pair
+      // stays an EXACT mirror; feudal SW keeps its cross-body shifts.
+      if ((e.utype === 'militia' || e.utype === 'spearman') &&
+          (e.dir === 0 || (e.dir === 2 && anim.twoHand))) shF += 0.8;
+      // The walk swing is FORWARD/BACK motion. Facing the camera or away
+      // (S/N) that axis is depth, not screen-x — an x swing there drags
+      // the hands across the torso silhouette (vanishing behind it, or
+      // smearing over the unit's back), so it maps to a small antiphase
+      // bob instead.
+      let nsView = faceOnView;
+      let axial = nsView ? 0 : anim.armSwing;
+      let bobY  = nsView ? anim.armSwing*0.4 : 0;
+      // Idle/walk: arms hang extended, symmetric about the shoulders. In
+      // the N/S views both arms hang RELAXED, straight down from the
+      // shoulders with barely-bowed elbows (an inward point toward the
+      // hips was tried and read tense, user call; bend signs flip per
+      // side — armPath's bend is path-direction-relative).
+      let front = nsView ? { x: shF-0.1, y: -3+bobY+hyo, bend: -0.15 }
+                         : { x: shF+0.9+axial, y: -3.2+shdy+hyo, bend: 0.3 };
+      let rear  = nsView ? { x: shR+0.1, y: -3-bobY+hyo, bend: 0.15 }
+                         : { x: shR-0.9-axial, y: -3.2-shdy+hyo, bend: 0.3 };
+      // Corpses keep the hanging default: drawCorpse suppresses the held
+      // weapon and lays it on the ground — a grip target would leave the
+      // toppled arms clutching empty air.
+      if (e.corpseRot) return { front, rear, shF, shR, shFy, shRy };
+      // A weapon-local grip point mapped into the mirrored body frame,
+      // riding the aim rotation while swinging. The facing un-mirror
+      // (X.scale(e.facing,1) in the held layer) folds ONLY into the x
+      // rotation term — keep both weapons on this one spelling.
+      const gripAt = (A, px, py) => {
+        if (!anim.swinging) return { x: A.x+px+hxo, y: A.y+py+hyo };
+        let c = Math.cos(anim.theta), n = Math.sin(anim.theta);
+        return { x: A.x + e.facing*(px*c - py*n) + hxo, y: A.y + px*n + py*c + hyo };
+      };
+      // Off hand strapped to the BRACED shield's inner face — bound to
+      // the SHIELD RIG's projected center, so the arm follows the plate
+      // wherever the mount lands (the shield draws over, covering the
+      // hand). Slung shields bind nothing (the off arm is idle).
+      const shieldGrip = () => ({
+        x: anim.shieldRest.x + hxo,
+        y: anim.shieldRest.y + hyo,
+        bend: anim.swArm === 'rear' ? 0.5 : -0.5
+      });
+      if (e.utype === 'villager') {
+        let picking  = !moving && (e.task==='forage'||anim.carcassTarget); // farmers hold the scythe instead
+        let fighting = !moving && !e.task && e.target && !picking && !anim.carcassTarget;
+        if (anim.gripTask && anim.working) {
+          // TWO-HANDED tool grip riding the swinging handle (the militia
+          // B-mode treatment): grip fist partway up the shaft, support
+          // fist below it, both rotated by the swing about the rig-
+          // projected toolRest; twf mirrors the swing offsets with the
+          // tool art. Saws stay one-handed (frame grip).
+          // (same predicate as the tool draw: frame-forward sign, ties
+          // by depth — the hands must mirror WITH the art)
+          let twf = frameFwdSign();
+          let c = Math.cos(anim.swing), n = Math.sin(anim.swing);
+          let gx = anim.toolRest.x + twf*(2.2*c + 2.4*n), gy = anim.toolRest.y + 2.2*n - 2.4*c;
+          let bend = 0.8;
+          if (anim.sawing) { // hand wraps the saw's near frame upright, riding the stroke
+            gx = anim.toolRest.x + twf*(anim.sawOff + 0.5); gy = anim.toolRest.y + 1.5; bend = 0.5;
+          }
+          let gT = armFrameSide(anim.gripS);
+          if (gT === 'rear') rear = { x: gx, y: gy, bend: -bend };
+          else front = { x: gx, y: gy, bend };
+          if (anim.armState[-anim.gripS] === 'support') {
+            // support fist further DOWN the handle — ON the handle LINE
+            // (collinear with the grip vector (2.2,-2.4) about the
+            // anchor; the old (-1.5,-1.7) sat up-back OFF the shaft and
+            // the near arm floated misaligned, caught at NE)
+            let sx2 = anim.toolRest.x + twf*(-0.9*c - 1.0*n), sy2 = anim.toolRest.y - 0.9*n + 1.0*c;
+            let s2 = { x: sx2, y: sy2, bend: 0.5 };
+            if (gT === 'rear') front = s2; else rear = s2;
+          }
+        }
+        else if (anim.scythe) {
+          // hand rides the snath through the sweep, about the RIG-
+          // projected tool anchor (same predicate/side as every tool —
+          // the fixed (2,−8) + facingNorth mirror was the last pre-rig
+          // hand bind)
+          let twf2 = frameFwdSign();
+          let c2 = Math.cos(anim.sweep), n2 = Math.sin(anim.sweep);
+          let gx = anim.toolRest.x + twf2*(1.2*c2 - 2.2*n2);
+          let gy = anim.toolRest.y + 1 + 1.2*n2 + 2.2*c2;
+          if (armFrameSide(anim.gripS) === 'rear') rear = { x: gx, y: gy, bend: -0.5 };
+          else front = { x: gx, y: gy, bend: 0.5 };
+        }
+        else if (picking)   front = { x: 5.6+anim.pick*0.8, y: -5.5-anim.pick*3.5, bend: 0.6 };
+        // (the rear arm keeps its IDLE hang during the jab — idle-state
+        // arms never take attack-specific poses, user call)
+        else if (fighting)  front = { x: 4.5+anim.jab*4.5, y: -6.5-anim.jab*1.5, bend: 0.6 };
+        if (anim.barrow || anim.plowRig) {
+          // both fists on the barrow's projected handle ends (barrowGrips
+          // rides the same axes + axle rock drawBarrow draws with, so
+          // hands and barrow can never drift apart in any facing) — the
+          // PLOW rides the same weld, its work stroke fed in as the
+          // shared rig shift so the arms pump with the drive.
+          // -bob: fists pin to the COUNTER-BOBBED handles — the barrow
+          // stays grounded while the shoulders bob, the arms absorb it.
+          let g = barrowGrips(e, anim.barrowTilt || 0, anim.plowRig ? anim.plowOff : 0);
+          let by = anim.carryRest.y - bob/UNIT_SCALE;
+          // each fist takes the handle on ITS OWN side of the frame
+          // (assigning near-handle-to-front-arm crossed the arms on the
+          // diagonals — one hand read as missing, the other on the
+          // wrong handle, user caught it at SE). Side comes from the
+          // UNTILTED lateral axis: at the profiles the grips tie in
+          // screen x and the axle rock flipped the tie-break every half
+          // bob cycle — the fists hopped between handles (the E/W
+          // "bouncing hands", user caught it twice)
+          let bv = barrowAxes(e).ax.v;
+          // second clause: at the MIRRORED profile (W) the front-depth
+          // arm carries the other frame label than at E (R.d flips
+          // under the mirror, the label fallback doesn't) — swap so the
+          // visible near arm still gets the near/lower handle
+          if ((Math.sign(bv.y) || 1) * bv.x < -0.005 ||
+              (Math.abs(bv.x) <= 0.005 && e.facing < 0)) g = [g[1], g[0]];
+          // REAL elbows: these arms run ~10 long, past armPath's default
+          // reach of 8 — the bend damping clamped to ZERO and every bend
+          // value drew dead-straight rods (why the elbows "weren't
+          // used", user caught it). reach 14 restores the bow; one
+          // shared positive bend bows BOTH elbows back-down (the same
+          // world side — mirrored signs sent one elbow forward).
+          // face-on (S/N) the arms run foreshortened toward the viewer
+          // — sideways elbow bows read wrong there (user call): tiny
+          // mirrored bends instead.
+          let bF = faceOnView ? -0.15 : 0.55, bR = faceOnView ? 0.15 : 0.55;
+          front = { x: anim.carryRest.x + g[0].x, y: by + g[0].y, bend: bF, reach: 14 };
+          rear  = { x: anim.carryRest.x + g[1].x, y: by + g[1].y, bend: bR, reach: 14 };
+        } else if (anim.carryShow) {
+          // BOTH hands under the overhead load, elbows bowed outward —
+          // hands and resource can never drift apart, every direction.
+          // The spread rides the lateral axis's visible width: widest
+          // face-on (S/N — arms clearly OUT holding the load, user
+          // call), tapering to the profiles.
+          let w = 2.2 + 2.3 * Math.abs(RIG[(e.dir + 2) & 7].sx);
+          front = { x: w, y: anim.carryRest.y + 2.2, bend: -0.3 };
+          rear  = { x: -w, y: anim.carryRest.y + 2.2, bend: 0.3 };
+        }
+      } else if (e.utype === 'militia' || e.utype === 'spearman' || isMountedUnit(e.utype)) {
+        // ONE sword-hand bind for foot + spearman + mounted. bend per pose: the
+        // cross-body arm SAGS (0.45); face-on vertical arms bow OUTWARD
+        // (sign flips with the arm); else the standard reach bow.
+        let g = { x: anim.grip.x+hxo, y: anim.grip.y+hyo,
+                  bend: anim.faceOn ? (anim.swArm === 'rear' ? 0.35 : -0.35) : 0.5 };
+        if (anim.swArm === 'rear') rear = g; else front = g;
+        // DARK-AGE militia (no shield yet): the off hand JOINS the sword
+        // — a TWO-HANDED grip, both fists on the SAME grip point in every
+        // view (a 1.5 down-the-handle stack was tried and reverted — it
+        // dragged one arm visibly lower, read as broken, user call).
+        // Face-on the support elbow mirrors the grip's bend so the two
+        // arms are exact mirrors. (Riders keep a hanging off arm —
+        // reins; shielded tiers strap it below.)
+        if (anim.twoHand) {
+          let g2 = { x: g.x, y: g.y, bend: anim.faceOn ? -g.bend : 0.4 };
+          if (anim.swArm === 'rear') front = g2; else rear = g2;
+        }
+        // the non-grip arm: shield state binds it to the shield's inner
+        // face; support (two-hand) bound to g2 above; IDLE arms keep the
+        // hanging defaults untouched — identical to the idle pose at all
+        // times, attacks included (the counterswing was deleted, user call)
+        if (anim.armState[-anim.gripS] === 'shield') {
+          let sg = shieldGrip();
+          if (anim.swArm === 'rear') front = sg; else rear = sg;
+        }
+      } else if (e.utype === 'archer') {
+        // Front fist wraps the riser BELOW the arrow line (the arrow skims
+        // over the hand, not through it) — closer grip keeps the arm bent;
+        // rear hand tracks the string nock while drawing (the release
+        // reads for free when it lets go).
+        // the fist always reads at the BOTTOM of the riser: the grip's
+        // bow-local side flips with the aim's cos so the rotated hand
+        // never rides the upper handle (user call); ±90° aims converge
+        // on the riser center gracefully
+        let gy = 1.8 * ((anim.swinging ? Math.cos(anim.theta) : 1) >= 0 ? 1 : -1);
+        front = { ...gripAt(GRIP_REST.archer, 7.2, gy), bend: 0.55 };
+        if (anim.swinging && !anim.justFired) rear = { ...gripAt(GRIP_REST.archer, anim.pull, 0), bend: 0.9 };
+      }
+      return { front, rear, shF, shR, shFy, shRy };
+    };
+    // Upper-body pose: torso-and-up (arms, gear, head) leans/lunges from
+    // a pivot — the hips on foot, the saddle when mounted — while legs or
+    // horse stay planted. The head then counter-rotates inside (headly).
+    const upperly = (fn) => {
+      if (!anim.upperLean && !anim.upperLunge) { fn(); return; }
+      X.save();
+      if (faceOnView) {
+        // Facing the camera (S) or away (N): forward is down/up-screen —
+        // a sideways rotate reads as a SIDE attack. Lunge shifts along
+        // the view axis; the lean foreshortens the torso instead.
+        let sgn = e.dir === 1 ? 1 : -1;
+        X.translate(0, sgn*(anim.upperLunge || 0)*0.6 + anim.upperPivot);
+        X.scale(1, 1 - Math.abs(anim.upperLean || 0)*0.35);
+        X.translate(0, -anim.upperPivot);
+      } else {
+        X.translate(anim.upperLunge || 0, anim.upperPivot);
+        X.rotate(anim.upperLean || 0);
+        X.translate(0, -anim.upperPivot);
+      }
+      fn(); X.restore();
+    };
+    const headly = (fn) => {
+      // no counter-rotation in the S/N views — the torso doesn't rotate there
+      if (!anim.headLean || faceOnView) { fn(); return; }
+      X.save();
+      X.translate(humanXOffset, -11+humanYOffset);
+      X.rotate(anim.headLean);
+      X.translate(-humanXOffset, 11-humanYOffset);
+      fn(); X.restore();
+    };
+    // ---- end hand-pose seam ----
 
     // When the horse faces the camera its head hangs in front of the
     // rider, so that part is deferred and drawn after the rider.
@@ -2148,7 +4152,7 @@ function drawUnit(e){
       if (useDirM === 7 || useDirM === 0) {
         const coatM = e.utype==='knight'?'#9a948a':'#3f2810';
         let idleM = !moving && !e.corpseRot;
-        let swishM = e.corpseRot ? 0 : Math.sin(tick*0.08+e.id)*(idleM?0.2:0.08);
+        let swishM = e.corpseRot ? 0 : Math.sin(animTick*0.08+e.id)*(idleM?0.2:0.08);
         let kM = useDirM === 7 ? 1 : 0.72;
         X.save(); X.translate(0,-1); X.scale(1.35,1.35);
         X.translate(-6.6*kM,-7); X.rotate(swishM);
@@ -2160,7 +4164,7 @@ function drawUnit(e){
     }
     // Walking leg cycle (swinging legs with constant leg length)
     if(isMountedUnit(e.utype)){
-      let walk = moving ? Math.sin(tick*0.45+e.id)*4.5 : 0;
+      let walk = moving ? Math.sin(animTick*0.45+e.id)*4.5 : 0;
       X.save(); X.translate(0,-1); X.scale(1.35,1.35); // horse is drawn larger than the rider grid
       X.beginPath();
       
@@ -2222,8 +4226,8 @@ function drawUnit(e){
       // Knight rides a WHITE charger (unmistakable vs the scout's bay).
       const coat=e.utype==='knight'?'#e9e6de':'#8b5a2b', maneC=e.utype==='knight'?'#9a948a':'#3f2810';
       let idle = !moving && !e.corpseRot;
-      let nod = idle ? Math.sin(tick*0.05+e.id)*0.8 : 0;
-      let swish = e.corpseRot ? 0 : Math.sin(tick*0.08+e.id)*(idle?0.2:0.08);
+      let nod = idle ? Math.sin(animTick*0.05+e.id)*0.8 : 0;
+      let swish = e.corpseRot ? 0 : Math.sin(animTick*0.08+e.id)*(idle?0.2:0.08);
       X.save(); X.translate(0,-1); X.scale(1.35,1.35); // match the enlarged legs
       const ear=(x,y,ang)=>{ X.save(); X.translate(x,y); X.rotate(ang);
         // Rounded leaf-shaped ear (a bare triangle reads as a horn)
@@ -2232,17 +4236,57 @@ function drawUnit(e){
         X.quadraticCurveTo(1.3,-1.6, 1.1,0.6); X.closePath();
         X.fillStyle=coat; X.strokeStyle='#000'; X.lineWidth=1.2/UNIT_SCALE; X.fill(); X.stroke(); X.restore(); };
       X.strokeStyle='#000'; X.lineWidth=1.2/UNIT_SCALE;
+      // One spelling of the body ellipse per view. Armor techs leave the
+      // horse untouched, but every mount wears a team-color saddle blanket
+      // — the always-on team tell (a mailed rider is mostly steel).
+      // Clipped inside the body so the silhouette stays one piece.
+      const drawHorseBody = (bx,by,brx,bry) => {
+        X.fillStyle=coat;
+        X.beginPath(); X.ellipse(bx,by,brx,bry,0,0,Math.PI*2); X.fill(); X.stroke();
+        X.save();
+        X.beginPath(); X.ellipse(bx,by,brx-0.5,bry-0.5,0,0,Math.PI*2); X.clip();
+        let dx0 = bx-brx*0.55, dw = brx*1.1, dy0 = by-bry, hem = by+bry*0.7;
+        // hanging cloth: the hem dips at the middle
+        const drapePath = () => {
+          X.beginPath();
+          X.moveTo(dx0, dy0); X.lineTo(dx0+dw, dy0);
+          X.lineTo(dx0+dw, hem-0.9);
+          X.quadraticCurveTo(bx, hem+1.5, dx0, hem-0.9);
+          X.closePath();
+        };
+        drapePath(); X.fillStyle=tc; X.fill();
+        // volume: lit from the upper-left, curving away lower-right
+        X.save(); drapePath(); X.clip();
+        X.fillStyle='rgba(255,255,255,0.25)'; X.fillRect(dx0, dy0, dw, 1.5);
+        X.fillStyle='rgba(255,255,255,0.10)'; X.fillRect(dx0, dy0, dw*0.3, bry*2);
+        X.fillStyle='rgba(0,0,0,0.18)';       X.fillRect(dx0+dw*0.7, dy0, dw*0.3, bry*2);
+        X.fillStyle='rgba(0,0,0,0.15)';       X.fillRect(dx0, by+bry*0.2, dw, bry);
+        // light seam stitched above the hem
+        X.strokeStyle='rgba(255,255,255,0.35)'; X.lineWidth=0.7/UNIT_SCALE;
+        X.beginPath(); X.moveTo(dx0+0.6, hem-2.1); X.quadraticCurveTo(bx, hem+0.3, dx0+dw-0.6, hem-2.1); X.stroke();
+        X.restore();
+        // hem outline + cast shadow onto the barrel below
+        X.strokeStyle='rgba(0,0,0,0.5)'; X.lineWidth=1/UNIT_SCALE;
+        X.beginPath(); X.moveTo(dx0, hem-0.9); X.quadraticCurveTo(bx, hem+1.5, dx0+dw, hem-0.9); X.stroke();
+        X.fillStyle='rgba(0,0,0,0.15)';
+        X.beginPath();
+        X.moveTo(dx0, hem-0.9); X.quadraticCurveTo(bx, hem+1.5, dx0+dw, hem-0.9);
+        X.quadraticCurveTo(bx, hem+3.6, dx0, hem-0.9);
+        X.closePath(); X.fill();
+        X.restore();
+        X.strokeStyle='#000'; X.lineWidth=1.2/UNIT_SCALE;
+      };
 
       if (useDir === 7 || useDir === 0) {
         // East profile / Southeast diagonal (same construction, SE compressed)
-        // Profile k=1; diagonal k=0.72 — the old 0.85 was so close to the
-        // profile that SW/W read as the same sprite. The 3/4 view is sold
+        // Profile k=1; diagonal k=0.72 — at 0.85 the diagonal is so close
+        // to the profile that SW/W read as the same sprite. The 3/4 view is sold
         // by real foreshortening plus receding hindquarters (legs below).
         let k = useDir === 7 ? 1 : 0.72;
         // (tail drawn earlier in drawMountLayer, behind the legs)
         // Body capsule
-        X.strokeStyle='#000'; X.lineWidth=1.2/UNIT_SCALE; X.fillStyle=coat;
-        X.beginPath(); X.ellipse(0,-6,7.4*k,4.9,0,0,Math.PI*2); X.fill(); X.stroke();
+        X.strokeStyle='#000'; X.lineWidth=1.2/UNIT_SCALE;
+        drawHorseBody(0,-6,7.4*k,4.9);
         // Neck + head silhouette, anchored at the front of the body
         // (nods gently while idle)
         X.save(); X.translate(2.6*k,nod);
@@ -2273,8 +4317,8 @@ function drawUnit(e){
         X.restore();
       } else if (useDir === 6) {
         // Northeast diagonal (back view): arched neck seen from behind
-        X.strokeStyle='#000'; X.lineWidth=1.2/UNIT_SCALE; X.fillStyle=coat;
-        X.beginPath(); X.ellipse(0,-6,6.6,4.9,0,0,Math.PI*2); X.fill(); X.stroke();
+        X.strokeStyle='#000'; X.lineWidth=1.2/UNIT_SCALE;
+        drawHorseBody(0,-6,6.6,4.9);
         // Tail AFTER the body: facing away, the rump is the NEAR end, so
         // the tail hangs in front of it (SE/SW draw the tail behind,
         // since there the rump is the far end).
@@ -2304,11 +4348,13 @@ function drawUnit(e){
       } else if (useDir === 1) {
         // South (front view): body behind the rider; the hanging head is
         // deferred so it renders in front of the rider.
-        X.fillStyle=coat;
-        X.beginPath(); X.ellipse(0,-5.5,5.6,5.2,0,0,Math.PI*2); X.fill(); X.stroke();
+        drawHorseBody(0,-5.5,5.6,5.2);
         horseHeadFront = () => {
-          let nod2 = (!moving) ? Math.sin(tick*0.05+e.id)*0.8 : 0;
-          X.save(); X.translate(0,-1+nod2); X.scale(1.35,1.35);
+          let nod2 = (!moving) ? Math.sin(animTick*0.05+e.id)*0.8 : 0;
+          // the head hangs CENTERED — the sword clears it by moving to
+          // the grip hand's side instead (user call)
+          X.save(); X.translate(0,-1+nod2);
+          X.scale(1.35, 1.35); X.translate(-4.1, 0);
           X.strokeStyle='#000'; X.lineWidth=1.2/UNIT_SCALE; X.fillStyle=coat;
           ear(2.4,-12.6,-0.3); ear(5.8,-12.4,0.3);
           // Rounded skull narrowing into a short hanging muzzle
@@ -2335,18 +4381,18 @@ function drawUnit(e){
           X.restore();
         };
       } else {
-        // North (back view): neck/head face away, body and tail closest
+        // North (back view): neck/head face away, CENTERED on the body
+        // (they sat +3 off-center, user caught it), body and tail closest
         X.save(); X.translate(0,nod);
         X.fillStyle=coat;
-        X.beginPath(); X.ellipse(3,-10,2.9,4.6,0,0,Math.PI*2); X.fill(); X.stroke(); // neck
-        ear(1.5,-15,-0.25); ear(4.7,-14.9,0.25);
-        X.beginPath(); X.ellipse(3,-13.1,2.6,2.8,0,0,Math.PI*2); X.fill(); X.stroke(); // back of head
+        X.beginPath(); X.ellipse(0,-10,2.9,4.6,0,0,Math.PI*2); X.fill(); X.stroke(); // neck
+        ear(-1.5,-15,-0.25); ear(1.7,-14.9,0.25);
+        X.beginPath(); X.ellipse(0,-13.1,2.6,2.8,0,0,Math.PI*2); X.fill(); X.stroke(); // back of head
         X.fillStyle=maneC;
-        X.beginPath(); X.ellipse(3,-11.8,1.3,4.2,0,0,Math.PI*2); X.fill(); // mane down the crest
+        X.beginPath(); X.ellipse(0,-11.8,1.3,4.2,0,0,Math.PI*2); X.fill(); // mane down the crest
         X.restore();
         // Body drawn over the neck base
-        X.fillStyle=coat;
-        X.beginPath(); X.ellipse(0,-5,5.8,5.3,0,0,Math.PI*2); X.fill(); X.stroke();
+        drawHorseBody(0,-5,5.8,5.3);
         // Swishing tail down the center
         X.save(); X.translate(0,-3); X.rotate(swish);
         X.beginPath(); X.moveTo(0,0); X.quadraticCurveTo(-0.8,4.5,0,8.5);
@@ -2365,21 +4411,112 @@ function drawUnit(e){
     // wrapped in closures so the invocation order can flip per facing.
     const drawBodyLayer = () => {
     if(!isMountedUnit(e.utype)){
-      // Human legs (visible both when standing and walking)
-      let walk = moving ? Math.sin(tick*0.4+e.id)*2.5 : 0;
-      X.beginPath();
-      X.moveTo(-2+humanXOffset, -bob); X.lineTo(-2-walk+humanXOffset, 3-bob);
-      X.moveTo(2+humanXOffset, -bob); X.lineTo(2+walk+humanXOffset, 3-bob);
-      X.strokeStyle = '#000000'; X.lineWidth=3.0/UNIT_SCALE; X.lineCap='round'; X.stroke();
-      X.strokeStyle = '#5b3a1e'; X.lineWidth=1.5/UNIT_SCALE; X.stroke();
-      // Boots
-      X.fillStyle='#3a2412';
-      X.beginPath();X.arc(-2-walk+humanXOffset,3.4-bob,1.4,0,Math.PI*2);X.fill();
-      X.beginPath();X.arc(2+walk+humanXOffset,3.4-bob,1.4,0,Math.PI*2);X.fill();
-      X.lineCap='butt';
+      // Human legs: they never ride the upper-body LEAN (rotation), but
+      // they do follow the LUNGE below. During actions the stance spreads
+      // (front foot steps out, rear braces).
+      // POSE-RIG legs: hips sit ±lat on the body's lateral axis and the
+      // stride swings along the FACING, both projected per dir — profile
+      // walkers scissor full screen-x strides, face-on walkers read as a
+      // small vertical alternation, and on diagonals the NEAR leg stands
+      // slightly lower (closer to the camera) than the far one.
+      let walk = moving ? Math.sin(animTick*0.4+e.id)*2.5 : 0;
+      let st = anim.stance || 0;
+      // legs FOLLOW the attack lunge, on the SAME axis upperly translates
+      // the torso (view-axis y at S/N, screen-x else): hips ride half of
+      // it, the front foot steps fully with it, the rear foot stays
+      // planted — the segmented torso can no longer detach from standing
+      // legs. upperLunge is only set by action seams: idle/walk exact.
+      let lgx = 0, lgy = 0;
+      if (anim.upperLunge) {
+        if (faceOnView) lgy = (e.dir === 1 ? 1 : -1)*anim.upperLunge*0.6;
+        else lgx = anim.upperLunge;
+      }
+      // lateral screen separation, floored so profile legs don't merge
+      let latX = 2.8 * R.sx, latY = 2.8 * R.sy;
+      if (Math.abs(latX) < 0.6) latX = 0.6;
+      const leg = (s, stride) => { // s = ±1 lateral side; stride rides the facing
+        let f = stride > 0 ? 1 : 0; // the stride-forward leg does the stepping
+        let hx2 = e.facing * (s * latX) + humanXOffset + lgx*0.5;
+        let hy2 = -2 - bob + lgy*0.5;
+        let fx2 = e.facing * (s * latX + stride * F.sx) + humanXOffset + lgx*f;
+        let fy2 = 3 + s * latY + stride * F.sy + lgy*f;
+        // KNEE: the elbow treatment — one quadratic, control point pushed
+        // along the FACING (foreshortens at S/N for free). The forward-
+        // swinging leg flexes on the walk, the front leg crouches under
+        // an attack lunge; a braced rear leg stays STRAIGHT (kneeK 0 =
+        // straight line, so the idle stance is bit-identical).
+        let kneeK = Math.min(2, Math.max(0, stride)*0.5 + f*Math.hypot(lgx, lgy)*0.35);
+        X.beginPath();
+        // hip anchored INSIDE the torso (bottom edge ≈ −1; legs draw
+        // behind it) so the lowered-side leg never detaches from the body
+        X.moveTo(hx2, hy2);
+        if (kneeK) X.quadraticCurveTo((hx2+fx2)/2 + e.facing*F.sx*kneeK,
+                                      (hy2 + fy2 - bob)/2 + F.sy*kneeK, fx2, fy2 - bob);
+        else X.lineTo(fx2, fy2 - bob);
+        X.strokeStyle = '#000000'; X.lineWidth = 3.0/UNIT_SCALE; X.lineCap = 'round'; X.stroke();
+        X.strokeStyle = '#5b3a1e'; X.lineWidth = 1.5/UNIT_SCALE; X.stroke();
+        X.fillStyle = '#3a2412';
+        X.beginPath(); X.arc(fx2, fy2 + 0.4 - bob, 1.4, 0, Math.PI*2); X.fill();
+      };
+      // far leg first, near leg over it (near side = the lateral side
+      // whose depth points at the camera; equal at S/N — order moot)
+      let sNear = (2.8 * R.d) >= 0 ? 1 : -1;
+      leg(-sNear, -sNear * (walk + (sNear > 0 ? 0.6 : 1) * st));
+      leg(sNear, sNear * (walk + (sNear > 0 ? 1 : 0.6) * st));
+      X.lineCap = 'butt';
     }
-    // CASTLE-age archer wears a quiver on the back: facing the camera it
-    // peeks BEHIND the shoulder (drawn before the torso); facing away
+    // (mounted riders stay legless — legs over the drape read as clutter
+    // at this scale; the saddle cloth carries the seated silhouette)
+    drawUpperBody();
+    }; // end drawBodyLayer
+    // Arms: shoulder→hand to the targets computed at the hand-pose seam —
+    // the same values the held layer anchors its items on. One shared path,
+    // one outline stroke, one skin stroke. Hoisted out of drawBodyLayer so
+    // the mounted sword arm can be sequenced against the HELD layer.
+    const drawArms = (which) => { // 'front'/'rear' = that hand-target's arm only; omit for both
+      let hands = handTargets();
+      X.beginPath();
+      if (which !== 'front')
+        armPath(hands.shR, hands.shRy, hands.rear.x, hands.rear.y, hands.rear.bend, hands.rear.reach);
+      if (which !== 'rear')
+        armPath(hands.shF, hands.shFy, hands.front.x, hands.front.y, hands.front.bend, hands.front.reach);
+      // Fatter than the legs on purpose — chunky lego-limb read keeps the
+      // arm legible even where it brushes the torso edge.
+      X.strokeStyle='#000000';X.lineWidth=4.2/UNIT_SCALE;X.lineCap='round';X.stroke();
+      X.strokeStyle='#edc9a0';X.lineWidth=2.6/UNIT_SCALE;X.stroke();
+      // SHORT SLEEVE over the upper arm: the first stretch of the SAME
+      // quadratic (de Casteljau split), stroked in the tunic's team
+      // color — every humanoid gets clothed shoulders and the arm reads
+      // as attached to the outfit, not bare from the joint.
+      const sleeve = (sx0, sy0, hx2, hy2, bend, reach = 8) => {
+        let dx = hx2-sx0, dy = hy2-sy0, d = Math.hypot(dx, dy) || 0.01;
+        let off = bend ? bend * 2.6 * Math.max(0, 1 - d/reach) : 0;
+        let cx = (sx0+hx2)/2 - dy/d*2*off, cy = (sy0+hy2)/2 + dx/d*2*off;
+        const t = 0.18;
+        let ax = sx0+(cx-sx0)*t, ay = sy0+(cy-sy0)*t;
+        let bx2 = cx+(hx2-cx)*t, by2 = cy+(hy2-cy)*t;
+        X.beginPath(); X.moveTo(sx0, sy0);
+        X.quadraticCurveTo(ax, ay, ax+(bx2-ax)*t, ay+(by2-ay)*t);
+        // PUFFY on purpose — slightly wider than the arm so the sleeve
+        // reads as cloth over the limb (user call, after trying slim)
+        X.strokeStyle='#000000';X.lineWidth=5.4/UNIT_SCALE;X.stroke();
+        X.strokeStyle=tc;X.lineWidth=3.6/UNIT_SCALE;X.stroke();
+      };
+      if (which !== 'front')
+        sleeve(hands.shR, hands.shRy, hands.rear.x, hands.rear.y, hands.rear.bend, hands.rear.reach);
+      if (which !== 'rear')
+        sleeve(hands.shF, hands.shFy, hands.front.x, hands.front.y, hands.front.bend, hands.front.reach);
+      X.lineCap='butt';
+      // Head/headwear drawing below relies on the black outline stroke —
+      // restore it after the skin-colored arm pass.
+      X.strokeStyle='#000000';X.lineWidth=1/UNIT_SCALE;
+    };
+    const drawUpperBody = () => {
+    upperly(() => {
+    // (Arms are NEVER drawn inside the body layer — every humanoid's
+    // arms are depth-sorted parts at the layer block.)
+    // The archer's CASTLE-age quiver rides on the back: facing the camera
+    // it peeks BEHIND the shoulder (drawn before the torso); facing away
     // it's strapped across the near side (drawn after, see below).
     const drawQuiver = () => {
       X.save(); X.translate(-4.2+humanXOffset,-9+humanYOffset); X.rotate(-0.3);
@@ -2388,15 +4525,19 @@ function drawUnit(e){
       X.strokeStyle='#000';X.lineWidth=1.6/UNIT_SCALE;X.lineCap='round';
       X.beginPath();X.moveTo(-0.8,-3.2);X.lineTo(-0.8,-5.4);X.moveTo(0.8,-3.2);X.lineTo(0.8,-5.6);X.stroke();
       X.lineCap='butt';
-      X.fillStyle='#cc4444';
-      X.beginPath();X.arc(-0.8,-5.4,0.9,0,Math.PI*2);X.fill();
-      X.beginPath();X.arc(0.8,-5.6,0.9,0,Math.PI*2);X.fill();
+      // Bare shafts until Fletching — the tech adds LIGHT-team-color
+      // feathers (matches the nocked arrow and the cap plume)
+      if (eq && eq.fletched) {
+        X.fillStyle=teamColorLight(e.team);
+        X.beginPath();X.arc(-0.8,-5.4,0.9,0,Math.PI*2);X.fill();
+        X.beginPath();X.arc(0.8,-5.6,0.9,0,Math.PI*2);X.fill();
+      }
       // leather tube
       X.fillStyle='#7a5230';X.strokeStyle='#000000';X.lineWidth=1/UNIT_SCALE;
       X.beginPath();X.rect(-1.8,-3.6,3.6,7.2);X.fill();X.stroke();
       X.restore();
     };
-    let hasQuiver = e.utype==='archer' && ageBonus(e.team) >= 2;
+    let hasQuiver = !!(eq && eq.quiver);
     if (hasQuiver && !e.facingNorth) drawQuiver();
 
     // Torso
@@ -2406,7 +4547,7 @@ function drawUnit(e){
       // rounded bodice (smaller than the male torso) flowing into a
       // bell-shaped skirt wider than the shoulders, with a single outline
       // so there's no seam at the waist. Boots peek out below the hem.
-      let sway = moving ? Math.sin(tick*0.4+e.id)*0.7 : 0;
+      let sway = moving ? Math.sin(animTick*0.4+e.id)*0.7 : 0;
       X.fillStyle=tc;
       X.beginPath();
       X.arc(0,-6,4.1,Math.PI,0);                        // rounded bodice over the chest
@@ -2425,6 +4566,55 @@ function drawUnit(e){
       X.beginPath();X.arc(humanXOffset,-6+humanYOffset,5,0,Math.PI*2);X.fill();X.stroke();
     }
 
+    // Armor techs read on the torso (drawn before the volume pass so the
+    // lighting shades the armor too, and clipped inside the tunic outline
+    // so the silhouette stays one piece). Scale: metal rows over the lower
+    // torso, team color keeps the shoulders. Chain: full mail under a
+    // team-color tabard stripe so team identity survives.
+    if (eq && eq.torso) {
+      let acx = humanXOffset, acy = -6 + humanYOffset;
+      X.save();
+      X.beginPath();X.arc(acx,acy,4.6,0,Math.PI*2);X.clip();
+      // Multiply the inherited alpha — drawUnit runs under the corpse
+      // fade's globalAlpha; an absolute reset would flash the armor solid.
+      let ga = X.globalAlpha;
+      if (eq.torso === 'scale') {
+        X.fillStyle=eq.metal;X.globalAlpha=ga*0.85;
+        X.fillRect(acx-5,acy-1.2,10,6.2);X.globalAlpha=ga;
+        X.strokeStyle='rgba(0,0,0,0.4)';X.lineWidth=0.9/UNIT_SCALE;
+        for(let ry=0;ry<3;ry++){
+          let sy2 = acy + 0.1 + ry*1.6;
+          for(let rx=-2;rx<=2;rx++){
+            X.beginPath();X.arc(acx+rx*2+(ry%2),sy2,1.1,0,Math.PI);X.stroke();
+          }
+        }
+        // hard upper edge so the armor reads as a piece, not a stain
+        X.strokeStyle='rgba(0,0,0,0.5)';X.lineWidth=0.9/UNIT_SCALE;
+        X.beginPath();X.moveTo(acx-5,acy-1.2);X.lineTo(acx+5,acy-1.2);X.stroke();
+      } else { // chain
+        // Chain reuses the scale texture language — finer rows over the
+        // WHOLE torso in a fixed light steel that stays brighter than any
+        // forge-tier scale — so the armor tiers read as coverage +
+        // brightness steps of one idea.
+        X.fillStyle='#dde3ea';X.globalAlpha=ga*0.95;
+        X.fillRect(acx-5,acy-5,10,10);
+        // Slight team-color wash over the steel (user call: a full-mail
+        // torso hid the team at a glance). Low alpha keeps chain brighter
+        // than any scale tier so the armor-ladder brightness read survives.
+        X.fillStyle=tc;X.globalAlpha=ga*0.2;
+        X.fillRect(acx-5,acy-5,10,10);X.globalAlpha=ga;
+        X.strokeStyle='rgba(0,0,0,0.35)';X.lineWidth=0.8/UNIT_SCALE;
+        for(let ry=0;ry<7;ry++){
+          let sy2 = acy - 4.6 + ry*1.4;
+          for(let rx=-3;rx<=3;rx++){
+            X.beginPath();X.arc(acx+rx*1.6+(ry%2?0.8:0),sy2,0.9,0,Math.PI);X.stroke();
+          }
+        }
+      }
+      X.restore();
+      X.strokeStyle='#000000';X.lineWidth=1/UNIT_SCALE;
+    }
+
     // Torso volume: soft highlight upper-left, shade lower-right
     {
       let torsoR = (e.utype==='villager'&&e.female) ? 3.7 : 4.6;
@@ -2437,143 +4627,39 @@ function drawUnit(e){
       X.restore();
     }
 
-    // Arms: rear arm hangs at the side, front arm reaches toward the weapon/tool hand
-    {
-      let armSwing = moving ? Math.sin(tick*0.4+e.id)*1.5 : 0;
-      // While a villager works a tool, the front hand grips the handle base
-      // (the tool's rotation anchor at (3,-9)) instead of hanging loose.
-      let gripping = e.utype==='villager' && !moving &&
-        (e.task==='chop'||e.task==='mine_gold'||e.task==='mine_stone'||e.task==='build');
-      // Picking (berries/farm/butchering a carcass): no tool — the front arm
-      // just reaches out and down repeatedly, like plucking. Carcass
-      // harvesters are target-driven (no task), hence the extra check.
-      let carcassTarget = !e.task&&e.target&&entitiesById.get(e.target)?.utype==='sheep_carcass';
-      let picking = e.utype==='villager' && !moving &&
-        (e.task==='forage'||e.task==='farm'||carcassTarget);
-      let pick = Math.sin(tick*0.18+e.id);
-      // Fighting (AoE2 villagers have an attack animation): a fast forward
-      // jab — sharp punch out, slower recovery — whenever a villager is
-      // engaging a combat target (incl. slaughtering a live sheep).
-      let fighting = e.utype==='villager' && !moving && !e.task &&
-        e.target && !picking && !carcassTarget;
-      let jabPh = ((tick*0.06 + e.id*0.41) % 1 + 1) % 1;
-      let jab = jabPh < 0.25 ? jabPh/0.25 : 1-(jabPh-0.25)/0.75; // 0..1 spike
-      X.beginPath();
-      X.moveTo(-3.5+humanXOffset,-8+humanYOffset); X.lineTo(-5+humanXOffset-armSwing,-3.5+humanYOffset);
-      // Militia mid-slash: the sword arm follows the pumping sword hand
-      // (same swing phase as drawBigSword) instead of hanging loose.
-      let slashing = e.utype==='militia' && e.path.length===0 && (e.target||e.__animAttack) && !e.corpseRot;
-      let sA = slashing ? Math.sin(swordSwingAngle(e.id)) : 0;
-      X.moveTo(3.5+humanXOffset,-8+humanYOffset);
-      if(gripping) X.lineTo(3,-8.8);
-      else if(slashing) X.lineTo(5.8+humanXOffset-1.4*sA, -5.8+humanYOffset-1.4*sA);
-      else if(picking) X.lineTo(5.6+humanXOffset+pick*0.8, -5.5+humanYOffset-pick*3.5);
-      else if(fighting) X.lineTo(4.5+humanXOffset+jab*4.5, -6.5+humanYOffset-jab*1.5);
-      else X.lineTo(4.5+humanXOffset+armSwing,-4.5+humanYOffset);
-      X.strokeStyle='#000000';X.lineWidth=3.0/UNIT_SCALE;X.lineCap='round';X.stroke();
-      X.strokeStyle='#edc9a0';X.lineWidth=1.5/UNIT_SCALE;X.stroke();
-      X.lineCap='butt';
-      // Head/headwear drawing below relies on the black outline stroke set
-      // before the torso — restore it after the skin-colored arm pass.
-      X.strokeStyle='#000000';X.lineWidth=1/UNIT_SCALE;
-    }
+    // (no arm draws here — arms are depth-sorted parts for every humanoid)
+    // Head lateral turn on screen (0 face-on, ±.707 diagonal, ±1 profile)
+    // — the helmet's face details ride it through all 8 dirs.
+    let hturn = e.facing * RIG[e.dir].sx;
+    headly(() => {
     if (e.facingNorth) {
       // Facing North (away from camera): Draw back of headwear/hair covering the head (no face)
-      if(e.utype==='militia' && ageBonus(e.team) === 1){
-        // Back of the FEUDAL militia kettle hat (same as the spearman's):
-        // dome first, brim on top — the near side of the brim crosses
-        // the head when seen from behind.
-        X.fillStyle=ageMetal(e.team);
-        X.beginPath();X.arc(humanXOffset,-14.5+humanYOffset,4,0,Math.PI*2);X.fill();X.stroke();
-        X.beginPath();X.ellipse(humanXOffset,-13.2+humanYOffset,5.4,1.5,0,0,Math.PI*2);X.fill();X.stroke();
-      } else if(e.utype==='militia' && ageBonus(e.team) >= 2){
-        // Back of the CASTLE Norman helm.
-        X.fillStyle=ageMetal(e.team);
-        X.beginPath();X.arc(humanXOffset,-14+humanYOffset,4.5,0,Math.PI*2);X.fill();X.stroke();
-        X.save();
-        X.strokeStyle='rgba(0,0,0,0.22)';X.lineWidth=1/UNIT_SCALE;
-        X.beginPath();X.moveTo(humanXOffset,-18.4+humanYOffset);X.lineTo(humanXOffset,-14.6+humanYOffset);X.stroke();
-        X.strokeStyle='rgba(255,255,255,0.5)';X.lineWidth=1.2/UNIT_SCALE;X.lineCap='round';
-        X.beginPath();X.arc(humanXOffset,-14+humanYOffset,3.3,Math.PI*1.15,Math.PI*1.55);X.stroke();
-        X.lineCap='butt';X.restore();
-        X.fillStyle='#daa520';
-        X.beginPath();X.rect(-4.5+humanXOffset,-14.5+humanYOffset,9,1.5);X.fill();X.stroke();
-        X.fillStyle='rgba(0,0,0,0.45)';
-        [-3,0,3].forEach(rx=>{X.beginPath();X.arc(humanXOffset+rx,-13.75+humanYOffset,0.4,0,Math.PI*2);X.fill();});
-      } else if(e.utype==='archer') {
-        // Back of archer hood — same at every age (quiver is the tell)
-        X.fillStyle='#2e8b57';
-        X.beginPath();X.arc(humanXOffset,-14+humanYOffset,4.5,0,Math.PI*2);X.fill();X.stroke();
-      } else if(e.utype==='spearman') {
-        X.fillStyle=ageMetal(e.team);
-        if (ageBonus(e.team) >= 2) {
-          // Back of the Castle Norman helm — same as the militia's
-          X.beginPath();X.arc(humanXOffset,-14+humanYOffset,4.5,0,Math.PI*2);X.fill();X.stroke();
-          X.save();
-          X.strokeStyle='rgba(0,0,0,0.22)';X.lineWidth=1/UNIT_SCALE;
-          X.beginPath();X.moveTo(humanXOffset,-18.4+humanYOffset);X.lineTo(humanXOffset,-14.6+humanYOffset);X.stroke();
-          X.strokeStyle='rgba(255,255,255,0.5)';X.lineWidth=1.2/UNIT_SCALE;X.lineCap='round';
-          X.beginPath();X.arc(humanXOffset,-14+humanYOffset,3.3,Math.PI*1.15,Math.PI*1.55);X.stroke();
-          X.lineCap='butt';X.restore();
-          X.fillStyle='#daa520';
-          X.beginPath();X.rect(-4.5+humanXOffset,-14.5+humanYOffset,9,1.5);X.fill();X.stroke();
-          X.fillStyle='rgba(0,0,0,0.45)';
-          [-3,0,3].forEach(rx=>{X.beginPath();X.arc(humanXOffset+rx,-13.75+humanYOffset,0.4,0,Math.PI*2);X.fill();});
-        } else {
-          // Back of the Feudal kettle hat: dome first, brim ON TOP — seen
-          // from behind, the near side of the brim crosses the head.
-          X.beginPath();X.arc(humanXOffset,-14.5+humanYOffset,4,0,Math.PI*2);X.fill();X.stroke();
-          X.beginPath();X.ellipse(humanXOffset,-13.2+humanYOffset,5.4,1.5,0,0,Math.PI*2);X.fill();X.stroke();
-        }
-      } else if(e.utype==='villager') {
-        // Back of blonde hair
+      if(eq){
+        drawHelmet(eq, humanXOffset, humanYOffset, true, e.team, e.id, hturn);
+      } else {
+        // Villager (the only hatless humanoid): back of blonde hair
         X.fillStyle = '#b58e3d';
         if(e.female){
-          // One continuous silhouette: over the back of the head and
-          // tapering down the back to the waist (single fill + stroke so
-          // head and fall can't read as two pieces).
+          // Back view shares the FRONT hairdo's silhouette (one crown
+          // height in EVERY view; same outer edges and shoulder-length
+          // tips), solid across the back of the head, ending in a soft
+          // nape curve at the shoulders so the dress reads below it.
+          // POSE-RIG turn bias: on the back quarters (NW/NE) the hair
+          // mass shifts toward the back-of-head side, matching the front
+          // views' strand asymmetry (N stays symmetric).
+          let bs = -0.5 * Math.abs(RIG[e.dir].sx), hx = humanXOffset + bs, hy = humanYOffset;
           X.beginPath();
-          X.arc(humanXOffset,-14+humanYOffset,4.2,Math.PI,0);                                          // over the top of the head
-          X.quadraticCurveTo(4.4+humanXOffset,-9+humanYOffset,3+humanXOffset,-4.8+humanYOffset);       // right edge tapering down
-          X.quadraticCurveTo(0+humanXOffset,-3.6+humanYOffset,-3+humanXOffset,-4.8+humanYOffset);      // rounded hair ends
-          X.quadraticCurveTo(-4.4+humanXOffset,-9+humanYOffset,-4.2+humanXOffset,-14+humanYOffset);    // left edge back up
+          X.moveTo(-3.4+hx,-6.6+hy);                             // left tip at the shoulder
+          X.quadraticCurveTo(-4.6+hx,-8+hy,-4.7+hx,-10.5+hy);    // left outer edge up
+          X.quadraticCurveTo(-5+hx,-14+hy,-4.2+hx,-15.4+hy);     // into the crown's left end
+          X.arc(hx,-15.4+hy,4.2,Math.PI,0);                      // over the top of the head
+          X.quadraticCurveTo(5+hx,-14+hy,4.7+hx,-10.5+hy);       // right outer edge down
+          X.quadraticCurveTo(4.6+hx,-8+hy,3.4+hx,-6.6+hy);       // right tip
+          X.quadraticCurveTo(0+hx,-4.9+hy,-3.4+hx,-6.6+hy);      // soft nape curve
           X.closePath();X.fill();X.stroke();
         } else {
           X.beginPath();X.arc(humanXOffset,-14+humanYOffset,4.2,0,Math.PI*2);X.fill();X.stroke();
         }
-      } else if(e.utype==='knight') {
-        // Back of the blocky great helm: plume + crown band, no slit
-        let hx = humanXOffset, hy = humanYOffset;
-        X.fillStyle=tc;
-        X.beginPath();
-        X.moveTo(hx-1.2,-18.5+hy);
-        X.quadraticCurveTo(hx-2.2,-21.5+hy,hx,-22.3+hy);
-        X.quadraticCurveTo(hx+2.2,-21.5+hy,hx+1.2,-18.5+hy);
-        X.closePath();X.fill();X.stroke();
-        X.fillStyle=ageMetal(e.team);
-        X.beginPath();X.rect(hx-4,-18.5+hy,8,7.5);X.fill();X.stroke();
-        X.fillStyle='rgba(255,255,255,0.28)';
-        X.fillRect(hx-4,-18.5+hy,8,1.6);
-      } else if (e.utype==='scout' && ageBonus(e.team) >= 2) {
-        // Back of the Castle spiked cavalry helm
-        X.fillStyle=ageMetal(e.team);
-        X.beginPath();
-        X.moveTo(humanXOffset-0.8,-17.6+humanYOffset);
-        X.lineTo(humanXOffset,-20.4+humanYOffset);
-        X.lineTo(humanXOffset+0.8,-17.6+humanYOffset);
-        X.closePath();X.fill();X.stroke();
-        X.beginPath();X.arc(humanXOffset,-17.7+humanYOffset,0.9,0,Math.PI*2);X.fill();X.stroke(); // spike ball base
-        X.beginPath();X.arc(humanXOffset,-14+humanYOffset,4.2,0,Math.PI*2);X.fill();X.stroke();
-        // hard BLACK rim line at the helm's lower edge
-        X.beginPath();X.moveTo(humanXOffset-3.7,-12+humanYOffset);X.lineTo(humanXOffset+3.7,-12+humanYOffset);X.stroke();
-        X.save();
-        X.strokeStyle='rgba(255,255,255,0.5)';X.lineWidth=1.1/UNIT_SCALE;X.lineCap='round';
-        X.beginPath();X.arc(humanXOffset,-14+humanYOffset,3,Math.PI*1.15,Math.PI*1.55);X.stroke();
-        X.lineCap='butt';X.restore();
-      } else {
-        // Back of leather hood cap
-        X.fillStyle='#4a2e1b';
-        X.beginPath();X.arc(humanXOffset,-14+humanYOffset,4.5,0,Math.PI*2);X.fill();X.stroke();
       }
     } else {
       // Facing South (towards camera): Draw flesh face and headwear cap
@@ -2599,38 +4685,10 @@ function drawUnit(e){
       }
       
       // Headwear Cap
-      if(e.utype==='militia' && ageBonus(e.team) === 1){
-        // FEUDAL militia: same tilted iron kettle hat as the spearman —
-        // the levy gets standard-issue gear; the Norman helm below is the
-        // Castle upgrade. (Dark age falls through to the peasant hood.)
-        X.fillStyle=ageMetal(e.team);
-        X.beginPath();X.ellipse(humanXOffset,-16.2+humanYOffset,5.4,1.5,0,0,Math.PI*2);X.fill();X.stroke();
-        X.beginPath();X.arc(humanXOffset,-15.4+humanYOffset,3.8,Math.PI,0);X.fill();X.stroke();
-      } else if(e.utype==='militia' && ageBonus(e.team) >= 2){
-        // CASTLE militia: Norman iron helm with gold band + nose bar.
-        X.fillStyle=ageMetal(e.team);
-        X.beginPath();X.arc(humanXOffset,-15+humanYOffset,4.5,Math.PI,0);X.fill();X.stroke();
-        // dome ridge + upper-left highlight for volume
-        X.save();
-        X.strokeStyle='rgba(0,0,0,0.22)';X.lineWidth=1/UNIT_SCALE;
-        X.beginPath();X.moveTo(humanXOffset,-19.4+humanYOffset);X.lineTo(humanXOffset,-15.2+humanYOffset);X.stroke();
-        X.strokeStyle='rgba(255,255,255,0.5)';X.lineWidth=1.2/UNIT_SCALE;X.lineCap='round';
-        X.beginPath();X.arc(humanXOffset,-15+humanYOffset,3.3,Math.PI*1.15,Math.PI*1.55);X.stroke();
-        X.lineCap='butt';X.restore();
-        X.fillStyle='#daa520';
-        X.beginPath();X.rect(-4.5+humanXOffset,-15+humanYOffset,9,1.5);X.fill();X.stroke();
-        // rivets along the band
-        X.fillStyle='rgba(0,0,0,0.45)';
-        [-3,0,3].forEach(rx=>{X.beginPath();X.arc(humanXOffset+rx,-14.25+humanYOffset,0.4,0,Math.PI*2);X.fill();});
-        X.fillStyle=ageMetal(e.team);
-        X.beginPath();X.rect(-0.75+humanXOffset,-15+humanYOffset,1.5,4);X.fill();X.stroke();
-      } else if(e.utype==='archer') {
-        // Green hood at every age — the archer stays simple; the Castle
-        // tell is the quiver on the back.
-        X.fillStyle='#2e8b57';
-        X.beginPath();X.arc(humanXOffset,-15+humanYOffset,4.5,Math.PI,0);X.fill();X.stroke();
-      } else if(e.utype==='villager') {
-        // No helmet/hood: just natural blonde hair!
+      if(eq){
+        drawHelmet(eq, humanXOffset, humanYOffset, false, e.team, e.id, hturn);
+      } else {
+        // Villager (the only hatless humanoid): natural blonde hair
         X.fillStyle = '#b58e3d';
         if(e.female){
           // The whole hairdo (crown + strands) is ONE path with a single
@@ -2638,117 +4696,34 @@ function drawUnit(e){
           // the pieces can't read as disconnected. The crown arc runs over
           // the top of the head between the strands' upper ends; the
           // hairline height matches the male cap so the face stays visible.
-          if(e.dir===7||e.dir===3){
-            // Profile: all the hair falls behind the head as one thick
-            // strand (local -x is always the back of the head, since the
-            // context is mirrored to the facing direction).
-            X.beginPath();
-            X.moveTo(-3.6+humanXOffset,-6.4+humanYOffset);                                                // strand tip at the shoulder
-            X.quadraticCurveTo(-4.7+humanXOffset,-7.8+humanYOffset,-4.9+humanXOffset,-10.5+humanYOffset); // outer edge up
-            X.quadraticCurveTo(-5.2+humanXOffset,-14+humanYOffset,-4.2+humanXOffset,-15.4+humanYOffset);  // into the crown's back end
-            X.arc(humanXOffset,-15.4+humanYOffset,4.2,Math.PI,0);                                         // over the top of the head
-            X.lineTo(-2.4+humanXOffset,-15.4+humanYOffset);                                               // hairline back across the forehead
-            X.quadraticCurveTo(-2.8+humanXOffset,-11.5+humanYOffset,-2.5+humanXOffset,-8+humanYOffset);   // inner edge down
-            X.closePath();
-            X.fill();X.stroke();
-          } else {
-            // Front/back-quarter: strands fall along BOTH sides of the head
-            // down to the shoulders, leaving the face fully open between.
-            X.beginPath();
-            X.moveTo(-3.4+humanXOffset,-6.6+humanYOffset);                                                // left strand tip
-            X.quadraticCurveTo(-4.6+humanXOffset,-8+humanYOffset,-4.7+humanXOffset,-10.5+humanYOffset);   // left outer edge up
-            X.quadraticCurveTo(-5+humanXOffset,-14+humanYOffset,-4.2+humanXOffset,-15.4+humanYOffset);    // into the crown's left end
-            X.arc(humanXOffset,-15.4+humanYOffset,4.2,Math.PI,0);                                         // over the top of the head
-            X.quadraticCurveTo(5+humanXOffset,-14+humanYOffset,4.7+humanXOffset,-10.5+humanYOffset);      // right outer edge down
-            X.quadraticCurveTo(4.6+humanXOffset,-8+humanYOffset,3.4+humanXOffset,-6.6+humanYOffset);      // right strand tip
-            X.quadraticCurveTo(2.9+humanXOffset,-8.5+humanYOffset,3+humanXOffset,-11+humanYOffset);       // right inner edge up
-            X.quadraticCurveTo(3.1+humanXOffset,-14+humanYOffset,2.7+humanXOffset,-15.4+humanYOffset);
-            X.lineTo(-2.7+humanXOffset,-15.4+humanYOffset);                                               // hairline across the forehead
-            X.quadraticCurveTo(-3.1+humanXOffset,-14+humanYOffset,-3+humanXOffset,-11+humanYOffset);      // left inner edge down
-            X.quadraticCurveTo(-2.9+humanXOffset,-8.5+humanYOffset,-3.4+humanXOffset,-6.6+humanYOffset);
-            X.closePath();
-            X.fill();X.stroke();
-          }
+          // POSE-RIG hair: the hairdo anchors to the BACK of the head and
+          // rides its rotation. u = |F.sx| is the head's turn off face-on
+          // (0 = S, .707 = 3/4, 1 = profile); the mirrored frame keeps
+          // the back of the head at −x, so ONE parametric path covers
+          // every front direction: the back strand stays full while the
+          // front strand recedes to a rim hugging the head edge, and the
+          // face opening biases toward the facing (with the eyes).
+          let u = Math.abs(RIG[e.dir].sx), hx = humanXOffset, hy = humanYOffset;
+          const L = (a, b) => a + (b - a) * u;
+          X.beginPath();
+          X.moveTo(L(-3.4,-3.6)+hx, L(-6.6,-6.4)+hy);                                          // back strand tip
+          X.quadraticCurveTo(L(-4.6,-4.7)+hx, -8+hy, L(-4.7,-4.9)+hx, -10.5+hy);               // back outer edge up
+          X.quadraticCurveTo(L(-5,-5.2)+hx, -14+hy, -4.2+hx, -15.4+hy);                        // into the crown's back end
+          X.arc(hx, -15.4+hy, 4.2, Math.PI, 0);                                                // over the top of the head
+          X.quadraticCurveTo(L(5,4.4)+hx, L(-14,-15)+hy, L(4.7,4.3)+hx, L(-10.5,-14.6)+hy);    // front outer edge down
+          X.quadraticCurveTo(L(4.6,4.2)+hx, L(-8,-14.4)+hy, L(3.4,4.1)+hx, L(-6.6,-14.5)+hy);  // front strand tip (recedes with the turn)
+          X.quadraticCurveTo(L(2.9,4)+hx, L(-8.5,-14.7)+hy, L(3,4)+hx, L(-11,-14.9)+hy);       // front inner edge up
+          X.quadraticCurveTo(L(3.1,3.9)+hx, L(-14,-15.1)+hy, L(2.7,3.8)+hx, -15.4+hy);
+          X.lineTo(L(-2.7,-2.4)+hx, -15.4+hy);                                                 // hairline across the forehead
+          X.quadraticCurveTo(L(-3.1,-2.8)+hx, L(-14,-11.5)+hy, L(-3,-2.5)+hx, L(-11,-8)+hy);   // back inner edge down
+          X.quadraticCurveTo(L(-2.9,-2.6)+hx, L(-8.5,-7)+hy, L(-3.4,-3.6)+hx, L(-6.6,-6.4)+hy);
+          X.closePath();
+          X.fill();X.stroke();
         } else {
           X.beginPath();
           X.arc(humanXOffset, -16+humanYOffset, 3.2, Math.PI, 0);
           X.fill(); X.stroke();
         }
-      } else if (e.utype==='knight') {
-        // Blocky GREAT HELM — flat-topped box covering the whole face.
-        // Detail pass: team-color plume on top, riveted crown band,
-        // vertical face ridge crossing the dark eye slit, breath holes.
-        let hx = humanXOffset, hy = humanYOffset;
-        // plume tuft first, so the helm's outline overlaps its base
-        X.fillStyle=tc;
-        X.beginPath();
-        X.moveTo(hx-1.2,-18.5+hy);
-        X.quadraticCurveTo(hx-2.2,-21.5+hy,hx,-22.3+hy);
-        X.quadraticCurveTo(hx+2.2,-21.5+hy,hx+1.2,-18.5+hy);
-        X.closePath();X.fill();X.stroke();
-        X.fillStyle=ageMetal(e.team);
-        X.beginPath();X.rect(hx-4,-18.5+hy,8,7.5);X.fill();X.stroke();
-        // crown band across the top (slightly brighter strip)
-        X.fillStyle='rgba(255,255,255,0.28)';
-        X.fillRect(hx-4,-18.5+hy,8,1.6);
-        // vertical face ridge (the cross's upright)
-        X.strokeStyle='rgba(0,0,0,0.3)';X.lineWidth=1.1/UNIT_SCALE;
-        X.beginPath();X.moveTo(hx,-16.9+hy);X.lineTo(hx,-11+hy);X.stroke();
-        X.strokeStyle='#000000';X.lineWidth=1/UNIT_SCALE;
-        // dark eye slit (the cross's arms)
-        X.fillStyle='#1c1c1c';
-        X.fillRect(hx-2.6,-15.4+hy,5.2,1.2);
-        // breathing holes low on the face
-        X.fillStyle='rgba(0,0,0,0.45)';
-        X.beginPath();X.arc(hx-1.6,-12.4+hy,0.4,0,Math.PI*2);X.fill();
-        X.beginPath();X.arc(hx,-12.4+hy,0.4,0,Math.PI*2);X.fill();
-        X.beginPath();X.arc(hx+1.6,-12.4+hy,0.4,0,Math.PI*2);X.fill();
-      } else if (e.utype==='spearman') {
-        X.fillStyle=ageMetal(e.team);
-        if (ageBonus(e.team) >= 2) {
-          // CASTLE: same Norman helm as the militia — dome with ridge and
-          // highlight, riveted gold band, nose bar.
-          X.beginPath();X.arc(humanXOffset,-15+humanYOffset,4.5,Math.PI,0);X.fill();X.stroke();
-          X.save();
-          X.strokeStyle='rgba(0,0,0,0.22)';X.lineWidth=1/UNIT_SCALE;
-          X.beginPath();X.moveTo(humanXOffset,-19.4+humanYOffset);X.lineTo(humanXOffset,-15.2+humanYOffset);X.stroke();
-          X.strokeStyle='rgba(255,255,255,0.5)';X.lineWidth=1.2/UNIT_SCALE;X.lineCap='round';
-          X.beginPath();X.arc(humanXOffset,-15+humanYOffset,3.3,Math.PI*1.15,Math.PI*1.55);X.stroke();
-          X.lineCap='butt';X.restore();
-          X.fillStyle='#daa520';
-          X.beginPath();X.rect(-4.5+humanXOffset,-15+humanYOffset,9,1.5);X.fill();X.stroke();
-          X.fillStyle='rgba(0,0,0,0.45)';
-          [-3,0,3].forEach(rx=>{X.beginPath();X.arc(humanXOffset+rx,-14.25+humanYOffset,0.4,0,Math.PI*2);X.fill();});
-          X.fillStyle=ageMetal(e.team);
-          X.beginPath();X.rect(-0.75+humanXOffset,-15+humanYOffset,1.5,4);X.fill();X.stroke();
-        } else {
-          // FEUDAL: iron kettle hat TILTED BACK on the head — the raised
-          // brim sits above the brow (drawn behind the crown), leaving
-          // the face and eyes fully visible.
-          X.beginPath();X.ellipse(humanXOffset,-16.2+humanYOffset,5.4,1.5,0,0,Math.PI*2);X.fill();X.stroke();
-          X.beginPath();X.arc(humanXOffset,-15.4+humanYOffset,3.8,Math.PI,0);X.fill();X.stroke();
-        }
-      } else if (e.utype==='scout' && ageBonus(e.team) >= 2) {
-        // CASTLE scout: spiked cavalry helm — open face, small spike on
-        // top; distinct from the knight's flat-topped great helm.
-        X.fillStyle=ageMetal(e.team);
-        X.beginPath();
-        X.moveTo(humanXOffset-0.8,-18.6+humanYOffset);
-        X.lineTo(humanXOffset,-21.4+humanYOffset);
-        X.lineTo(humanXOffset+0.8,-18.6+humanYOffset);
-        X.closePath();X.fill();X.stroke();
-        X.beginPath();X.arc(humanXOffset,-18.7+humanYOffset,0.9,0,Math.PI*2);X.fill();X.stroke(); // spike ball base
-        X.beginPath();X.arc(humanXOffset,-15+humanYOffset,4.2,Math.PI,0);X.fill();X.stroke();
-        // hard BLACK lower edge so the helm/face boundary reads clearly
-        X.beginPath();X.moveTo(humanXOffset-4.2,-15+humanYOffset);X.lineTo(humanXOffset+4.2,-15+humanYOffset);X.stroke();
-        X.save();
-        X.strokeStyle='rgba(255,255,255,0.5)';X.lineWidth=1.1/UNIT_SCALE;X.lineCap='round';
-        X.beginPath();X.arc(humanXOffset,-15+humanYOffset,3,Math.PI*1.15,Math.PI*1.55);X.stroke();
-        X.lineCap='butt';X.restore();
-      } else {
-        // Peasant leather hood cap for the scout (light cavalry)
-        X.fillStyle='#4a2e1b';
-        X.beginPath();X.arc(humanXOffset,-15+humanYOffset,4.5,Math.PI,0);X.fill();X.stroke();
       }
     }
 
@@ -2758,193 +4733,129 @@ function drawUnit(e){
     X.fillStyle='rgba(255,255,255,0.25)';
     X.beginPath();X.arc(humanXOffset-1.8,-16.5+humanYOffset,2.6,0,Math.PI*2);X.fill();
     X.restore();
+    }); // end headly
 
     if (hasQuiver && e.facingNorth) drawQuiver();
-    }; // end drawBodyLayer (the front-facing horse head is deferred
+    }); // end upperly (torso and up)
+    }; // end drawUpperBody (the front-facing horse head is deferred
     // further: it draws after the held-items layer, so the horse's head
     // is in front of the rider AND the resting sword)
 
-    // TRUE screen-space angle from this unit to its combat target. Used to
-    // point aimed weapons (bow, spear) along the real attack line. Callers
-    // must first UNDO the facing mirror (X.scale(e.facing,1) inside the
-    // already-mirrored context cancels it) and then rotate by this — the
-    // old version instead expressed the angle in the mirrored frame and
-    // clamped it to ±1.15 rad, which meant a shot at anything steeply up/
-    // down or slightly across the body rendered up to ~130° off the real
-    // direction (an archer firing at a target up-screen showed its bow
-    // pointing down-forward). Exact rotation needs no fold-through-body
-    // clamp: the body's facing already tracks the target's horizontal
-    // side, so the weapon never has to point backward more than the small
-    // sector-boundary overshoot. When the target entity is gone
-    // mid-swing, fall back to "straight ahead" in screen terms.
-    let aimAngle = () => {
-      let t = entitiesById.get(e.target);
-      if (!t) return e.facing === -1 ? Math.PI : 0;
-      let tcx = t.type === 'building' ? t.x + (t.w || 1) / 2 : t.x;
-      let tcy = t.type === 'building' ? t.y + (t.h || 1) / 2 : t.y;
-      let dix = ((tcx - e.x) - (tcy - e.y)) * HALF_TW;
-      let diy = ((tcx - e.x) + (tcy - e.y)) * HALF_TH;
-      if (dix === 0 && diy === 0) return e.facing === -1 ? Math.PI : 0;
-      return Math.atan2(diy, dix);
+    // ONE sword draw for militia + mounted (they differ only by the
+    // rider offsets): pose comes entirely from the sword seam — grip
+    // anchor, aim fold, face-on chop foreshorten (fwdK: 0 = edge-on
+    // sliver, negative = flipped down), edge-on art selection (faceOn),
+    // rest = the swing's neutral frame.
+    const drawSwordHeld = (ox2, oy2) => {
+      X.save();
+      X.translate(anim.grip.x + ox2, anim.grip.y + oy2);
+      if (anim.swinging) {
+        X.rotate(anim.swordAimM);
+        if (anim.fwdK !== undefined) X.scale(1, anim.fwdK);
+      }
+      let rot = anim.swinging ? anim.swordRot : anim.restRot;
+      if (e.utype === 'spearman') drawBigSpear(rot, weaponTier, anim.spearLen || 1);
+      else drawBigSword(rot, weaponTier, anim.faceOn);
+      X.restore();
     };
 
-    // Archer variant: the LAUNCH tangent of the ballistic arc, not the flat
-    // line to the target. drawProjectiles (js/render-fx.js) flies the arrow
-    // along vy = Δiy − (cos(progress·π)·π·A + (endH − startH)); at
-    // progress 0 that's Δiy − (π·A + endH − startH). Pointing the bow at
-    // the same tangent means the nocked arrow releases exactly along the
-    // real arrow's initial flight line — aiming flat at the target left a
-    // visible kink at the moment of release. Constants (35, /5, startH 12,
-    // endH 8) must stay in sync with spawnProjectile/drawProjectiles.
-    let aimAngleBallistic = () => {
-      let t = entitiesById.get(e.target);
-      if (!t) return e.facing === -1 ? Math.PI : 0;
-      let tcx = t.type === 'building' ? t.x + (t.w || 1) / 2 : t.x;
-      let tcy = t.type === 'building' ? t.y + (t.h || 1) / 2 : t.y;
-      let dix = ((tcx - e.x) - (tcy - e.y)) * HALF_TW;
-      let diy = ((tcx - e.x) + (tcy - e.y)) * HALF_TH;
-      let A = 35 * (Math.hypot(tcx - e.x, tcy - e.y) / 5); // arc amplitude
-      diy -= Math.PI * A + (8 - 12); // + endH − startH (units launch at 12, impact at 8)
-      if (dix === 0 && diy === 0) return e.facing === -1 ? Math.PI : 0;
-      return Math.atan2(diy, dix);
+    // Carried resource at the CARRY RIG's mount — its OWN depth-sorted
+    // part (independent of the tool, so chop-while-carrying sorts the
+    // axe and the load separately). Each art keeps its shape; anchors
+    // are small offsets about anim.carryRest.
+    const drawCarriedLoad = (part) => {
+      if (!anim.carryShow && !anim.barrow && !anim.plowRig) return;
+      if (part === 'farRod' && !anim.barrow && !anim.plowRig) return;
+      X.save();
+      // the barrow COUNTER-BOBS like the legs: the whole unit origin
+      // rides the walk bob (drawUnit's translate), so without this the
+      // wheel bounced off the ground (user caught it — twice). The
+      // overhead carry keeps riding the bob: it's held, not wheeled.
+      // bob/UNIT_SCALE: the origin bob is applied PRE-scale, this cancel
+      // runs INSIDE the 1.25x art frame — unscaled it over-cancelled by
+      // 25% and a sub-pixel bounce survived (user caught it)
+      X.translate(anim.carryRest.x, anim.carryRest.y - (anim.barrow ? bob/UNIT_SCALE : 0));
+      if (anim.barrow || anim.plowRig) {
+        // the projected-box barrow rig (see drawBarrow) — the cargo art
+        // draws INSIDE the tray at the slot the painter order provides,
+        // shrunk and recentered (the arts keep their overhead centroids;
+        // the logs hang way off the back)
+        // plow roll: stroke-tied spoke angle while digging (number),
+        // free animTick spin on the stroll legs (true) — the
+        // wheelbarrow's exact rolling convention
+        drawBarrow(e, anim.plowRig ? (anim.plowing ? anim.plowOff/3.6 : true) : moving,
+                   anim.barrowTilt || 0, anim.barrow && anim.carryShow ? (p) => {
+          X.save();
+          // per-art seating: the tall stone stack lifts clear of the
+          // tray's underside AND shrinks to the tray footprint (full
+          // size overflowed the front rim and tangled with the near
+          // arm at E, user call); head-on the log stack drops back
+          // into the tray mouth (it floated above the rim at S)
+          X.translate(p.x + (e.carryType === 'stone' ? 0.8 : 0),
+                      p.y - (e.carryType === 'stone' ? 1.2 : 0)
+                          + (e.carryType === 'wood' && faceOnView ? 1.7 : 0));
+          if (e.carryType === 'stone') X.scale(0.8, 0.8);
+          // full-size, icon-readable (0.75 made the resource illegible
+          // at game zoom, user call) — the tray walls crop the base
+          drawLoadArt();
+          X.restore();
+        } : null, part, anim.plowRig ? 'plow' : 'barrow',
+                   anim.plowRig ? anim.plowOff : 0);
+        X.restore(); return;
+      }
+      drawLoadArt();
+      X.restore();
     };
-
-    // Tools & weapons (animated swinging swings during active tasks)
-    const drawHeldLayer = () => {
-    if(e.utype==='villager'){
-      // Shaped work swing: slow wind-up (70% of the cycle), fast strike
-      // (30%), instead of a symmetric sine wobble. swing is the tool's
-      // rotation: -1.1 fully raised, +0.5 at the moment of impact.
-      // "At the work site" — a villager whose task is already back to
-      // chop/mine but who is still STANDING AT THE DROP-OFF (the tick after
-      // depositing, or a guest waiting on the next sync) must not flash the
-      // tool or swing it; require actual proximity to the work. Gather
-      // tasks check the claimed gather tile, build checks the foundation's
-      // footprint; other tasks are unaffected.
-      let atSite = true;
-      if (e.task === 'chop' || e.task === 'mine_gold' || e.task === 'mine_stone') {
-        atSite = e.gatherX >= 0 &&
-          Math.max(Math.abs(e.x - e.gatherX), Math.abs(e.y - e.gatherY)) < 1.8;
-      } else if (e.task === 'build' && e.buildTarget) {
-        let bt = entitiesById.get(e.buildTarget);
-        atSite = !!bt && distToTarget(e, bt) < 1.8;
-      } else if (e.target) {
-        // Harvesting/attacking a target (sheep, carcass, enemy): only swing when
-        // actually in range to act on it — not while halted just short of it.
-        atSite = inActionRange(e);
-      }
-      let working = isActive && e.path.length===0 && atSite;
-      let phRaw = tick*0.055 + e.id*0.37;
-      let ph = ((phRaw % 1) + 1) % 1;
-      let u = ph < 0.7 ? ph/0.7 : 1-(ph-0.7)/0.3;
-      let swing = working ? (0.5 - 1.6*u) : 0;
-      // One impact burst per cycle, right as the tool lands. Detected by the
-      // cycle COUNTER advancing between frames, not by a frame happening to
-      // land inside the narrow strike window — at 4x speed that window (7%
-      // of a ~0.15s cycle ≈ 10ms) is shorter than one frame, so impacts
-      // dropped nondeterministically and the work sounds/particles
-      // stuttered. Tracked in workSwingCycles (js/core.js), not
-      // `e._swingCyc` — entities get wholesale-replaced by every sync,
-      // which used to wipe that field and fire extras. Never during the
-      // outline mask pass: it would consume this cycle's one impact (and
-      // spawn duplicate particles) before the real draw.
-      let swingCyc = Math.floor(phRaw);
-      let prevCyc = workSwingCycles.get(e.id);
-      let impact = !window._maskDraw && working && prevCyc !== undefined && swingCyc !== prevCyc;
-      if(!window._maskDraw && working) workSwingCycles.set(e.id, swingCyc);
-      // Impact point in tile coords: the gather tile if known, else just ahead
-      let hitX = (e.gatherX >= 0 && e.gatherX !== undefined) ? e.gatherX + 0.5 : e.x + e.facing*0.4;
-      let hitY = (e.gatherY >= 0 && e.gatherY !== undefined) ? e.gatherY + 0.3 : e.y;
-      if(e.task==='chop'&&e.path.length===0&&atSite){
-        // Sound at the axe's VISUAL impact, not at resource extraction (the
-        // sim's gather cycle) — extraction lags the first visible hit by up
-        // to a full cycle, which read as delayed audio. Render runs on the
-        // guest too, so this also gives MP guests animation-synced chops.
-        if(impact){
-          spawnParticles(hitX, hitY, '#c9a15e', 2, 0.02, 1.5); // wood chips
-          // At 4x the swing period drops to ~0.15s and every villager's hits
-          // pile into the global rate limiter, which then drops them
-          // ARBITRARILY — the texture turns inconsistent. Sounding every
-          // OTHER swing at 4x restores the deterministic 2x cadence.
-          if(window.playSound && (GAME_SPEED < 4 || swingCyc % 2 === 0)) playSound('chop', hitX, hitY);
-        }
-        X.save();X.translate(3,-9);X.rotate(swing);
-        // Long handle
-        X.strokeStyle='#000000';X.lineWidth=3.4/UNIT_SCALE;X.lineCap='round';
-        X.beginPath();X.moveTo(0,1);X.lineTo(9,-13);X.stroke();
-        X.strokeStyle='#8B4513';X.lineWidth=1.8/UNIT_SCALE;
-        X.beginPath();X.moveTo(0,1);X.lineTo(9,-13);X.stroke();X.lineCap='butt';
-        // Big wedge axe head with a bright cutting edge
-        X.fillStyle='#b8bfc6';
-        X.beginPath();
-        X.moveTo(8,-14.5);
-        X.lineTo(14.5,-17);
-        X.lineTo(13,-6.5);
-        X.lineTo(7.4,-9.5);
-        X.closePath();X.fill();
-        X.strokeStyle='#000000';X.lineWidth=1.2/UNIT_SCALE;X.lineJoin='round';X.stroke();
-        X.strokeStyle='#fff';X.lineWidth=1.4/UNIT_SCALE;
-        X.beginPath();X.moveTo(13.9,-15.9);X.lineTo(12.7,-7.9);X.stroke();
-        X.restore();
-      } else if((e.task==='mine_gold'||e.task==='mine_stone')&&e.path.length===0&&atSite){
-        if(impact){
-          spawnParticles(hitX, hitY, e.task==='mine_gold' ? '#ffd700' : '#c0c0c0', 2, 0.02, 1.3); // sparks
-          // Synced to the pick's visual impact; every other swing at 4x (see chop above)
-          if(window.playSound && (GAME_SPEED < 4 || swingCyc % 2 === 0)) playSound('mine', hitX, hitY);
-        }
-        X.save();X.translate(3,-9);X.rotate(swing);
-        // Long handle
-        X.strokeStyle='#000000';X.lineWidth=3.4/UNIT_SCALE;X.lineCap='round';
-        X.beginPath();X.moveTo(0,1);X.lineTo(9,-13);X.stroke();
-        X.strokeStyle='#8B4513';X.lineWidth=1.8/UNIT_SCALE;
-        X.beginPath();X.moveTo(0,1);X.lineTo(9,-13);X.stroke();X.lineCap='butt';
-        // Big curved pick head, points tapering both ways
-        X.strokeStyle='#000000';X.lineWidth=5/UNIT_SCALE;X.lineCap='round';
-        X.beginPath();X.moveTo(2.5,-17.5);X.quadraticCurveTo(9.5,-16,15.5,-9);X.stroke();
-        X.strokeStyle='#b8bfc6';X.lineWidth=2.4/UNIT_SCALE;
-        X.beginPath();X.moveTo(2.5,-17.5);X.quadraticCurveTo(9.5,-16,15.5,-9);X.stroke();
-        X.lineCap='butt';
-        X.restore();
-      } else if(e.task==='build'&&e.path.length===0&&atSite){
-        if(impact){
-          spawnParticles(e.x + e.facing*0.35, e.y - 0.1, '#cbbca0', 2, 0.015, 1.2); // dust
-          // Hammer audio at the mallet's visual impact; every other swing
-          // at 4x (see chop above for both rationales)
-          if(window.playSound && (GAME_SPEED < 4 || swingCyc % 2 === 0)) playSound('build', e.x + e.facing*0.35, e.y - 0.1);
-        }
-        X.save();X.translate(3,-9);X.rotate(swing);
-        // Handle
-        X.strokeStyle='#000000';X.lineWidth=3.2/UNIT_SCALE;X.lineCap='round';
-        X.beginPath();X.moveTo(0,1);X.lineTo(7.5,-11);X.stroke();
-        X.strokeStyle='#8B4513';X.lineWidth=1.7/UNIT_SCALE;
-        X.beginPath();X.moveTo(0,1);X.lineTo(7.5,-11);X.stroke();X.lineCap='butt';
-        // Big square mallet head with a bright face
-        X.fillStyle='#9aa0a6';
-        X.beginPath();X.rect(4,-15.5,7,5.5);X.fill();
-        X.strokeStyle='#000000';X.lineWidth=1.2/UNIT_SCALE;X.stroke();
-        X.fillStyle='#fff';
-        X.beginPath();X.rect(9.8,-15,1.2,4.5);X.fill();
-        X.restore();
-      }
-      if(e.carrying>0){
+    // the six per-resource load arts, drawn about the current origin —
+    // the overhead carry calls this at carryRest, the barrow inside its
+    // tray slot
+    const drawLoadArt = () => {
         X.strokeStyle='#000';X.lineWidth=1/UNIT_SCALE;
         if(e.carryType==='wood'){
-          // Bundle of three logs over the shoulder: two below, one on top,
-          // round end grain facing the camera.
-          X.save();X.translate(-6,-8);X.rotate(-0.18);
+          if(anim.barrow){
+            // BARROW cut: short fat rounds — same grain-forward idiom,
+            // but squared into the tray's box footprint like the other
+            // loads (the long shoulder logs overshot the tray, user
+            // call: "shorter and fatter")
+            // dead simple (user call): two level rounds, one exactly
+            // atop the other — no tilt, no stagger
+            X.save();
+            const slog=(lx,ly)=>{
+              X.fillStyle='#6e473b';X.beginPath();
+              X.moveTo(lx+1.8,ly-1.9);X.lineTo(lx-2.2,ly-1.9);
+              X.arc(lx-2.2,ly,1.9,-Math.PI/2,Math.PI/2,true);
+              X.lineTo(lx+1.8,ly+1.9);X.closePath();X.fill();X.stroke();
+              X.fillStyle='#ebd2b0';X.beginPath();X.ellipse(lx+1.8,ly,1.9,2.1,0,0,Math.PI*2);X.fill();X.stroke();
+              X.strokeStyle='rgba(0,0,0,0.35)';X.lineWidth=0.8/UNIT_SCALE;
+              X.beginPath();X.arc(lx+1.8,ly,0.95,0,Math.PI*2);X.stroke();
+              X.strokeStyle='#000';X.lineWidth=1/UNIT_SCALE;
+            };
+            slog(0,1.2); slog(0,-2.6);
+            X.restore();
+            return;
+          }
+          // Two logs over the shoulder, one atop the other so BOTH round
+          // end grains face the camera — side-by-side logs overlap and
+          // read as one thick log with a single grain.
+          X.save();X.translate(0.5,0);X.rotate(-0.18);
           const log=(lx,ly)=>{
-            X.fillStyle='#6e473b';X.beginPath();X.rect(lx-9.5,ly-1.7,10,3.4);X.fill();X.stroke();
+            // body: flat at the grain end, ROUNDED cap at the far end —
+            // a sawn log is blunt, not square-cut on both faces
+            X.fillStyle='#6e473b';X.beginPath();
+            X.moveTo(lx+0.5,ly-1.7);X.lineTo(lx-8.6,ly-1.7);
+            X.arc(lx-8.6,ly,1.7,-Math.PI/2,Math.PI/2,true);
+            X.lineTo(lx+0.5,ly+1.7);X.closePath();X.fill();X.stroke();
             X.fillStyle='#ebd2b0';X.beginPath();X.ellipse(lx+0.5,ly,1.8,2.0,0,0,Math.PI*2);X.fill();X.stroke();
             X.strokeStyle='rgba(0,0,0,0.35)';X.lineWidth=0.8/UNIT_SCALE;
             X.beginPath();X.arc(lx+0.5,ly,0.8,0,Math.PI*2);X.stroke();
             X.strokeStyle='#000';X.lineWidth=1/UNIT_SCALE;
           };
-          log(0.5,1.8); log(4,1.6); log(2.2,-1.6);
+          log(4,1.6); log(2.2,-1.6);
           X.restore();
         } else if(e.carryType==='stone'){
           // Comically oversized haul: a big cut block with a smaller one
           // stacked on top, hoisted on the shoulder.
-          X.save();X.translate(-7.5,-9);
+          X.save();X.translate(-1,-1);
           const block=(bx,by,s)=>{
             X.fillStyle='#b3b3b3';X.beginPath(); // top face
             X.moveTo(bx,by-2.2*s);X.lineTo(bx+3.4*s,by-0.6*s);X.lineTo(bx,by+1*s);X.lineTo(bx-3.4*s,by-0.6*s);X.closePath();X.fill();X.stroke();
@@ -2961,7 +4872,7 @@ function drawUnit(e){
           X.restore();
         } else if(e.carryType==='gold'){
           // Overflowing armful of gold: heaped shiny nuggets with twinkles
-          X.save();X.translate(-6.5,-7.5);
+          X.save();X.translate(0,0.5);
           const nug=(nx,ny,r)=>{
             X.fillStyle='#e8b90f';X.beginPath();X.arc(nx,ny,r,0,Math.PI*2);X.fill();X.stroke();
             X.fillStyle='#ffe14d';X.beginPath();X.arc(nx-r*0.3,ny-r*0.3,r*0.5,0,Math.PI*2);X.fill();
@@ -2969,7 +4880,7 @@ function drawUnit(e){
           nug(-2.2,0.5,2.2); nug(2,0.8,2.0); nug(0,-0.6,2.4);
           nug(-1,-2.6,1.9); nug(1.6,-2.2,1.7); nug(0.3,-4,1.5);
           // Twinkling 4-point sparkles
-          let tw=(Math.sin(tick*0.25+e.id)+1)/2;
+          let tw=(Math.sin(animTick*0.25+e.id)+1)/2;
           X.fillStyle='rgba(255,255,255,'+(0.5+0.5*tw).toFixed(2)+')';
           const spark=(px,py,r)=>{
             X.beginPath();
@@ -2982,7 +4893,7 @@ function drawUnit(e){
         } else {
           // Food — carry the goods themselves, big and readable, no basket.
           // What shows depends on where the food came from.
-          X.save();X.translate(-7,-7);
+          X.save();X.translate(-0.5,1);
           if(e.foodSrc==='meat'){
             // Fluffy white wool bundle (from sheep): scalloped cloud like
             // the sheep's own coat — silhouette pass, then wool fill
@@ -3019,54 +4930,180 @@ function drawUnit(e){
           }
           X.restore();
         }
-      }
-    } else if(e.utype==='militia'){
-      // Militia broadsword (shaped combat slash). A corpse has dropped its
-      // sword (drawCorpse draws it on the ground); the shield stays
-      // strapped to the arm.
-      if(!e.corpseRot){
-        let swinging=inActionRange(e)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
-        // Sword hand is fixed to the body — mirrored to the other screen
-        // side when the militia faces away from the camera. While
-        // swinging, the hand itself pumps with the slash (back and up on
-        // the windup, forward and down on the strike).
-        let fb = (!swinging && e.facingNorth) ? -1 : 1;
-        let s = swinging ? Math.sin(swordSwingAngle(e.id)) : 0;
-        X.save();X.translate((6.5-1.5*s)*fb,-6-1.5*s);X.scale(fb,1);
-        drawBigSword(swinging, e.id);
+    };
+    // Tools & weapons (animated swinging swings during active tasks)
+    const drawHeldLayer = () => {
+    if(e.utype==='villager'){
+      // Work-swing phase and the at-site gate live at the hand-pose seam
+      // (anim.*) — shared with the arm pass.
+      let atSite = anim.atSite, working = anim.working, swing = anim.swing;
+      // The tool POINTS ALONG THE FACING: art mirror = the facing's
+      // frame-forward sign (a depth-sign flip inverted NW/NE, user
+      // caught it); the face-on ties (S/N, no lateral forward) fall to
+      // the depth sign — S ahead, N mirrored away.
+      let twf = frameFwdSign();
+      // One impact burst per cycle, right as the tool lands. Detected by the
+      // cycle COUNTER advancing between frames, not by a frame happening to
+      // land inside the narrow strike window — at 4x speed that window (7%
+      // of a ~0.15s cycle ≈ 10ms) is shorter than one frame, so impacts
+      // dropped nondeterministically and the work sounds/particles
+      // stuttered. Tracked in workSwingCycles (js/core.js), not
+      // `e._swingCyc` — entities get wholesale-replaced by every sync,
+      // which would wipe that field and fire extras. Never during the
+      // outline mask pass: it would consume this cycle's one impact (and
+      // spawn duplicate particles) before the real draw.
+      let swingCyc = Math.floor(anim.phRaw);
+      let prevCyc = workSwingCycles.get(e.id);
+      let impact = !window._maskDraw && working && prevCyc !== undefined && swingCyc !== prevCyc;
+      if(!window._maskDraw && working) workSwingCycles.set(e.id, swingCyc);
+      // work audio at the tool's VISUAL impact; every other swing at 4x
+      // (at speed the full rate reads as machine-gun clatter)
+      const workSound = (name, x, y) => {
+        if (window.playSound && (GAME_SPEED < 4 || swingCyc % 2 === 0)) playSound(name, x, y);
+      };
+      // Impact point in tile coords: the gather tile if known, else just ahead
+      let hitX = (e.gatherX >= 0 && e.gatherX !== undefined) ? e.gatherX + 0.5 : e.x + e.facing*0.4;
+      let hitY = (e.gatherY >= 0 && e.gatherY !== undefined) ? e.gatherY + 0.3 : e.y;
+      if(e.task==='chop'&&e.path.length===0&&atSite){
+        // Sound at the axe's VISUAL impact, not at resource extraction (the
+        // sim's gather cycle) — extraction lags the first visible hit by up
+        // to a full cycle, which read as delayed audio. Render runs on the
+        // guest too, so this also gives MP guests animation-synced chops.
+        if(impact){
+          spawnParticles(hitX, hitY, '#c9a15e', 2, 0.02, 1.5); // wood chips
+          // At 4x the swing period drops to ~0.15s and every villager's hits
+          // pile into the global rate limiter, which then drops them
+          // ARBITRARILY — the texture turns inconsistent. Sounding every
+          // OTHER swing at 4x restores the deterministic 2x cadence.
+          workSound('chop', hitX, hitY);
+        }
+        if (anim.sawing) {
+          // Bow saw: bowed wooden frame over a straight bright blade,
+          // held at trunk height and stroked along the blade (sawOff —
+          // the same value the hand target rides). Local +x = forward.
+          // Comically OVERSIZED on purpose (same exaggeration as the
+          // stone haul) — a Castle tech should read at one glance.
+          X.save();X.translate(anim.toolRest.x+anim.sawOff*twf, anim.toolRest.y);X.scale(twf,1);
+          X.strokeStyle='#000000';X.lineWidth=3.6/UNIT_SCALE;X.lineCap='round';X.lineJoin='round';
+          X.beginPath();X.moveTo(0,4.5);X.quadraticCurveTo(0.8,-4.5,7.5,-4.5);X.quadraticCurveTo(14.2,-4.5,15,4.5);X.stroke();
+          X.strokeStyle='#8B4513';X.lineWidth=2.0/UNIT_SCALE;X.stroke();
+          // serrated bright blade — teeth ticks under a bold chord
+          X.strokeStyle='#000000';X.lineWidth=2.8/UNIT_SCALE;
+          X.beginPath();X.moveTo(-0.4,4.5);X.lineTo(15.4,4.5);X.stroke();
+          X.strokeStyle='#f2f6fb';X.lineWidth=1.4/UNIT_SCALE;X.stroke();
+          X.strokeStyle='#000000';X.lineWidth=0.9/UNIT_SCALE;
+          X.beginPath();
+          for(let tx2=1;tx2<15;tx2+=2){ X.moveTo(tx2,5.1); X.lineTo(tx2+1,6.1); X.lineTo(tx2+2,5.1); }
+          X.stroke();
+          X.lineCap='butt';
+          X.restore();
+        } else {
+        X.save();X.translate(anim.toolRest.x,anim.toolRest.y);X.scale(twf,1);X.rotate(swing);
+        // Long handle
+        strokeShaft(0, 1, 9, -13, 3.4, 1.8);
+        // Felling-axe head, authored in a shaft-aligned frame (+x along
+        // the handle, +y toward the strike): socket wraps the shaft end,
+        // cheeks flare into a curved cutting edge facing the swing, small
+        // poll behind the shaft; bright bevel along the edge. Wood-line
+        // techs read on the tool itself: Double-Bit Axe adds the LITERAL
+        // second blade on the poll side; Bow Saw is the polished tier
+        // (dark→bright, same language as forging).
+        const axeHead = () => {
+          X.beginPath();
+          X.moveTo(-1.6,-1.2);X.lineTo(1.6,-1.2);
+          X.quadraticCurveTo(2.8,0.8,3.3,3.4);
+          X.quadraticCurveTo(3.5,4.7,3.0,5.2);
+          X.quadraticCurveTo(0,6.6,-3.0,5.2);
+          X.quadraticCurveTo(-3.5,4.7,-3.3,3.4);
+          X.quadraticCurveTo(-2.8,0.8,-1.6,-1.2);
+          X.closePath();X.fill();X.stroke();
+          X.save();
+          X.strokeStyle='#fff';X.lineWidth=1.4/UNIT_SCALE;
+          X.beginPath();X.moveTo(-2.7,5.1);X.quadraticCurveTo(0,6.3,2.7,5.1);X.stroke();
+          X.restore();
+        };
+        X.save();X.translate(9,-13);X.rotate(AXE_HEAD_ROT);
+        X.fillStyle = hasUpgrade(e.team,'bow_saw') ? '#f2f6fb' : '#b8bfc6';
+        X.strokeStyle='#000000';X.lineWidth=1.2/UNIT_SCALE;X.lineJoin='round';
+        if (hasUpgrade(e.team,'double_bit_axe')) {
+          // smaller mirrored bit where the poll was — main head's socket draws over the join
+          X.save();X.scale(0.72,-0.72);axeHead();X.restore();
+        }
+        axeHead();
+        X.restore();
+        X.restore();
+        }
+      } else if((e.task==='mine_gold'||e.task==='mine_stone')&&e.path.length===0&&atSite){
+        if(impact){
+          spawnParticles(hitX, hitY, e.task==='mine_gold' ? '#ffd700' : '#c0c0c0', 2, 0.02, 1.3); // sparks
+          workSound('mine', hitX, hitY); // synced to the pick's visual impact
+        }
+        X.save();X.translate(anim.toolRest.x,anim.toolRest.y);X.scale(twf,1);X.rotate(swing);
+        // Long handle
+        strokeShaft(0, 1, 9, -13, 3.4, 1.8);
+        // Big curved pick head, points tapering both ways. Gold Mining
+        // reads on the GOLD miner's pick as the polished tier (dark→
+        // bright); stone mining has no tech, so its pick stays plain.
+        X.strokeStyle='#000000';X.lineWidth=5/UNIT_SCALE;X.lineCap='round';
+        X.beginPath();X.moveTo(2.5,-17.5);X.quadraticCurveTo(9.5,-16,15.5,-9);X.stroke();
+        X.strokeStyle = (e.task==='mine_gold' && hasUpgrade(e.team,'gold_mining')) ? '#f2f6fb' : '#b8bfc6';
+        X.lineWidth=2.4/UNIT_SCALE;
+        X.beginPath();X.moveTo(2.5,-17.5);X.quadraticCurveTo(9.5,-16,15.5,-9);X.stroke();
+        X.lineCap='butt';
+        X.restore();
+      } else if(e.task==='build'&&e.path.length===0&&atSite){
+        if(impact){
+          spawnParticles(e.x + e.facing*0.35, e.y - 0.1, '#cbbca0', 2, 0.015, 1.2); // dust
+          workSound('build', e.x + e.facing*0.35, e.y - 0.1); // at the mallet's visual impact
+        }
+        X.save();X.translate(anim.toolRest.x,anim.toolRest.y);X.scale(twf,1);X.rotate(swing);
+        // Handle
+        strokeShaft(0, 1, 7.5, -11, 3.2, 1.7);
+        // Two-faced wooden mallet, authored in a shaft-aligned frame so
+        // the barrel stays PERPENDICULAR to the handle at every swing
+        // angle: slight belly bulge, iron bands at both ends, bright
+        // striking face on the impact side.
+        X.save();X.translate(7.5,-11);X.rotate(MALLET_HEAD_ROT);
+        X.fillStyle='#b08850';
+        X.strokeStyle='#000000';X.lineWidth=1.2/UNIT_SCALE;X.lineJoin='round';
+        X.beginPath();
+        X.moveTo(-2.0,-4.6);X.lineTo(2.0,-4.6);
+        X.quadraticCurveTo(3.0,0,2.0,4.6);
+        X.lineTo(-2.0,4.6);
+        X.quadraticCurveTo(-3.0,0,-2.0,-4.6);
+        X.closePath();X.fill();X.stroke();
+        X.strokeStyle='rgba(0,0,0,0.4)';X.lineWidth=1.0/UNIT_SCALE;
+        X.beginPath();X.moveTo(-2.25,-3.2);X.lineTo(2.25,-3.2);X.moveTo(-2.25,3.2);X.lineTo(2.25,3.2);X.stroke();
+        X.strokeStyle='#fff';X.lineWidth=1.3/UNIT_SCALE;
+        X.beginPath();X.moveTo(-1.6,4.6);X.lineTo(1.6,4.6);X.stroke();
+        X.restore();
+        X.restore();
+      } else if(anim.scythe){
+        // Scythe: curved snath from the hands down-forward, a long bright
+        // crescent blade skimming the crop; the whole tool sweeps about
+        // the grip anchor (anim.sweep — the hand rides the same value).
+        // OVERSIZED like the bow saw — the drama lives in the tool's
+        // reach and travel, the body keeps its quiet work rock.
+        X.save();X.translate(anim.toolRest.x,anim.toolRest.y+1);X.scale(twf,1);X.rotate(anim.sweep);
+        X.strokeStyle='#000000';X.lineWidth=3.4/UNIT_SCALE;X.lineCap='round';X.lineJoin='round';
+        X.beginPath();X.moveTo(0,-1.5);X.quadraticCurveTo(4,3.5,7,12);X.stroke();
+        X.strokeStyle='#8B4513';X.lineWidth=1.9/UNIT_SCALE;X.stroke();
+        // blade weight matches the pick's curved head (5 / 2.4); Horse
+        // Collar reads as the POLISHED tier (dark→bright, the gold-
+        // mining treatment on the farm line)
+        X.strokeStyle='#000000';X.lineWidth=5/UNIT_SCALE;
+        X.beginPath();X.moveTo(7,12);X.quadraticCurveTo(12.5,14,17,10);X.stroke();
+        X.strokeStyle = tierSteel(hasUpgrade(e.team,'horse_collar') ? 2 : 0);
+        X.lineWidth=2.4/UNIT_SCALE;X.stroke();
+        X.lineCap='butt';
         X.restore();
       }
+    } else if(e.utype==='militia' || e.utype==='spearman'){
+      // Militia broadsword / spearman long spear — pose entirely from the
+      // shared sword seam; only the art differs (a corpse has dropped its
+      // weapon; the militia shield stays strapped to the arm).
+      if(!e.corpseRot) drawSwordHeld(0, 0);
       // (kite shield drawn in drawShieldLayer — always on top)
-    } else if(e.utype==='spearman'&&!e.corpseRot){
-      // Long spear with a big leaf-shaped head; the thrust is shaped —
-      // slow pull-back, fast jab along the shaft. (Corpses drop it —
-      // drawCorpse lays it on the ground.)
-      let swinging=inActionRange(e)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
-      X.save(); X.translate(3, -6+humanYOffset);
-      if(swinging){
-        // Point the shaft at the target: un-mirror first (same trick as
-        // the bow above), then rotate. The spear is drawn along -45°
-        // locally, so rotating by aim+45° lays it on the attack line; the
-        // thrust offset below is along the shaft, so it follows for free.
-        X.scale(e.facing,1);
-        X.rotate(aimAngle()+Math.PI/4);
-        let ph=((tick*0.07+e.id*0.4)%1+1)%1;
-        let u=ph<0.72?ph/0.72:1-(ph-0.72)/0.28;
-        let off=-2.5*u+4.5*(1-u);
-        X.translate(off*0.75, -off*0.75);
-      }
-      X.strokeStyle='#000'; X.lineWidth=3.2/UNIT_SCALE; X.lineCap='round';
-      X.beginPath(); X.moveTo(-8, 10); X.lineTo(12, -10); X.stroke();
-      X.strokeStyle='#8B4513'; X.lineWidth=1.6/UNIT_SCALE;
-      X.beginPath(); X.moveTo(-8, 10); X.lineTo(12, -10); X.stroke();
-      X.lineCap='butt';
-      X.fillStyle='#dde3ea'; X.strokeStyle='#000'; X.lineWidth=1.1/UNIT_SCALE; X.lineJoin='round';
-      // Leaf head symmetric about the shaft axis: base corners sit at
-      // shaft-end ± perpendicular, tip continues along the shaft direction.
-      X.beginPath();
-      X.moveTo(10, -12); X.lineTo(17.6, -15.6); X.lineTo(13.9, -8.1); X.closePath();
-      X.fill(); X.stroke();
-      X.restore();
     } else if(e.utype==='archer'&&!e.corpseRot){
       // Big bow with a full draw cycle: nock and pull back slowly, release,
       // string snaps forward and vibrates until the next arrow. (Corpses
@@ -3077,33 +5114,24 @@ function drawUnit(e){
       // when the real arrow leaves, so the flight reads as THE arrow off
       // the string. Works on the guest too — atkCooldown/target ride the
       // entity sync.
-      let swinging=inActionRange(e)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
-      let bowRof=(UNITS.archer&&UNITS.archer.rof)||60;
-      let bowCd=e.atkCooldown||0;
-      let justFired=bowCd>bowRof*0.85;                         // string still snapping forward
-      let drawT=Math.min(1,Math.max(0,1-bowCd/(bowRof*0.85))); // 0 after the snap → 1 at release
-      X.save(); X.translate(4, -8+humanYOffset);
+      let swinging = anim.swinging; // gate + draw cycle from the hand-pose seam
+      let justFired = anim.justFired; // string still snapping forward
+      X.save(); X.translate(GRIP_REST.archer.x, GRIP_REST.archer.y+humanYOffset);
       // Un-mirror (the context is under X.scale(e.facing,1); scaling by
       // e.facing again cancels it — the translate above stays mirrored so
       // the bow remains in the correct hand), then rotate to the arc's
       // LAUNCH tangent so the nocked arrow points exactly along the real
       // arrow's initial flight line (see aimAngleBallistic above).
-      if(swinging){ X.scale(e.facing,1); X.rotate(aimAngleBallistic()); }
-      // Thick recurve limbs — radius 8 (was 10): the bow should read as
-      // carried BY the archer, not dominate the whole silhouette
-      const BOW_R = 8;
-      X.strokeStyle='#000'; X.lineWidth=3.6/UNIT_SCALE; X.lineCap='round';
-      X.beginPath(); X.arc(0, 0, BOW_R, -Math.PI/2.15, Math.PI/2.15); X.stroke();
-      X.strokeStyle='#8B4513'; X.lineWidth=2/UNIT_SCALE;
-      X.beginPath(); X.arc(0, 0, BOW_R, -Math.PI/2.15, Math.PI/2.15); X.stroke();
-      X.lineCap='butt';
-      let tipX = BOW_R*Math.cos(Math.PI/2.15), tipY = BOW_R*Math.sin(Math.PI/2.15);
-      if(swinging && !justFired){
-        let pull = -1.6 - 4.4*drawT;
-        // Drawn string
-        X.strokeStyle='#e8e8e8'; X.lineWidth=1/UNIT_SCALE;
-        X.beginPath(); X.moveTo(tipX, -tipY); X.lineTo(pull, 0); X.lineTo(tipX, tipY); X.stroke();
-        // Nocked arrow: thick shaft, steel head, red fletching
+      if(swinging){ X.scale(e.facing,1); X.rotate(anim.theta); }
+      // Recurve bow with flexing limbs: the flex rides the REAL draw
+      // clock; on release the limbs snap forward while the string ctrl
+      // lags near the body — the slack string catching up.
+      let f = swinging ? (justFired ? -0.35*anim.snapT : anim.drawT) : 0;
+      // Nocked arrow: thick shaft, steel head, fletching. Facing away we
+      // see the bow's BACK, so the arrow (far side) draws first and the
+      // limbs paint over it; facing the camera it rides on top.
+      const drawNockedArrow = () => {
+        let pull = anim.pull;
         X.strokeStyle='#000'; X.lineWidth=2.4/UNIT_SCALE; X.lineCap='round';
         X.beginPath(); X.moveTo(pull, 0); X.lineTo(pull+13, 0); X.stroke();
         X.strokeStyle='#f5f2e9'; X.lineWidth=1.2/UNIT_SCALE;
@@ -3111,221 +5139,298 @@ function drawUnit(e){
         X.lineCap='butt';
         X.fillStyle='#dde3ea'; X.strokeStyle='#000'; X.lineWidth=1/UNIT_SCALE;
         X.beginPath(); X.moveTo(pull+15, 0); X.lineTo(pull+11, -2.1); X.lineTo(pull+11, 2.1); X.closePath(); X.fill(); X.stroke();
-        X.fillStyle='#cc4444';
-        X.beginPath(); X.moveTo(pull, 0); X.lineTo(pull-2.6, -2.3); X.lineTo(pull+1.1, -0.4); X.closePath(); X.fill();
-        X.beginPath(); X.moveTo(pull, 0); X.lineTo(pull-2.6, 2.3); X.lineTo(pull+1.1, 0.4); X.closePath(); X.fill();
-      } else {
-        // String at rest — vibrates briefly right after the release, decaying
-        // over the first 15% of the reload window
-        let vib = swinging ? Math.sin(tick*1.2)*1.8*Math.max(0,(bowCd-bowRof*0.85)/(bowRof*0.15)) : 0;
+        // Fletching is LITERAL: bare shaft until the tech is researched,
+        // LIGHT-team-color feather vanes after — the research adds the
+        // feathers (lighter than the tunic so they pop).
+        if (eq && eq.fletched) {
+          X.fillStyle=teamColorLight(e.team);
+          X.strokeStyle='#000'; X.lineWidth=0.9/UNIT_SCALE; X.lineJoin='round';
+          const vane = (sgn) => {
+            X.beginPath();
+            X.moveTo(pull+4.6, sgn*0.5);   // front, hugging the shaft
+            X.lineTo(pull+1.2, sgn*3.2);   // swept outer edge
+            X.lineTo(pull-2.6, sgn*3.2);   // feather back edge
+            X.lineTo(pull-0.6, sgn*0.5);   // notch into the nock
+            X.closePath(); X.fill(); X.stroke();
+          };
+          vane(-1); vane(1);
+        }
+      };
+      // the arrow rides the bow's FAR side whenever the bow itself is
+      // behind the body (facing away + E profile): arrow furthest back
+      let arrowBack = anim.heldD < 0;
+      if (swinging && !justFired && arrowBack) drawNockedArrow();
+      let bowTip = drawRecurveBow(f, weaponTier);
+      let tipX = bowTip.tx, tipY = bowTip.ty;
+      if(swinging && !justFired){
+        // Drawn string
         X.strokeStyle='#e8e8e8'; X.lineWidth=1/UNIT_SCALE;
-        X.beginPath(); X.moveTo(tipX, -tipY); X.quadraticCurveTo(vib, 0, tipX, tipY); X.stroke();
+        X.beginPath(); X.moveTo(tipX, -tipY); X.lineTo(anim.pull, 0); X.lineTo(tipX, tipY); X.stroke();
+        if (!arrowBack) drawNockedArrow();
+      } else {
+        // String at rest — STRAIGHT between the tips (ctrl on the chord;
+        // the old ctrl-at-0 relied on tips sitting near x 0 and would sag
+        // slack against the shallow bow) — vibrating briefly right after
+        // the release, decaying over the first 15% of the reload window
+        let vib = swinging ? Math.sin(animTick*1.2)*1.8*anim.snapT : 0;
+        X.strokeStyle='#e8e8e8'; X.lineWidth=1/UNIT_SCALE;
+        X.beginPath(); X.moveTo(tipX, -tipY); X.quadraticCurveTo(tipX + vib, 0, tipX, tipY); X.stroke();
       }
       X.restore();
     } else if(isMountedUnit(e.utype)&&!e.corpseRot){
-      // Scout broadsword (same big sword as the militia, shaped slash).
-      // At rest it parks on the rider's LEFT side, mirrored — the right is
-      // where the horse's head rises, and the blade would point into it.
-      // (Corpses drop it — drawCorpse lays it on the ground.)
-      let swinging=inActionRange(e)&&e.path.length===0; // __animAttack: style-gallery preview, silent like the ram's
-      X.save();
-      if(swinging){
-        X.translate(6+humanXOffset, -6+humanYOffset);
-        drawBigSword(true, e.id);
-      } else {
-        // Both riders rest the sword on the RIGHT (sword hand), angled
-        // forward over the horse's shoulder. The hand is fixed to the
-        // BODY: seen from behind it appears on the opposite screen side,
-        // mirrored.
-        let fb = e.facingNorth ? -1 : 1;
-        X.translate(5.5*fb+humanXOffset, -6+humanYOffset);
-        X.scale(fb,1);
-        drawBigSword(false, e.id);
-      }
-      X.restore();
+      // Scout/knight broadsword — same seam pose as the militia, at the
+      // rider's offsets. (Corpses drop it — drawCorpse lays it down.)
+      drawSwordHeld(humanXOffset, humanYOffset);
       // (knight's kite shield drawn in drawShieldLayer — always on top)
     }
     }; // end drawHeldLayer
 
-    // Shields render on top in EVERY facing: facing the camera the shield
-    // arm is the near side; facing away it reads as slung across the back
-    // (which is also the near side). One shared drawing for militia
-    // (Feudal+, on foot) and knight (mounted).
-    // Steel kite shield with the team cross (militia Castle / knight)
-    const drawKiteShield = (shx, shy) => {
-      X.strokeStyle='#000000';X.lineWidth=1.2/UNIT_SCALE;X.lineJoin='round';
-      X.fillStyle=ageMetal(e.team);X.beginPath();
-      X.moveTo(shx-4.2, shy-5.5);X.lineTo(shx+4.2, shy-5.5);
-      X.lineTo(shx+5.6, shy);X.lineTo(shx, shy+8.5);X.lineTo(shx-5.6, shy);X.closePath();X.fill();X.stroke();
-      X.fillStyle=tc;X.beginPath();
-      X.fillRect(shx-4.2, shy-0.8, 8.4, 1.7);
-      X.fillRect(shx-0.85, shy-4.5, 1.7, 9);
-      X.strokeStyle='#000000';X.lineWidth=0.8/UNIT_SCALE;X.stroke();
+    // Shield faces, drawn AT THE ORIGIN (drawShieldPiece places, turns
+    // and scales them). Front face carries the identity art (boss /
+    // team-cross heraldry — a metal shield made team ID vanish under
+    // full mail); the back face is plain wood.
+    // rimFill draws the bare silhouette in the rim wood — the offset
+    // back copy that gives the plate its THICKNESS read; strokeC lets
+    // the BRIDGE copy hide its outline (stroke = fill → seamless side
+    // wall, so rim + face read as ONE cylinder, not two circles).
+    const drawKiteShield = (back = false, rimFill = null, strokeC = '#000000') => {
+      X.strokeStyle=strokeC;X.lineWidth=1.2/UNIT_SCALE;X.lineJoin='round';
+      X.fillStyle = rimFill || (back ? '#a5723a' : '#f5f5f0');X.beginPath();
+      X.moveTo(-4.2, -5.5);X.lineTo(4.2, -5.5);
+      X.lineTo(5.6, 0);X.lineTo(0, 8.5);X.lineTo(-5.6, 0);X.closePath();X.fill();X.stroke();
+      if (!back && !rimFill) {
+        X.fillStyle=tc;
+        X.fillRect(-4.2, -0.8, 8.4, 1.7);
+        X.fillRect(-0.85, -4.5, 1.7, 9);
+      }
     };
-    // Round WOODEN shield with an iron center boss (militia Feudal)
-    const drawRoundShield = (shx, shy) => {
-      X.strokeStyle='#000000';X.lineWidth=1.2/UNIT_SCALE;X.lineJoin='round';
-      X.fillStyle='#a5723a';
-      X.beginPath();X.arc(shx,shy,4.8,0,Math.PI*2);X.fill();X.stroke();
-      X.fillStyle=ageMetal(e.team);
-      X.beginPath();X.arc(shx,shy,1.6,0,Math.PI*2);X.fill();X.stroke();
+    const drawRoundShield = (back = false, rimFill = null, strokeC = '#000000') => {
+      X.strokeStyle=strokeC;X.lineWidth=1.2/UNIT_SCALE;X.lineJoin='round';
+      X.fillStyle = rimFill || '#a5723a';
+      X.beginPath();X.arc(0,0,4.8,0,Math.PI*2);X.fill();X.stroke();
+      if (!back && !rimFill) {
+        X.fillStyle='#f5f5f0';
+        X.beginPath();X.arc(0,0,1.6,0,Math.PI*2);X.fill();X.stroke();
+      }
+    };
+    // The shield plate: position, face and width all come from the
+    // SHIELD RIG at the seam (braced = on the off forearm; slung = across
+    // the back) — the width scale is the plate turning with the body.
+    const drawShieldPiece = () => {
+      if (!anim.shieldState) return;
+      X.save();
+      X.translate(anim.shieldRest.x + humanXOffset, anim.shieldRest.y + humanYOffset);
+      // the plate has THICKNESS (user call): a dark rim copy offset
+      // along the projected plate NORMAL peeks past the face — the SAME
+      // vector in every view (fully lateral at the S/N edge strips,
+      // diagonal on the quarters, zero at the dead-on profiles). Seeing
+      // the BACK face, the visible rim is the FRONT rim — the offset
+      // flips sides with the face (user caught the inversion at NW).
+      let R2 = RIG[(e.dir + 2) & 7], sd = -anim.gripS;
+      let rs = anim.shieldFace === 'back' ? -1 : 1;
+      let nx = rs * e.facing * sd * R2.sx * 1.7, ny = rs * sd * R2.sy * 1.7 * RIG_YK;
+      if (anim.shieldEdge) {
+        // edge-on (S/N): a plain slim RECTANGLE — one slab, one fill,
+        // one outline, nothing else (user call)
+        X.strokeStyle='#000000';X.lineWidth=1.2/UNIT_SCALE;X.lineJoin='round';
+        let ky = eq.shield === 'kite' ? 1.5 : 0, ry = eq.shield === 'kite' ? 7.6 : 5.6;
+        X.fillStyle='#a5723a';
+        X.beginPath();X.rect(-1.1, ky-ry, 2.2, 2*ry);X.fill();X.stroke();
+      } else {
+        // CYLINDER read: back rim outline → strokeless bridge sweeping
+        // the side wall → face on top (an outlined rim alone read as a
+        // second circle, user caught it)
+        const face = eq.shield === 'kite' ? drawKiteShield : drawRoundShield;
+        X.save(); X.translate(-nx, -ny); X.scale(anim.shieldWK, 1);
+        face(true, '#7a5230'); X.restore();
+        X.save(); X.translate(-nx/2, -ny/2); X.scale(anim.shieldWK, 1);
+        face(true, '#7a5230', '#7a5230'); X.restore();
+        X.scale(anim.shieldWK, 1);
+        face(anim.shieldFace === 'back');
+      }
+      X.restore();
     };
     const drawShieldLayer = () => {
-      // Shield is strapped to the LEFT arm — like the sword, it mirrors
-      // to the opposite screen side when the unit faces away.
-      let fb = e.facingNorth ? -1 : 1;
-      if (e.utype==='knight') {
-        drawKiteShield(-6*fb+humanXOffset, -5+humanYOffset);
-      } else if (e.utype==='militia' && ageBonus(e.team) >= 1) {
-        // Feudal: round WOODEN shield; Castle: upgraded steel kite
-        if (ageBonus(e.team) >= 2) drawKiteShield(-6*fb, -6);
-        else drawRoundShield(-6*fb, -5);
-      } else if (e.utype==='scout' && ageBonus(e.team) >= 2) {
-        // Castle scout: same round wooden shield (iron boss) as the
-        // Feudal militia — light cavalry carries the simple gear.
-        drawRoundShield(-6*fb+humanXOffset, -5+humanYOffset);
-      }
+      // On-top shield for branch-drawn units only — militia + mounted
+      // shields are depth-sorted parts at the layer block.
+      if (e.utype === 'militia' || isMountedUnit(e.utype)) return;
+      drawShieldPiece();
     };
 
     // Facing away → held weapons/tools are on the far side of the torso,
     // so the body must paint over them; facing the camera → the reverse.
     // Facing away: held items are on the far side of BOTH the horse and
     // the rider, so they draw first and everything paints over them.
-    if (e.facingNorth) { drawHeldLayer(); drawMountLayer(); drawBodyLayer(); }
-    else { drawMountLayer(); drawBodyLayer(); drawHeldLayer(); }
-    // Front-facing horse head over rider + weapons (it's the nearest thing
-    // to the camera); shield last — worn on the near arm.
-    if (horseHeadFront) horseHeadFront();
-    drawShieldLayer();
-  } else {
-    // Sheep — scalloped wool cloud; head tracks movement direction
-    let waddle = e.path.length > 0 ? Math.sin(tick * 0.2 + e.id) * 0.06 : 0;
-    let breath = e.path.length === 0 ? Math.sin(tick * 0.06 + e.id) * 0.12 : 0;
-
-    X.save();
-    X.rotate(waddle);
-
-    // 4-leg walk cycle: outlined stubby legs with hooves
-    let hw1 = e.path.length > 0 ? Math.sin(tick * 0.45 + e.id) * 3.0 : 0;
-    let hw2 = -hw1;
-    let legPts = [[-4, 0, hw1], [-1, 1, hw2], [2, 1, hw1], [5, 0, hw2]];
-    X.beginPath();
-    legPts.forEach(p => { X.moveTo(p[0], p[1]); X.lineTo(p[0] + p[2], 5); });
-    X.strokeStyle='#000'; X.lineWidth=2.6/UNIT_SCALE; X.lineCap='round'; X.stroke();
-    X.strokeStyle='#8a8378'; X.lineWidth=1.3/UNIT_SCALE; X.stroke(); X.lineCap='butt';
-    X.fillStyle='#241f18';
-    legPts.forEach(p => { X.beginPath(); X.ellipse(p[0] + p[2], 5.3, 1.2, 0.9, 0, 0, Math.PI*2); X.fill(); });
-
-    // Waggable wool-puff tail at the rear
-    let tailRate = e.eatingGrass ? 0.35 : (e.path.length > 0 ? 0.25 : 0.08);
-    let tailAngle = Math.sin(tick * tailRate + e.id) * 0.4;
-    X.save();
-    X.translate(-7.5, -4);
-    X.rotate(tailAngle - 0.2);
-    X.fillStyle='#000';
-    X.beginPath(); X.arc(-1.5, 0, 2.6, 0, Math.PI*2); X.fill();
-    X.fillStyle='#f2eddd';
-    X.beginPath(); X.arc(-1.5, 0, 1.7, 0, Math.PI*2); X.fill();
-    X.restore();
-
-    // Scalloped wool cloud: black silhouette pass, then wool fill pass
-    let puffs = [[-4.5,-3.5,3.4],[-1.5,-6.5,3.5],[2.5,-6,3.4],[5,-3,3.2],[2,-0.5,3.3],[-2,-0.5,3.4],[0,-3.5,4.4]];
-    X.fillStyle='#000';
-    puffs.forEach(p => { X.beginPath(); X.arc(p[0], p[1], p[2]+1.1+breath, 0, Math.PI*2); X.fill(); });
-    X.fillStyle='#f2eddd';
-    puffs.forEach(p => { X.beginPath(); X.arc(p[0], p[1], p[2]+breath, 0, Math.PI*2); X.fill(); });
-    // Wool shading: highlight on top, ground shade underneath
-    X.fillStyle='rgba(255,255,255,0.5)';
-    X.beginPath(); X.arc(-1, -6.5, 2.6, 0, Math.PI*2); X.fill();
-    X.fillStyle='rgba(110,95,70,0.20)';
-    X.beginPath(); X.ellipse(0, 1.6, 5.8, 2, 0, 0, Math.PI*2); X.fill();
-
-    let earWiggle = e.eatingGrass ? Math.sin(tick * 0.5 + e.id) * 1.2 : Math.sin(tick * 0.1 + e.id) * 0.4;
-
-    // Sheep head: dark face, droopy ears, wool tuft on top, team bandana.
-    // mode: 'front' (two eyes), 'side' (one eye), 'back' (no face)
-    const sheepHead = (hx, hy, mode) => {
-      X.strokeStyle='#000'; X.lineWidth=1/UNIT_SCALE;
-      // Team bandana under the chin
-      X.fillStyle=tc;
-      X.beginPath(); X.ellipse(hx, hy+3.6, 3, 1.8, 0, 0, Math.PI*2); X.fill();
-      // Droopy ears
-      X.fillStyle = mode==='back' ? '#4a463e' : '#57534a';
-      X.save(); X.translate(hx-2.6, hy-0.6+earWiggle); X.rotate(-0.5);
-      X.beginPath(); X.ellipse(0, 0, 2.0, 1.1, 0, 0, Math.PI*2); X.fill(); X.stroke(); X.restore();
-      X.save(); X.translate(hx+2.6, hy-0.6-earWiggle); X.rotate(0.5);
-      X.beginPath(); X.ellipse(0, 0, 2.0, 1.1, 0, 0, Math.PI*2); X.fill(); X.stroke(); X.restore();
-      // Head
-      X.fillStyle = mode==='back' ? '#3a362f' : '#4a463e';
-      X.beginPath(); X.ellipse(hx, hy, 2.7, 3.1, 0, 0, Math.PI*2); X.fill(); X.stroke();
-      // Wool tuft on top of the head
-      X.fillStyle='#000';
-      X.beginPath(); X.arc(hx, hy-2.9, 2.2, 0, Math.PI*2); X.fill();
-      X.fillStyle='#f2eddd';
-      X.beginPath(); X.arc(hx, hy-2.9, 1.6, 0, Math.PI*2); X.fill();
-    };
-
-    let headX = 0, headY = 0;
-    if (e.eatingGrass) {
-      let chew = Math.sin(tick * 0.6);
-      headX = 6; headY = 2 + chew;
-      sheepHead(headX, headY, 'side');
-    } else if (e.dir === 1) {
-      // Strictly South: head center-front
-      headX = 0; headY = 1.5;
-      sheepHead(headX, headY, 'front');
-    } else if (e.dir === 5) {
-      // Strictly North: head center-back, no face
-      headX = 0; headY = -8;
-      sheepHead(headX, headY, 'back');
+    // Global surge (mounted only — the horse steps into the charge a
+    // little; foot units act through the segmented upper body instead).
+    // Origin = the ground point; the facing mirror flips both. Corpses
+    // never set these. S/N views surge along the view axis instead of
+    // sideways.
+    if (faceOnView) {
+      if (anim.lunge) X.translate(0, (e.dir === 1 ? 1 : -1)*anim.lunge*0.6);
     } else {
-      // Side and diagonal directions
-      let useDir = mirroredDir(e);
-      if (useDir === 7)      { headX = 6.5; headY = -3.5; sheepHead(headX, headY, 'side'); }
-      else if (useDir === 0) { headX = 5.5; headY = -1.5; sheepHead(headX, headY, 'side'); }
-      else                   { headX = 3.5; headY = -7.5; sheepHead(headX, headY, 'back'); }
+      if (anim.lean) X.rotate(anim.lean);
+      if (anim.lunge) X.translate(anim.lunge, 0);
     }
 
-    if(e.eatingGrass){
-      X.strokeStyle='#4e8c2d'; X.lineWidth=1.2/UNIT_SCALE;
-      X.beginPath();X.moveTo(headX,headY+1.2);X.lineTo(headX+4,headY+3);X.stroke();
-      X.beginPath();X.moveTo(headX-0.5,headY+1.5);X.lineTo(headX+3,headY+4);X.stroke();
-      
-      // Spawn tiny grass particle puffs (not in the outline mask pass —
-      // a SELECTED grazing sheep used to double-spawn them)
-      if(tick % 24 === 0 && !window._maskDraw){
-        spawnParticles(e.x + (e.facing * 0.25), e.y + 0.1, '#4e8c2d', 1, 0.008, 0.9);
+    if (isMountedUnit(e.utype)) {
+      // POSE-RIG parts draw (Stage B): same sort as the militia's, with
+      // the HORSE as the depth reference (0), the rider just over it,
+      // and two horse-side facts kept as fixed depths — the S hanging
+      // head in front of everything (nearest the camera), the shield
+      // always on top (worn on the near arm, user call).
+      {
+        // pinned depths from the seam (mode/mount/overrides resolved there)
+        let held = anim.heldD;
+        // The GRIP hand's shoulder side picks the sword's side of the
+        // HORSE (user calls): FAR hand (L at SE/E, R at SW/W) → sword
+        // and arm swing BEHIND the horse's head/neck, arm deepest with
+        // the blade over it (the blade still peeks above the silhouette
+        // through the arc); NEAR hand (L at NW, R at NE) → sword in
+        // FRONT of the horse and its head. No near side at S/N.
+        if (anim.gripS * R.d < -0.05) held = Math.min(held, -0.2);
+        else if (anim.gripS * R.d > 0.05) held = Math.max(held, 0.2);
+        // shield from the SHIELD RIG — far-side braces render BEHIND the
+        // horse like the far-side sword (user call at NW; edges still
+        // peek past the silhouette)
+        let shield = anim.shieldState ? anim.shieldD : -99;
+        // the shared rule + horse riders: far grip pinned just under the
+        // sword ("arm deepest with the blade over it"), the idle rein
+        // arm hangs ON the flank; nearOnly strap-out (user caught NW)
+        const armDepth = (s) => armDepthRule(s, { held, R, F,
+          farGripPin: true, flankClamp: true, shield, shieldGap: 0.002 });
+        shield = strapShieldOut(shield, armDepth, true);
+        let loose = anim.swArm === 'front' ? 'rear' : 'front';
+        runParts([
+          [held, () => upperly(drawHeldLayer)],
+          [armDepth(anim.gripS), () => upperly(() => drawArms(anim.swArm))],
+          [armDepth(-anim.gripS), () => upperly(() => drawArms(loose))],
+          [0, drawMountLayer],
+          [0.01, drawBodyLayer],
+          [8, () => { if (horseHeadFront) horseHeadFront(); }],
+          [shield, () => upperly(drawShieldPiece)],
+        ]);
       }
     }
-    X.restore();
+    else if (e.utype === 'militia' || e.utype === 'spearman') {
+      // POSE-RIG parts draw (Stage A2): every part takes a camera depth
+      // from its rig anchors and the ascending sort IS the draw order —
+      // the per-dir layer branches this replaces survive only as the
+      // mounts' profileHeld sort pin.
+      // mount/mode were resolved ONCE at the seam — the parts pass
+      // reads the resolved depth (anim.heldD) + shield rig
+      let held = anim.heldD;
+      // single-hand grip, the mounted near/far convention: a far-side
+      // grip (L at SE/E, R at SW/W) swings the cross-body sword BEHIND
+      // the body, drawn right after its own arm; a near-side grip (L at
+      // NW, R at NE) holds it in FRONT — body, then sword, then the
+      // active arm wrapping it.
+      if (!anim.twoHand) {
+        if (anim.gripS * R.d < -0.05) held = Math.min(held, -0.2);
+        else if (anim.gripS * R.d > 0.05) held = Math.max(held, 0.2);
+      }
+      // two-handed, facing away with a near side (NW/NE): same front
+      // hold — body, then sword, then the near active arm + shoulder
+      // wrapping it; the far active arm stays tucked behind the torso.
+      else if (held < -0.05 && Math.abs(R.d) > 0.05) held = Math.max(held, 0.2);
+      // shield depth from the SHIELD RIG (braced forearm mount or the
+      // back sling — resolved at the seam with position/face/width)
+      let shield = anim.shieldState ? anim.shieldD : -99;
+      // the shared rule + the sword rider: where the sword rides behind
+      // the body (N-side dirs) the far arm draws FIRST, under it too, so
+      // the grip wraps the handle from the far side
+      const armDepth = (s) => armDepthRule(s, { held, R, F,
+        farBehindHeld: true, shield, shieldGap: 0.05 });
+      shield = strapShieldOut(shield, armDepth, false);
+      let loose = anim.swArm === 'front' ? 'rear' : 'front';
+      runParts([
+        [held, () => upperly(drawHeldLayer)],
+        [armDepth(anim.gripS), () => upperly(() => drawArms(anim.swArm))],
+        [armDepth(-anim.gripS), () => upperly(() => drawArms(loose))],
+        [0.01, () => { drawMountLayer(); drawBodyLayer(); }],
+        [shield, () => upperly(drawShieldPiece)],
+      ]);
+    }
+    else {
+      // spearman / archer / villager — the SAME depth-sorted parts pass:
+      // arms are BODY sides whose depths come from their STATE (grip/
+      // support span their shoulder to the held item; idle/carry arms
+      // use the hanging rule — identical at all times, attacks included);
+      // the held item sorts by its rig-mount depth (over the body facing
+      // camera, behind it facing away, straight from the F.d sign).
+      let held = anim.heldD !== undefined ? anim.heldD : 0.005;
+      // the shared rule, no riders (carry arms follow the shoulder-side
+      // rule inside it: near grips OVER the load, far rises behind)
+      const armDepth = (s) => armDepthRule(s, { held, R, F, shieldGap: 0.05 });
+      runParts([
+        [held, () => upperly(drawHeldLayer)],
+        [armDepth(-1), () => upperly(() => drawArms(armFrameSide(-1)))],
+        [armDepth(1), () => upperly(() => drawArms(armFrameSide(1)))],
+        [0.01, () => { drawMountLayer(); drawBodyLayer(); }],
+        // the carried load is its OWN part, shown while hauling (or
+        // pushing the post-tech barrow, loaded or empty); the barrow's
+        // FAR handle rod splits out to draw behind the villager
+        [(anim.barrow || anim.plowRig || anim.carryShow) ? anim.carryD : -99, () => upperly(() => drawCarriedLoad('main'))],
+        // the poles STRADDLE the body (far rod behind) everywhere except
+        // dead-on S, where the handles both come toward the viewer and
+        // render in front (user call)
+        [(anim.barrow || anim.plowRig) ? (mirroredDir(e) === 1 ? anim.carryD - 0.01
+                        : anim.carryD > 0 ? 0.004 : anim.carryD - 0.03) : -99,
+          () => upperly(() => drawCarriedLoad('farRod'))],
+      ]);
+    }
+  } else {
+    drawSheepBody(e);
   }
 
   X.restore(); // restore to absolute coordinates so text and UI aren't mirrored
 
-  // Floating overlays (HP bar, idle "?") are NOT part of the body silhouette
-  // — skip them in the outline mask pass, or a wounded selected unit gets a
+  // Idle indicator — part of the unit's SHAPE, so it draws in the mask pass
+  // too: the selection ring wraps it and the behind-building silhouette shows
+  // it (spot an idle villager hidden behind a building). Keep showing while
+  // walking, as long as no task/target is actually assigned (a bare move order
+  // isn't "working"). Absolute coords — not under UNIT_SCALE. A HUD cue, so
+  // the 3D eye view (window._povDraw, js/pov3d.js) leaves it out.
+  if(e.team===myTeam&&e.utype==='villager'&&!e.task&&!e.target&&!e.corpseRot&&!window._povDraw){
+    X.fillStyle='#ffd700';X.strokeStyle='#000';X.lineWidth=2;
+    X.font='bold 16px sans-serif';X.textAlign='center';
+    X.strokeText('?',sx,sy-20*UNIT_SCALE);
+    X.fillText('?',sx,sy-20*UNIT_SCALE);
+  }
+
+  // Remaining floating overlays (the HP bar) are NOT part of the body
+  // silhouette — skip them in the mask pass, or a wounded selected unit gets a
   // detached gold ring hovering around its HP bar rectangle.
   if(window._maskDraw) return;
 
   // HP bar floats clear above the head (higher for the scout — horse and
   // rider stand taller) so it never covers the unit's face.
   if(e.hp<e.maxHp){
-    let hpTop = (isMountedUnit(e.utype)||e.utype==='tradecart') ? sy-40*UNIT_SCALE : sy-30*UNIT_SCALE;
-    X.fillStyle='#000000';X.fillRect(sx-9,hpTop,18,5);
-    X.fillStyle='#300';X.fillRect(sx-8,hpTop+1,16,3);
-    X.fillStyle=e.hp/e.maxHp>0.5?'#0c0':'#c00';X.fillRect(sx-8,hpTop+1,16*e.hp/e.maxHp,3);
+    let bx = e.utype==='dragon' ? sx + 40*UNIT_SCALE*(e.facing||1) : sx;   // (the dragon's over its head, which leads)
+    let hpTop = e.utype==='dragon' ? sy-80*UNIT_SCALE : (isMountedUnit(e.utype)||e.utype==='tradecart') ? sy-40*UNIT_SCALE : sy-30*UNIT_SCALE; // (the dragon's: over its raised head)
+    X.fillStyle='#000000';X.fillRect(bx-9,hpTop,18,5);
+    X.fillStyle='#300';X.fillRect(bx-8,hpTop+1,16,3);
+    X.fillStyle=e.hp/e.maxHp>0.5?'#0c0':'#c00';X.fillRect(bx-8,hpTop+1,16*e.hp/e.maxHp,3);
+  }
+  // A loaded ram flies a small team flag + rider count (own team only) so you
+  // can see at a glance it's manned — the unit-side echo of the building
+  // garrison-count flag (render-buildings.js).
+  if(e.utype==='ram' && e.team===myTeam && e.garrison && e.garrison.length>0){
+    // Plant the pole base at the ram body's center so the flag reads as
+    // stuck IN the ram (not floating above it), cloth flying clear of the roof.
+    let bh=14, poleLen=28;
+    drawWavingFlag(sx, sy, bh, teamColor(e.team), teamColorDark(e.team), poleLen);
+    let label=String(e.garrison.length);
+    let fy=sy-bh-2-poleLen; // pole top (matches drawWavingFlag's `top`)
+    X.font='bold 12px sans-serif';X.textAlign='left';
+    let tw=X.measureText(label).width+9;
+    X.fillStyle='rgba(0,0,0,0.6)';X.fillRect(sx+3,fy-2,tw,15);
+    X.fillStyle='#ffd700';X.fillText(label,sx+7,fy+9);
+    X.textAlign='left';
   }
   // Selection is drawn separately, in drawUnitOutlines() — a final
   // pass after every building this frame, so it stays visible even when a
   // building is painted over this unit later in the depth sort (see there
   // for why: this codebase has no z-buffer, just one Y-sorted paint pass).
-  // Idle indicator — keep showing while walking too, as long as no
-  // task/target is actually assigned (a bare move order isn't "working").
-  if(e.team===myTeam&&e.utype==='villager'&&!e.task&&!e.target&&!e.corpseRot){
-    X.fillStyle='#ffd700';X.strokeStyle='#000';X.lineWidth=2; // absolute coords — not under UNIT_SCALE
-    X.font='bold 16px sans-serif';X.textAlign='center';
-    X.strokeText('?',sx,sy-20*UNIT_SCALE);
-    X.fillText('?',sx,sy-20*UNIT_SCALE);
-  }
 }
 
