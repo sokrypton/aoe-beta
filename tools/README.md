@@ -1,0 +1,141 @@
+# Tools
+
+| tool | what it does | when to run |
+|---|---|---|
+| `run-tests.sh` | **the pre-commit battery**: syntax → behavior-tests → hud-tests → sim smoke (findings empty + run-to-run checksum equality). `fast` skips the sim smoke. | before every commit |
+| `behavior-tests.js` | PASS/FAIL assertions on **game mechanics**, headless: ram garrison (incl. the real right-click command shape), forward-building defense, walled-archer disengage (fixture: `scenarios/walled-archer.savegame.json`), save-v4 checksum-exact round-trip, the fog match option, large-army group moves, whole-army walled-TC assaults. `grep=<name>` runs one section. | after touching js/logic.js, js/ai.js, js/save.js, combat, garrison, fog |
+| `hud-tests.js` | commands + DOM assertions on the real `index.html` (guard posts, rally, auto-scout, selection panel) | after touching js/commands.js, js/ui.js, js/input.js |
+| `simulate.sh` | seeded all-AI self-play with a structured health report — the main debugging/balance workflow (documented below) | reproducing behavior, balance work, determinism checks |
+| `mp-tests.js` | LIVE lockstep multiplayer through PeerJS: lobby→match checksum agreement, rejoin, kick-to-AI, save/reload resume. **Needs network.** | when netcode, lockstep, or command/message shapes change |
+| `profile-sim.js` | V8 sampling profile of a headless sim run (self-time per function) — measure before optimizing | perf work |
+| `profile-render.js` | ms/frame + per-component breakdown of `render()` on a dense staged scene. Fresh page per zoom and re-baselined per stub — sharing one page inflated whichever zoom ran second ~15x | render perf work |
+| `render-parity.js` | hashes rendered pixels and diffs against a git ref (throwaway worktree, exits non-zero on any change) — the check that a viewer-side refactor moved no pixels. `save=<f.json>` renders a real match at several zooms; **`gallery=1`** drives style.html over every unit type × 8 facings × idle/walk/attack/death (56 probes) via `window.GALLERY` — use that one for unit-art refactors, since no single save contains every unit type | before/after any render refactor |
+| `free-vars.js` | for a line range, lists identifiers it reads but doesn't declare, split into globals vs **enclosing-scope locals** — the ones that turn an extract-a-function refactor into a runtime `ReferenceError`. Heuristic (no parser), so eyeball it; validated against the two known traps in git history | before cutting a block out of a long function |
+| `screenshot.js` / `screenshot-hud.js` | visual acceptance snapshots | UI/art changes |
+| `resheet-sprites.py` | sprite-sheet rebuild | art pipeline |
+
+All Playwright drivers share `lib/harness.js` (static server over the repo +
+system-Chrome launch; first run does a one-time `cd tools && npm install`).
+
+# Headless self-play simulator
+
+`tools/simulate.sh` runs an **all-AI match with no browser UI**, as fast as the
+CPU allows, and prints a structured JSON report. It's the debugging and
+balance-tuning workflow for this repo: reproduce a behavior with a fixed seed,
+change the code, re-run the same seed, and compare.
+
+## Quick start
+
+```sh
+tools/simulate.sh                               # 1v1 standard, 40k ticks (~33 game-min)
+tools/simulate.sh mode=2v2 diff=hard ticks=80000 seed=42
+tools/simulate.sh runs=6 diff=hard              # 6 seeds, aggregate summary
+tools/simulate.sh rollback=1 | jq '.health.rollbackDeterministic'
+tools/simulate.sh diff=hard seed=2001 | jq '.findings'
+```
+
+First run does a one-time `cd tools && npm install` (small — it drives the
+**system Chrome** via `playwright-core`, no browser download). `simulate.sh` is
+a thin wrapper around `node tools/simulate.js` (callable directly).
+
+## Arguments (all `key=value`, order-independent)
+
+| arg | default | meaning |
+|-----|---------|---------|
+| `mode` | `1v1` | `1v1` (2 teams) or `2v2` (4 teams, allied) |
+| `diff` | `standard` | `easy`\|`standard`\|`hard`, or a comma list per team: `easy,hard` |
+| `map` | medium (1v1) / large (2v2) | `small`\|`medium`\|`large` |
+| `ticks` | `40000` | tick budget (**20 ticks = 1 game-second** — the TPS build constant, js/core.js; ~33 game-min default) |
+| `seed` | random | fixed seed → reproducible match |
+| `rollback` | off | also run a snapshot→resim determinism check (`rollback=1`) |
+| `runs` | `1` | run N seeds (`seed`+1000·i) and print an aggregate summary |
+| `jobs` | min(runs, cores−2, 6) | parallel matches for `runs>1` (each in its own page — per-seed results identical to sequential); `jobs=1` for honest per-run tps |
+| `timeout` | scales w/ ticks | per-match evaluate cap (ms) |
+| `headed` | off | `headed=1` shows the browser window (debugging) |
+
+Exit code: `0` clean · `1` findings or JS errors observed · `2` harness failure.
+
+## Report shape (single run)
+
+- `config` — the resolved cfg.
+- `timeline[]` — ~60 per-team samples: `age, vils, mil, rams, idleVils, food/wood/gold/stone, farms, exhaustedFarms, racks, swalls/pwalls, mills, houses, tcs, waves, defeated`.
+- `events[]` — `age-up`, `attack-wave`, `vil-died` (with killer: `gaia`=wildlife or `teamN`), `tc-destroyed`, `knocked-out`, `lost-tc`, `rebuilt-tc`.
+- `health` — `watchdogFires` (+verbatim `watchdogSamples`), `dancers`, `rollbackDeterministic`, `ticksPerSec`, `jsErrors`.
+- `end` — `checksum`, `tick`, `gameOver`, `won`, `ages`, `defeated`, `milSnapshot` (every army unit's position/target/path).
+- `findings[]` — auto-analysis of anomalies (see below).
+
+`runs=N` instead prints `{batch, winners, findingsAcrossRuns (grouped by shape), avgTicksPerSec, anyErrors, runs:[brief per seed]}`.
+
+## The workflow
+
+1. **Reproduce** a bad behavior with a fixed `seed` and read `findings` + `watchdogSamples` + the team `timeline`.
+2. **Fix** the code.
+3. **Re-run the same seed** and diff the numbers.
+4. **`end.checksum` proves behavior-neutral refactors**: same seed → identical checksum means you changed nothing the sim can observe. A changed checksum means real behavior change (expected when fixing/tuning, a red flag when refactoring).
+5. Attribute combat target-drops by setting `window.__dropStats={}` before a run (killed / unreachable / visionDrop).
+
+## Findings glossary (what the auto-analysis flags)
+
+- `high watchdog rate: N fires` — units repeatedly wedging (stuck-watchdog freeing them). A **storm** (100s of fires) is a real pathing/placement bug; a low count (<~80) is normal friction.
+- `teamN never left Dark Age` — economic stall or the losing side of a one-sided game.
+- `teamN food-starved for the entire second half` — broken food economy (unworked/unreachable farms, or berries gone + no farms).
+- `teamN has N chronically idle villagers` — gather/build assignment gap (often: resource unreachable, villager can't path to it).
+- `teamN launched no attack waves … despite N military` — army stuck / can't path to the enemy.
+- `slow sim: N ticks/sec` — pathfinding storm.
+- `match did not resolve` — stalemate (both turtled).
+
+## Gotchas — read before trusting results
+
+- **Determinism is load-bearing (lockstep MP replays the sim).** After touching `sim.html`'s loop or anything in the sim path, ALWAYS check: same seed twice → identical `end.checksum`; and `rollback=1` → `health.rollbackDeterministic: true`. Only use sim-side randomness (`simRandom`/`simRandInt`) and sim state — never `Math.random`, `Date`, or wall-clock in the sim path.
+- **The `gamePaused=true` trap (bit once).** `runSimulation` sets `gamePaused=true` and drives `update()` manually. The game's own `requestAnimationFrame` `gameLoop` (js/init.js) ALSO calls `update()` when `!gamePaused`, on a wall-clock accumulator — and because the batched loop yields between batches, leaving it unpaused lets the RAF loop interleave and double-step ticks nondeterministically (same seed → different checksum). If you change the loop, re-verify checksum reproducibility.
+- **Single seeds mislead.** Map luck swings outcomes hard (an early bear cluster can wipe a team's villagers and doom its whole game). A "regression" on one seed is often just variance — check the aggregate.
+- **Underpowered comparisons give the WRONG SIGN, not just a wide interval.** Measured protocol (2026-07): per-run *end-state* average age has sd ≈ 0.12, so 6 runs can only resolve effects ≥ 0.2 age — and the civilian-explorer experiment read as a slight *improvement* at 6 runs while being significantly *worse* at 40 (+1855 ticks to Feudal, t=4.41). Rules:
+  - **3 runs**: only "did this crash or obviously break". Never a behavior claim.
+  - **40 runs/arm**: the first real measurement for any AI/balance claim (~10% sensitivity). A run is ~4.9s, so this is ~98s at `jobs=2` — there is no reason to compare on fewer.
+  - **Then SIZE THE NEXT RUN FROM THAT RESULT, don't reach for a tier.** With an observed `t`, significance needs about `n × (1.96/t)²`. A 40-run arm showing `t=1.58` needs ~62/arm, not 150 — reaching for the "subtle" tier over-ran one comparison by 2.5x. The same arithmetic run the other way is a warning: 6 runs showing a tiny effect implies ~85/arm, i.e. the test never could have seen it.
+  - A non-significant result on a change whose case is **consistency** (two code paths disagreeing about the same rule) is still shippable — say so plainly in the commit rather than buying a star with machine time.
+  - Compare on **`end.ageUpTicks`** (continuous: first tick each team reached each age, present in batch runs) rather than end-state `ages` — the timing metric resolves a 10% shift in ~38 runs where the snapshot needs ~85.
+  - Always report the effect size **and** what the test could have detected, so "no difference" is never confused with "couldn't tell".
+- **Headless must stay behavior-identical to live.** Only strip *non-sim* work behind `window.__headlessSim` (fog, particles, sounds, per-tick determinism hashing). Never gate actual game logic on it.
+- **`startGame()` alone does NOT build the world / init `teamAge`.** The real match path is `onStartClicked → restartGame(diff) → startGame()`; `restartGame` is what calls `resetTeamAge()` etc. `runSimulation` uses the real path — if you script the game by hand, call `restartGame`.
+- **Stray Chrome processes.** Many concurrent runs can leave zombie `headless_shell`/Chrome processes that contend for CPU and make a run look "hung" (an 80k hard match is ~20s; if it's minutes, suspect strays). Clean up with `pkill -f "[s]imulate.js"; pkill -f "[h]eadless_shell"`.
+- **Resource 404s (favicon) are filtered** out of `jsErrors` by the driver — don't re-add them as sim errors.
+- **Shell pattern gotcha:** `pgrep -f`/`pkill -f` patterns match the *calling* script's own command line — use `[b]racketed` patterns or explicit PIDs; never chain waiters on `pgrep` polling.
+
+## Manual browser view
+
+Open `tools/sim.html?run=1&mode=2v2&ticks=40000` in a normal browser; the report
+renders into a `<pre id="result">`. The Playwright driver never sets `?run` — it
+calls `window.runSimulation(cfg)` directly and reads the returned object.
+
+## AI-tuning notes (context for future balance work)
+
+- The AI reaches Castle and builds **rams** only if its **gold** keeps pace — `aiEcoPlan` biases gatherers toward the next age's cost resources while `savingForAge` (Castle needs 200 gold; a turtled AI used to starve gold and stall at Feudal forever).
+- The wall ring reserves **two gates** (eco-facing + enemy-facing) built **gate-first**, so villagers are never sealed from their economy and the army never detours. A single gate → either eco-seal collapse or an army-detour pathfinding storm.
+- **Known-wash lever (don't re-add naively):** pausing wall construction while `savingForAge` helps over-wallers but removes defense from teams that need it — net-neutral across difficulties, regressed a clean hard seed. Finer wall-vs-eco balance (partial Dark-Age walls, smaller rings) is the open recalibration lever, and needs many-seed statistical batches.
+
+# Development
+
+- **Codebase guide** (architecture, determinism rules, conventions): [`CLAUDE.md`](../CLAUDE.md)
+- **AI behavior reference** (AoE2-DE comparison, fidelity decisions): [`../docs/aoe2-ai-behavior.md`](../docs/aoe2-ai-behavior.md)
+- **External-reference notes** (openage study, unit-stat fixture): [`../docs/reference/`](../docs/reference/)
+
+```sh
+tools/run-tests.sh                        # pre-commit test battery (run from repo root)
+tools/simulate.sh runs=6 diff=hard        # 6 seeded self-play matches, aggregate report
+```
+
+# References & credits
+
+Sources consulted for game-mechanics fidelity. None of their code or game
+assets is included in this repo; what we adopted is documented value-by-value
+in [`../docs/aoe2-ai-behavior.md`](../docs/aoe2-ai-behavior.md) (§11–12).
+
+| reference | what we used it for | where it lives here |
+|---|---|---|
+| [airef.github.io](https://github.com/airef/airef.github.io) — AoE2 AI-scripting reference | Strategic Number defaults and AI behavior semantics behind our difficulty profiles | synthesized into `../docs/aoe2-ai-behavior.md` |
+| [SFTtech/openage](https://github.com/SFTtech/openage) — open Genie-engine project (GPLv3 docs) | Their `doc/reverse_engineering/` notes: damage formula, build/repair rates, market pricing, trade-cart gold, garrison arrows, town-bell range | study notes in `../docs/reference/openage-study.md`; adopted values in `../docs/aoe2-ai-behavior.md` §12 |
+| Leif Ericson's unit stat tables ([AoK Heaven](https://aok.heavengames.com/university/game-info/stat-tables/units-table/), via openage) | Exact AoC unit stats, used as a regression fixture (`stats-audit.js`, runs in the test battery) | `../docs/reference/unit_stats_aoc.csv` |
+
+*Age of Empires II* is a Microsoft / Ensemble Studios title; this project is an
+independent fan reimplementation and includes no original game assets or data.
