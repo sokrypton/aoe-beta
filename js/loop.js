@@ -219,8 +219,9 @@ function updateBuildingDamageFx(){
 // BLOCKER dodges — the mover keeps its path). Fed by rebuildBlockAndNudge's
 // fused walk.
 function makeWayFor(mover){
-  let next=mover.path[0];
-  if(next.x<0||next.x>=MAP||next.y<0||next.y>=MAP)return;
+  const ahead=pathTilesAhead(mover,3);              // the tiles it's about to enter (one leg can span several)
+  let next=ahead[0];
+  if(!next||next.x<0||next.x>=MAP||next.y<0||next.y>=MAP)return;
   let uid=unitBlock?unitBlock[next.x+next.y*MAP]:0;
   if(!uid||uid===mover.id)return;
   let s=entitiesById.get(uid);
@@ -242,7 +243,7 @@ function makeWayFor(mover){
   // loop — it walked back, got dodged again, an infinite dance that never
   // resumed farm duty.
   if(s.utype==='villager'&&s.path.length===0&&(s.gatherX>=0||s.buildTarget))return;
-  if(tick-(s.lastDodgeTick||0)<30)return; // don't jitter between two movers
+  if(tick-(s.lastDodgeTick||0)<T30(30))return; // don't jitter between two movers
   // Anti-dance: a unit that keeps getting displaced (3+ dodges in ~10s)
   // digs its heels in and stops yielding — isStubborn() below also makes
   // it non-pushable, so the traffic re-routes around it instead. This
@@ -250,12 +251,12 @@ function makeWayFor(mover){
   // other forever (dodge → task re-path → counter-dodge → …), while
   // one-off step-asides and the anti-trapping behavior stay intact.
   if(isStubborn(s))return;
-  if(tick-(s.lastDodgeTick||0)>=300)s.dodgeCount=0; // peace resets the tally
+  if(tick-(s.lastDodgeTick||0)>=T30(300))s.dodgeCount=0; // peace resets the tally (paired with isStubborn)
   // Step to an adjacent free tile that isn't on the mover's onward path,
   // and never onto the mover's OWN tile — movers don't register in the
   // block grid, so that tile looks free but is a guaranteed swap-collision
   // (the classic trigger for the dance above).
-  let onward=new Set(mover.path.slice(0,3).map(p=>p.x+','+p.y));
+  let onward=new Set(ahead.map(p=>p.x+','+p.y));
   onward.add(Math.round(mover.x)+','+Math.round(mover.y));
   let best=null;
   for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
@@ -286,9 +287,11 @@ function makeWayFor(mover){
 // is a derived per-tick global, not part of the snapshot, so a restore must
 // rebuild it here (nulling it is wrong — walkable() would then ignore all units,
 // itself a divergence from the on-time run).
+// (cleared by the tiles it stamped last time, not a whole-map fill: this is the grid's only writer)
+const _blockSet=[];
 function rebuildBlockGrid(){
-  if(!unitBlock||unitBlock.length!==MAP*MAP)unitBlock=new Int32Array(MAP*MAP);
-  else unitBlock.fill(0);
+  if(!unitBlock||unitBlock.length!==MAP*MAP){unitBlock=new Int32Array(MAP*MAP);_blockSet.length=0;}
+  else{for(let i=0;i<_blockSet.length;i++)unitBlock[_blockSet[i]]=0;_blockSet.length=0;}
   let dragons=null;
   for(let i=0;i<entities.length;i++){
     let e=entities[i];
@@ -297,13 +300,13 @@ function rebuildBlockGrid(){
     if(e.utype==='sheep_carcass')continue; // a corpse on the ground blocks nobody (and never moves)
     if(e.path.length>0)continue; // moving units don't block
     let x=Math.round(e.x),y=Math.round(e.y);
-    if(x>=0&&x<MAP&&y>=0&&y<MAP)unitBlock[x+y*MAP]=e.id;
+    if(x>=0&&x<MAP&&y>=0&&y<MAP){unitBlock[x+y*MAP]=e.id;_blockSet.push(x+y*MAP);}
   }
   // The dragon blocks every tile under its body (inDragonBody, js/logic.js), moving or not: nobody walks through it.
   if(dragons)for(const d of dragons){
     let cx=Math.round(d.x), cy=Math.round(d.y);
     for(let y=cy-2;y<=cy+2;y++)for(let x=cx-2;x<=cx+2;x++)
-      if(x>=0&&x<MAP&&y>=0&&y<MAP&&inDragonBody(d,x,y,0))unitBlock[x+y*MAP]=d.id;
+      if(x>=0&&x<MAP&&y>=0&&y<MAP&&inDragonBody(d,x,y,0)){unitBlock[x+y*MAP]=d.id;_blockSet.push(x+y*MAP);}
   }
 }
 // Nudging keeps its 2-tick cadence; the grid rebuilds every tick. Movers are
@@ -329,25 +332,35 @@ function cartAtMarket(c){
 // it won't step aside and walkable() treats it as a hard obstacle so paths
 // route around it. Wears off after ~10s without being harassed.
 function isStubborn(u){
-  return (u.dodgeCount||0)>=3 && tick-(u.lastDodgeTick||0)<300;
+  return (u.dodgeCount||0)>=3 && tick-(u.lastDodgeTick||0)<T30(300);
 }
 
 // Gate open/close sensing — see the call site at the top of update().
+let _gateCells = [], _gateTouched = [];
+// On a 2-tick cadence at twice the step — the same open/close speed, half the per-tick unit index (was ~5% of a tick).
 function updateGates(){
+  if (tick % 2 === 1) return;
   let gates = null;
   for (let i = 0; i < entities.length; i++) {
     let e = entities[i];
     if (e.type === 'building' && isGateBtype(e.btype) && e.complete) (gates || (gates = [])).push(e);
   }
   if (!gates) return;
-  // 1-tile cell index of units, built once per tick only when gates exist.
-  let cells = new Map();
+  // 1-tile cell index of units, built once per tick only when gates exist (pooled flat per-tile arrays, emptied via
+  // the touched list: no Map or arrays made per tick; a cell off the map holds no one)
+  if (_gateCells.length !== MAP * MAP) { _gateCells = new Array(MAP * MAP); _gateTouched.length = 0; }
+  for (let i = 0; i < _gateTouched.length; i++) _gateTouched[i].length = 0;
+  _gateTouched.length = 0;
+  let cells = _gateCells;
   for (let i = 0; i < entities.length; i++) {
     let en = entities[i];
     if (en.type !== 'unit') continue;
-    let key = (en.x | 0) * 4096 + (en.y | 0);
-    let arr = cells.get(key);
-    if (!arr) cells.set(key, arr = []);
+    let ux = en.x | 0, uy = en.y | 0;
+    if (ux < 0 || uy < 0 || ux >= MAP || uy >= MAP) continue;
+    let key = ux + uy * MAP;
+    let arr = cells[key];
+    if (!arr) cells[key] = arr = [];
+    if (arr.length === 0) _gateTouched.push(arr);
     arr.push(en);
   }
   gates.forEach(e => {
@@ -357,8 +370,9 @@ function updateGates(){
     let y0 = Math.floor(e.y - 1.2), y1 = Math.floor(e.y + e.h + 0.2);
     let friendlyNear = false;
     outer: for (let cy = y0; cy <= y1; cy++) for (let cx = x0; cx <= x1; cx++) {
-      let arr = cells.get(cx * 4096 + cy);
-      if (!arr) continue;
+      if (cx < 0 || cy < 0 || cx >= MAP || cy >= MAP) continue;
+      let arr = cells[cx + cy * MAP];
+      if (!arr || !arr.length) continue;
       for (let k = 0; k < arr.length; k++) {
         let en = arr[k];
         if (sameSide(en.team, e.team) && // allies open our gates too
@@ -370,9 +384,9 @@ function updateGates(){
     // A locked gate never swings open — it slides shut and stays sealed even
     // with allies standing on it (they route around until it's unlocked).
     if (friendlyNear && !e.locked) {
-      e.gateProgress = Math.min(1.0, e.gateProgress + 0.08);
+      e.gateProgress = Math.min(1.0, e.gateProgress + 0.16);
     } else {
-      e.gateProgress = Math.max(0.0, e.gateProgress - 0.08);
+      e.gateProgress = Math.max(0.0, e.gateProgress - 0.16);
     }
     e.isOpen = e.gateProgress > 0.5;
   });
@@ -385,7 +399,7 @@ function updateGates(){
 // Scratch reused across ticks (cleared, never reallocated): this pass runs
 // every tick over every unit, and the three per-tick allocations (filtered
 // array, flags array, cell Map) were measurable GC pressure at scale.
-const _sepUnits=[], _sepGather=[], _sepCells=new Map(), _sepTouched=[];
+const _sepUnits=[], _sepGather=[], _sepTouched=[]; let _sepCells=[];
 function separateUnits(){
   let units=_sepUnits; units.length=0;
   for(let i=0;i<entities.length;i++){
@@ -408,7 +422,8 @@ function separateUnits(){
   for(let i=0;i<units.length;i++){
     let a=units[i];
     gathering[i]=(a.gatherX >= 0 && a.path.length === 0) ||
-                 (a.buildTarget !== null && a.path.length === 0);
+                 (a.buildTarget !== null && a.path.length === 0) ||
+                 a.possessed === true; // a steered character holds its spot (others make way): shoved, it shook under the controls
   }
   // Spatial hash on 1-tile cells: only same-or-adjacent-cell units can be
   // within minDist (0.5), so each unit compares against its 3×3 cell
@@ -416,17 +431,32 @@ function separateUnits(){
   // each pair processed exactly once.
   // Pooled cell arrays (like targetableUnitGrid): Map.clear() dropped the
   // arrays every tick — keep them, empty them via the touched-list instead.
+  // (a flat per-tile array, not a Map: the same cells, a plain index instead of a hash per look-up)
+  if(_sepCells.length!==MAP*MAP){_sepCells=new Array(MAP*MAP);_sepTouched.length=0;}
   let cells=_sepCells;
   for(let i=0;i<_sepTouched.length;i++)_sepTouched[i].length=0;
   _sepTouched.length=0;
   for(let i=0;i<units.length;i++){
     let u=units[i];
-    let key=(u.x|0)*4096+(u.y|0);
-    let arr=cells.get(key);
-    if(!arr)cells.set(key,arr=[]);
+    let key=(u.x|0)+(u.y|0)*MAP;
+    let arr=cells[key];
+    if(!arr)cells[key]=arr=[];
     if(arr.length===0)_sepTouched.push(arr);
     arr.push(i);
   }
+  // (made once per pass, not per overlapping pair: d, the pair's distance, passed in)
+  let lanePush=(mover,stander,sdx,sdy,d)=>{
+    // sdx/sdy = stander - mover. Heading from the mover's next waypoint.
+    let n=mover.path[0];
+    let hx=n.x-mover.x, hy=n.y-mover.y;
+    let hl=Math.sqrt(hx*hx+hy*hy);
+    if(hl<0.0001)return null; // degenerate heading — radial fallback
+    hx/=hl; hy/=hl;
+    let cross=hx*sdy-hy*sdx; // which side of the lane the stander is on
+    let side=cross>0?1:cross<0?-1:(stander.id%2===0?1:-1);
+    let mag=sep*(minDist-d);
+    return {x:-hy*side*mag, y:hx*side*mag};
+  };
   let processPair=(i,j)=>{
     let a=units[i], b=units[j];
     let aGathering=gathering[i], bGathering=gathering[j];
@@ -448,27 +478,15 @@ function separateUnits(){
       // Deterministic: side = sign of the cross product (id-parity when
       // exactly in lane center); exact ops only. Radial stays for
       // stationary-stationary pairs (spawn stacks, combat rings).
-      let lanePush=(mover,stander,sdx,sdy)=>{
-        // sdx/sdy = stander - mover. Heading from the mover's next waypoint.
-        let n=mover.path[0];
-        let hx=n.x-mover.x, hy=n.y-mover.y;
-        let hl=Math.sqrt(hx*hx+hy*hy);
-        if(hl<0.0001)return null; // degenerate heading — radial fallback
-        hx/=hl; hy/=hl;
-        let cross=hx*sdy-hy*sdx; // which side of the lane the stander is on
-        let side=cross>0?1:cross<0?-1:(stander.id%2===0?1:-1);
-        let mag=sep*(minDist-d);
-        return {x:-hy*side*mag, y:hx*side*mag};
-      };
       // ignoreUnits=true: the overlapping units being separated must not
       // count each other's block-grid entries as walls.
       if(a.path.length===0&&!aGathering){
-        let lp=b.path.length>0?lanePush(b,a,dx,dy):null;
+        let lp=b.path.length>0?lanePush(b,a,dx,dy,d):null;
         let nax=lp?a.x+lp.x:a.x+px, nay=lp?a.y+lp.y:a.y+py;
         if(walkable(Math.round(nax),Math.round(nay),a.id,true)){a.x=nax;a.y=nay;}
       }
       if(b.path.length===0&&!bGathering){
-        let lp=a.path.length>0?lanePush(a,b,-dx,-dy):null;
+        let lp=a.path.length>0?lanePush(a,b,-dx,-dy,d):null;
         let nbx=lp?b.x+lp.x:b.x-px, nby=lp?b.y+lp.y:b.y-py;
         if(walkable(Math.round(nbx),Math.round(nby),b.id,true)){b.x=nbx;b.y=nby;}
       }
@@ -489,8 +507,8 @@ function separateUnits(){
     let cx=units[i].x|0, cy=units[i].y|0;
     for(let ndy=-1;ndy<=1;ndy++)for(let ndx=-1;ndx<=1;ndx++){
       let gx=cx+ndx, gy=cy+ndy;
-      if(gx<0||gy<0)continue;
-      let arr=cells.get(gx*4096+gy);
+      if(gx<0||gy<0||gx>=MAP||gy>=MAP)continue;
+      let arr=cells[gx+gy*MAP];
       if(!arr)continue;
       for(let k=0;k<arr.length;k++){
         if(arr[k]>i)processPair(i,arr[k]);

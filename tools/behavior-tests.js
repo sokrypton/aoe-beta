@@ -191,6 +191,18 @@ async function withPage(browser, port, entry, fn){
       tc2.hp = 1;
       damageEntity({ atk: 9999, team: 1, range: 0, type: 'unit', utype: 'militia', id: 77777, x: tc2.x, y: tc2.y }, tc2);
       T.ok('losing the TC with a free villager queued mints nothing', tc2.hp <= 0 && s0.food === 0);
+      // ONE free villager per team: a second TC doesn't get its own (that pair could mint food via a cancel).
+      const tc3 = createBuilding('TC', 30, 15, 0), tc4 = createBuilding('TC', 30, 30, 0);
+      tc0.queue = []; tc0.freeVillagerQueued = false; s0.food = 0;
+      T.ok('first TC: free', queueUnit(tc3, 'villager').ok === true);
+      T.ok('second TC: not free while one is queued', queueUnit(tc4, 'villager').reason === 'resources');
+      // A PAID villager keeps its price even if every villager dies before the cancel (the refund was re-derived).
+      tc3.queue = []; tc3.freeVillagerQueued = false;
+      const v = createUnit('villager', 31, 31, 0);
+      s0.food = 50; queueUnit(tc3, 'villager');          // paid: a villager is alive
+      v.hp = 0; handleDeath(v, 1);                        // …then the last villager dies
+      execCancelQueue(tc3.id, 0, 0);
+      T.ok('cancelling a paid villager refunds 50 food after the villagers died (' + s0.food + ')', s0.food === 50);
       return T;
     })),
 
@@ -1033,6 +1045,316 @@ async function withPage(browser, port, entry, fn){
       for (let i = 0; i < T30(600); i++) update();
       T.ok('auto path does NOT spend a human\'s wood without prepaid', resources[0].wood === 100);
       T.ok('farm stays exhausted until reseeded deliberately', farm.exhausted);
+      return T;
+    })),
+
+    // ------------------------------------------------------ farmers per farm
+    // A farm takes FARM_MAX_FARMERS; a third villager sent to a full farm farms the next free plot. Real command shape.
+    'farm-max-farmers': (page) => withPage(browser, port, '/tools/sim.html', p => p.evaluate(() => {
+      const T = window.__T;
+      loadScenario({
+        map: 'small', seed: 5, numTeams: 2, controllers: ['human', 'ai:hard'],
+        ages: [1, 1],
+        entities: [
+          { b: 'TC', x: 8, y: 8, team: 0 },
+          { b: 'FARM', x: 13, y: 9, team: 0 },
+          { b: 'FARM', x: 13, y: 12, team: 0 },
+          { u: 'villager', x: 16, y: 9, team: 0 },
+          { u: 'villager', x: 16, y: 10, team: 0 },
+          { u: 'villager', x: 16, y: 11, team: 0 },
+          { b: 'TC', x: 44, y: 44, team: 1 },
+        ],
+      });
+      const farms = entities.filter(e => e.team === 0 && e.btype === 'FARM');
+      const vils = entities.filter(e => e.team === 0 && e.utype === 'villager');
+      selected = vils;
+      execUnitCommand({ tileX: farms[0].x, tileY: farms[0].y });
+      for (let i = 0; i < T30(900); i++) update();
+      const on = f => vils.filter(v => (v.task === 'farm' || v.prevTask === 'farm') && farmAtTile(v.gatherX, v.gatherY, 0, false) === f).length;
+      T.ok('no farm over ' + FARM_MAX_FARMERS + ' farmers (' + on(farms[0]) + '+' + on(farms[1]) + ')', on(farms[0]) <= FARM_MAX_FARMERS && on(farms[1]) <= FARM_MAX_FARMERS);
+      T.ok('all three villagers farm', on(farms[0]) + on(farms[1]) === 3);
+      T.ok('farmers bring food home', resources[0].food > 0 || vils.some(v => v.carrying > 0));
+
+      // One farm, three villagers: two farm it, the third walks there idle, stays selected, and the player is told.
+      loadScenario({
+        map: 'small', seed: 5, numTeams: 2, controllers: ['human', 'ai:hard'],
+        ages: [1, 1],
+        entities: [
+          { b: 'TC', x: 8, y: 8, team: 0 },
+          { b: 'FARM', x: 13, y: 9, team: 0 },
+          { u: 'villager', x: 16, y: 9, team: 0 },
+          { u: 'villager', x: 16, y: 10, team: 0 },
+          { u: 'villager', x: 16, y: 11, team: 0 },
+          { b: 'TC', x: 44, y: 44, team: 1 },
+        ],
+      });
+      const farm1 = entities.find(e => e.team === 0 && e.btype === 'FARM');
+      const vils1 = entities.filter(e => e.team === 0 && e.utype === 'villager');
+      const msgs = [], showMsg0 = window.showMsg;
+      window.showMsg = m => msgs.push(m);
+      selected = vils1;
+      // the tap's shape: a healthy farm resolves as a dispatch buildTarget (input.js doCommand)
+      execUnitCommand({ tileX: farm1.x, tileY: farm1.y, buildTargetId: farm1.id });
+      window.showMsg = showMsg0;
+      const tasked = vils1.filter(v => v.task === 'farm').length;
+      T.ok('one farm: exactly ' + FARM_MAX_FARMERS + ' tasked (' + tasked + ')', tasked === FARM_MAX_FARMERS);
+      T.ok('the extra villager walks there untasked', vils1.some(v => !v.task && v.path.length > 0));
+      T.ok('player told the farm is full (' + msgs.join(' / ') + ')', msgs.some(m => /farmers per farm/.test(m)));
+      T.ok('selection kept', selected.length === 3);
+      for (let i = 0; i < T30(900); i++) update();
+      T.ok('never more than ' + FARM_MAX_FARMERS + ' on the farm', vils1.filter(v => v.task === 'farm' || v.prevTask === 'farm').length <= FARM_MAX_FARMERS);
+      return T;
+    })),
+
+    // ------------------------------------------------- builders take the near side, spread out
+    'build-crew-near-edge': (page) => withPage(browser, port, '/tools/sim.html', p => p.evaluate(() => {
+      const T = window.__T;
+      loadScenario({
+        map: 'small', seed: 5, numTeams: 2, controllers: ['human', 'ai:hard'],
+        ages: [1, 1],
+        entities: [
+          { b: 'TC', x: 6, y: 6, team: 0 },
+          { u: 'villager', x: 27, y: 21, team: 0 },
+          { u: 'villager', x: 27, y: 21, team: 0 },
+          { u: 'villager', x: 27, y: 22, team: 0 },
+          { u: 'villager', x: 27, y: 22, team: 0 },
+          { u: 'villager', x: 19, y: 10, team: 0 },
+          { b: 'TC', x: 44, y: 44, team: 1 },
+        ],
+      });
+      const rax = createBuilding('BARRACKS', 20, 20, 0);   // foundation: x 20..22
+      const farm = createBuilding('FARM', 13, 9, 0);       // foundation: x 13..14
+      for (const b of [rax, farm]) { b.complete = false; b.buildProgress = 0; b.hp = 1; } // unbuilt sites
+      const vils = entities.filter(e => e.team === 0 && e.utype === 'villager');
+      const crew = vils.filter(v => v.x === 27), farmer = vils.find(v => v.x === 19);
+      selected = crew;
+      execUnitCommand({ tileX: 21, tileY: 21, buildTargetId: rax.id });
+      selected = [farmer];
+      execUnitCommand({ tileX: 13, tileY: 9, buildTargetId: farm.id });
+      const dest = u => u.path.length ? u.path[u.path.length - 1] : { x: Math.round(u.x), y: Math.round(u.y) };
+      const ends = crew.map(dest);
+      T.ok('each builder heads for its own tile (' + ends.map(t => t.x + ',' + t.y).join(' ') + ')', new Set(ends.map(t => t.x + ',' + t.y)).size === crew.length);
+      T.ok('all on the near (east) side', ends.every(t => t.x === 23));
+      const fd = dest(farmer);
+      T.ok('farm builder takes the near plot column (' + fd.x + ',' + fd.y + ')', fd.x === 14);
+      for (let i = 0; i < T30(600); i++) update();
+      T.ok('the crew is building', crew.every(v => v.task === 'build' && atBuildSite(v, rax)));
+      return T;
+    })),
+
+    // ------------------------------------------------- a destroyed building's garrison survives (AoE2)
+    'garrison-survives-destruction': (page) => withPage(browser, port, '/tools/sim.html', p => p.evaluate(() => {
+      const T = window.__T;
+      loadScenario({
+        map: 'small', seed: 5, numTeams: 2, controllers: ['human', 'ai:hard'],
+        ages: [1, 1],
+        entities: [
+          { b: 'TC', x: 6, y: 6, team: 0 },
+          { b: 'HOUSE', x: 20, y: 20, team: 0 },
+          { u: 'villager', x: 19, y: 20, team: 0 },
+          { u: 'villager', x: 19, y: 21, team: 0 },
+          { b: 'TC', x: 44, y: 44, team: 1 },
+        ],
+      });
+      const tower = createBuilding('TOWER', 24, 24, 0);
+      const vils = entities.filter(e => e.team === 0 && e.utype === 'villager');
+      for (const v of vils) { v.garrisonedIn = tower.id; tower.garrison.push(v.id); }
+      tower.hp = 0; handleDeath(tower, 1);
+      T.ok('the tower is gone', !entitiesById.has(tower.id));
+      T.ok('its villagers are alive and outside', vils.every(v => v.hp > 0 && entitiesById.has(v.id) && !v.garrisonedIn));
+      T.ok('ejected onto tile centres', vils.every(v => Number.isInteger(v.x) && Number.isInteger(v.y)));
+      return T;
+    })),
+
+    // ------------------------------------------------- character mode: let go = stop on the spot
+    'possess-halt': (page) => withPage(browser, port, '/tools/sim.html', p => p.evaluate(() => {
+      const T = window.__T;
+      loadScenario({
+        map: 'small', seed: 5, numTeams: 2, controllers: ['human', 'ai:hard'], ages: [1, 1],
+        entities: [ { b: 'TC', x: 6, y: 6, team: 0 }, { u: 'villager', x: 20, y: 20, team: 0 }, { u: 'villager', x: 20, y: 24, team: 0 }, { b: 'TC', x: 44, y: 44, team: 1 } ],
+      });
+      const [v, w] = entities.filter(e => e.team === 0 && e.utype === 'villager');
+      execCommand({ kind: 'possess', unitId: v.id, on: true }, 0);
+      for (const u of [v, w]) { selected = [u]; execUnitCommand({ tileX: u.x + 6, tileY: u.y + 3 }); }
+      for (let i = 0; i < T30(25); i++) update();
+      execCommand({ kind: 'halt', unitId: v.id }, 0);
+      execCommand({ kind: 'halt', unitId: w.id }, 0);           // not possessed: no effect
+      const at = [v.x, v.y];
+      T.ok('the possessed unit stops (path cleared)', v.path.length === 0);
+      update(); update();
+      T.ok('…on the spot, not snapped to a tile centre (' + v.x.toFixed(2) + ',' + v.y.toFixed(2) + ')', Math.hypot(v.x - at[0], v.y - at[1]) < 0.05);
+      T.ok('a unit not possessed ignores halt', w.path.length > 0);
+      // steer: a straight off-grid line, exactly along the heading (no tile zigzag)
+      const s0 = [v.x, v.y], hx = Math.cos(0.4), hy = Math.sin(0.4);
+      execCommand({ kind: 'steer', unitId: v.id, x: +(v.x + hx * 2.5).toFixed(3), y: +(v.y + hy * 2.5).toFixed(3) }, 0);
+      T.ok('steer walks one straight off-grid leg', v.path.length === 1 && !Number.isInteger(v.path[0].x));
+      let off = 0;
+      for (let i = 0; i < T30(30); i++) { update(); const ox = v.x - s0[0], oy = v.y - s0[1]; off = Math.max(off, Math.abs(-ox * hy + oy * hx)); }
+      T.ok('…never off the heading line (max ' + off.toFixed(3) + ')', off < 0.01);
+      // a line through a wall falls back to the tile path
+      for (let y = 10; y <= 30; y++) { const t = map[y][Math.round(v.x) + 2]; t.t = TERRAIN.WATER; markMapDirty(Math.round(v.x) + 2, y); }
+      execCommand({ kind: 'steer', unitId: v.id, x: v.x + 3.4, y: v.y }, 0);
+      T.ok('a blocked line walks the tiles instead', v.path.length === 0 || Number.isInteger(v.path[0].x));
+      return T;
+    })),
+
+    // ------------------------------------------------- the line-on-the-grid primitive (any-angle walking)
+    'walk-line-tiles': (page) => withPage(browser, port, '/tools/sim.html', p => p.evaluate(() => {
+      const T = window.__T;
+      let r = 12345; const rnd = () => (r = (r * 1103515245 + 12345) % 2147483648) / 2147483648;
+      let bad = 0, ex = null;
+      for (let n = 0; n < 300; n++) {
+        const ax = rnd() * 20, ay = rnd() * 20, bx = rnd() * 20, by = rnd() * 20;
+        const got = [[Math.round(ax), Math.round(ay)]];
+        walkLineTiles(ax, ay, bx, by, (tx, ty) => { got.push([tx, ty]); });
+        // brute force: every tile a very fine sampling of the line touches, in order
+        const want = [[Math.round(ax), Math.round(ay)]];
+        for (let i = 1; i <= 20000; i++) { const t = i / 20000, k = [Math.round(ax + (bx - ax) * t), Math.round(ay + (by - ay) * t)];
+          const l = want[want.length - 1]; if (k[0] !== l[0] || k[1] !== l[1]) want.push(k); }
+        // exact: every reported tile really meets the segment (clip it to the tile's square), and nothing the sampling
+        // sees is missed or out of order (sampling itself can jump a corner the line just clips, so it isn't the oracle)
+        const meets = ([tx, ty]) => { let t0 = 0, t1 = 1; const d = [bx - ax, by - ay], o = [ax, ay], lo = [tx - 0.5, ty - 0.5], hi = [tx + 0.5, ty + 0.5];
+          for (let k = 0; k < 2; k++) { if (d[k] === 0) { if (o[k] < lo[k] || o[k] > hi[k]) return false; continue; }
+            let u = (lo[k] - o[k]) / d[k], v = (hi[k] - o[k]) / d[k]; if (u > v) [u, v] = [v, u]; t0 = Math.max(t0, u); t1 = Math.min(t1, v); }
+          return t0 <= t1 + 1e-9; };
+        let k = 0; for (const w of want) { while (k < got.length && (got[k][0] !== w[0] || got[k][1] !== w[1])) k++; if (k === got.length) break; }
+        if (!got.every(meets) || k === got.length) { bad++; ex = ex || { ax, ay, bx, by, got, want }; }
+      }
+      T.ok('the DDA visits exactly the tiles the line crosses, in order (' + bad + '/300 wrong' + (ex ? ': ' + JSON.stringify(ex).slice(0, 200) : '') + ')', bad === 0);
+      const diag = []; walkLineTiles(0, 0, 2, 2, (tx, ty, px, py) => { diag.push([tx, ty, px, py]); });
+      T.ok('a line exactly through corners steps diagonally', JSON.stringify(diag) === '[[1,1,0,0],[2,2,1,1]]');
+      return T;
+    })),
+
+    // ------------------------------------------------- straight legs keep the body clear of walls and corners
+    'walk-clearance': (page) => withPage(browser, port, '/tools/sim.html', p => p.evaluate(() => {
+      const T = window.__T;
+      loadScenario({ map: 'small', seed: 5, numTeams: 2, controllers: ['human', 'ai:hard'], ages: [0, 0],
+        entities: [ { b: 'TC', x: 4, y: 4, team: 0 }, { b: 'TC', x: 50, y: 50, team: 1 }, { b: 'HOUSE', x: 30, y: 30, team: 0 } ] });
+      for (let y = 20; y < 42; y++) for (let x = 20; x < 42; x++) { const t = map[y][x]; if (!t.occupied) { t.t = TERRAIN.GRASS; t.res = 0; } }
+      const house = entities.find(e => e.btype === 'HOUSE');
+      let worst = 9, legs = 0;
+      const pairs = [];   // every start round the house to every goal on the far sides: some straight lines must graze a corner
+      for (let k = 26; k <= 35; k++) { pairs.push([k, 27, 61 - k, 34], [27, k, 34, 61 - k], [k, 27, 34, k], [27, k, k, 34]); }
+      for (const [sx, sy, gx, gy] of pairs) {
+        const v = createUnit('villager', sx, sy, 0);
+        selected = [v]; execUnitCommand({ tileX: gx, tileY: gy });
+        legs = Math.max(legs, v.path.length);
+        for (let i = 0; i < 1500 && v.path.length; i++) { update();
+          const dx = Math.max(house.x - 0.5 - v.x, 0, v.x - (house.x + house.w - 0.5)), dy = Math.max(house.y - 0.5 - v.y, 0, v.y - (house.y + house.h - 0.5));
+          worst = Math.min(worst, Math.hypot(dx, dy)); }
+        v.hp = 0; handleDeath(v, 1);
+      }
+      T.ok('around a corner the body stays clear (closest ' + worst.toFixed(2) + ' >= ' + UNIT_BODY_R + ')', worst >= UNIT_BODY_R - 1e-9);
+      T.ok('…and walks are straight legs, not a staircase (most ' + legs + ' legs)', legs <= 4);
+      return T;
+    })),
+
+    // ------------------------------------------------- one ground speed in every direction (AoE2)
+    'walk-speed-isotropic': (page) => withPage(browser, port, '/tools/sim.html', p => p.evaluate(() => {
+      const T = window.__T;
+      loadScenario({ map: 'small', seed: 5, numTeams: 2, controllers: ['human', 'ai:hard'], ages: [0, 0],
+        entities: [ { b: 'TC', x: 4, y: 4, team: 0 }, { b: 'TC', x: 50, y: 50, team: 1 } ] });
+      for (let y = 15; y < 45; y++) for (let x = 15; x < 45; x++) { const t = map[y][x]; t.t = TERRAIN.GRASS; t.res = 0; t.occupied = null; }
+      const speeds = [];
+      for (const [dx, dy] of [[1,0],[0,1],[-1,0],[0,-1],[1,1],[-1,-1],[1,-1],[-1,1]]) {
+        const v = createUnit('villager', 30, 30, 0);
+        selected = [v]; execUnitCommand({ tileX: 30 + dx * 6, tileY: 30 + dy * 6 });
+        let n = 0; while ((v.path.length || Math.hypot(v.x - (30 + dx * 6), v.y - (30 + dy * 6)) > 0.01) && n < 2000) { update(); n++; }
+        speeds.push(Math.hypot(dx * 6, dy * 6) / n);
+        v.hp = 0; handleDeath(v, 1);
+      }
+      const lo = Math.min(...speeds), hi = Math.max(...speeds);
+      T.ok('same ground speed every way (tiles/tick ' + speeds.map(s => s.toFixed(4)).join(' ') + ')', hi / lo < 1.06);
+      return T;
+    })),
+
+    // ------------------------------------------------- spawn never into a sealed pocket
+    // A training building whose spawn corner is wedged into forest must not birth units there (they could never leave).
+    'spawn-not-in-pocket': (page) => withPage(browser, port, '/tools/sim.html', p => p.evaluate(() => {
+      const T = window.__T;
+      loadScenario({
+        map: 'small', seed: 5, numTeams: 2, controllers: ['human', 'ai:hard'],
+        ages: [1, 1],
+        entities: [
+          { b: 'TC', x: 6, y: 6, team: 0 },
+          { b: 'BARRACKS', x: 20, y: 20, team: 0 },   // x,y 20..22: the spawn corner is (23,23)
+          { b: 'TC', x: 44, y: 44, team: 1 },
+        ],
+      });
+      for (const [x, y] of [[22,23],[22,24],[23,24],[24,24],[24,23],[24,22],[23,22]]) {
+        const t = map[y][x]; t.t = TERRAIN.FOREST; t.res = 100; t.occupied = null; markMapDirty(x, y);
+      }
+      T.ok('the corner is a sealed pocket', walkable(23, 23) && !tileOpensOut(23, 23));
+      const rax = entities.find(e => e.btype === 'BARRACKS');
+      resources[0].food = 500; resources[0].gold = 500;
+      rax.queue.push('militia');
+      for (let i = 0; i < T30(1200) && !entities.some(e => e.utype === 'militia'); i++) update();
+      const m = entities.find(e => e.utype === 'militia');
+      T.ok('the militia was trained', !!m);
+      T.ok('it spawned onto open ground (' + (m && m.x) + ',' + (m && m.y) + ')', !!m && !(Math.round(m.x) === 23 && Math.round(m.y) === 23) && tileOpensOut(Math.round(m.x), Math.round(m.y)));
+      return T;
+    })),
+
+    // ------------------------------------------------- two farmers keep their own rows
+    'farm-two-lanes': (page) => withPage(browser, port, '/tools/sim.html', p => p.evaluate(() => {
+      const T = window.__T;
+      loadScenario({
+        map: 'small', seed: 5, numTeams: 2, controllers: ['human', 'ai:hard'],
+        ages: [1, 1],
+        entities: [
+          { b: 'TC', x: 6, y: 6, team: 0 },
+          { b: 'FARM', x: 13, y: 9, team: 0 },
+          { u: 'villager', x: 17, y: 10, team: 0 },
+          { u: 'villager', x: 17, y: 10, team: 0 },
+          { b: 'TC', x: 44, y: 44, team: 1 },
+        ],
+      });
+      const farm = entities.find(e => e.team === 0 && e.btype === 'FARM');
+      const [a, b] = entities.filter(e => e.team === 0 && e.utype === 'villager');
+      selected = [a, b];
+      execUnitCommand({ tileX: farm.x, tileY: farm.y, buildTargetId: farm.id });
+      let shared = 0, working = 0;
+      for (let i = 0; i < T30(1500); i++) {
+        update();
+        const on = u => u.task === 'farm' && u.path.length === 0 && u.carrying > 0;
+        if (on(a) && on(b)) { working++; if (Math.round(a.x) === Math.round(b.x) && Math.round(a.y) === Math.round(b.y)) shared++; }
+      }
+      T.ok('both farmers worked the plot together (' + working + ' ticks)', working > 100);
+      T.ok('never on the same tile (' + shared + ' shared ticks)', shared === 0);
+      T.ok('each keeps its own row', Math.round(a.y) !== Math.round(b.y));
+      return T;
+    })),
+
+    // ------------------------------------------------- exhausted farm: idle in the middle
+    // AoE2: with no reseed paid, the player's farmer stands idle in the centre of its dry plot; any order ends that.
+    'farm-exhausted-idle': (page) => withPage(browser, port, '/tools/sim.html', p => p.evaluate(() => {
+      const T = window.__T;
+      loadScenario({
+        map: 'small', seed: 5, numTeams: 2, controllers: ['human', 'ai:hard'],
+        ages: [1, 1],
+        entities: [
+          { b: 'TC', x: 8, y: 8, team: 0 },
+          { b: 'FARM', x: 13, y: 9, team: 0 },
+          { u: 'villager', x: 13, y: 9, team: 0 },
+          { b: 'TC', x: 44, y: 44, team: 1 },
+        ],
+      });
+      const farm = entities.find(e => e.team === 0 && e.btype === 'FARM');
+      const v = entities.find(e => e.team === 0 && e.utype === 'villager');
+      v.task = 'farm'; v.gatherX = farm.x; v.gatherY = farm.y;
+      resources[0].wood = 0; resources[0].prepaidFarms = 0;
+      map[farm.y][farm.x].res = 3; // the next bites drain it: the real exhaustion path
+      let exhaustedAt = -1;
+      for (let i = 0; i < T30(1500); i++) { update(); if (exhaustedAt < 0 && farm.exhausted) exhaustedAt = i; }
+      const cx = farm.x + 0.5, cy = farm.y + 0.5, d = Math.hypot(v.x - cx, v.y - cy);
+      T.ok('the farm ran dry', farm.exhausted);
+      T.ok('farmer idles (task=' + v.task + ')', !v.task && v.idleFarm === farm.id);
+      T.ok('farmer stands in the middle of the plot (d=' + d.toFixed(2) + ')', d <= 0.25);
+      selected = [v];
+      execUnitCommand({ tileX: 20, tileY: 14 });
+      for (let i = 0; i < T30(900); i++) update();
+      T.ok('a move order ends the wait', v.idleFarm == null && Math.hypot(v.x - 20, v.y - 14) < 1.5);
       return T;
     })),
 

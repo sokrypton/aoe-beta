@@ -21,10 +21,10 @@ let unitBlock=null;
 // findPath call (27k+ calls/match; ~20k elements each on a large map — a major
 // per-tick GC source). Generation-stamped so "clearing" between calls is a
 // single counter bump, never an O(MAP²) fill: a cell is closed iff
-// _pfClosedGen[k]===_pfGen, and open iff _pfOpenGen[k]===_pfGen (its node is
-// _pfOpenNode[k]). Purely a storage change — the A* algorithm and the path it
-// returns are byte-for-byte identical (verified by checksum equality).
-let _pfGen=0, _pfClosedGen=null, _pfOpenGen=null, _pfOpenNode=null;
+// _pfClosedGen[k]===_pfGen, and open iff _pfOpenGen[k]===_pfGen (its state in
+// the per-tile arrays: findPath). Purely a storage change — the A* algorithm and
+// the path it returns are byte-for-byte identical (verified by checksum equality).
+let _pfGen=0, _pfClosedGen=null, _pfOpenGen=null, _pfG=null, _pfH=null, _pfP=null, _pfS=null, _pfOpen=null, _pfF=null, _pfT=null, _pfCap=0, _pfWalkGen=null, _pfWalk=null; const _pfW=new Array(9), PF_TREE_AT=128;
 
 function walkable(x,y,ignore,ignoreUnits){
   if(x<0||x>=MAP||y<0||y>=MAP)return false;
@@ -203,52 +203,70 @@ function findPath(sx,sy,ex,ey,ignore,stopDist,goalBldg,claim,bestEffort){
   }
   // Use a Map for O(1) open-list lookup instead of O(n) linear scan.
   // Extract min-f by linear scan + swap-with-last (O(n)) instead of sort (O(n log n)).
-  let startH=heur(sx,sy);
-  let startNode={x:sx,y:sy,g:0,h:startH,f:startH,p:null};
-  let open=[startNode];
-  // (Re)allocate scratch on first use / map-size change, then bump the
-  // generation so all prior stamps read as stale — no per-call clearing.
+  // Search state per TILE in typed arrays (a tile holds at most one open entry, so the tile is the node): G cost so
+  // far, H its heuristic, P the parent tile (-1: the start), S its open-list slot. The open list is tile keys. The same
+  // doubles, the same comparisons, the same order as the object nodes they replace — only no allocation per tile.
   let N=MAP*MAP;
-  if(!_pfClosedGen||_pfClosedGen.length!==N){_pfClosedGen=new Int32Array(N);_pfOpenGen=new Int32Array(N);_pfOpenNode=new Array(N);_pfGen=0;}
-  if(++_pfGen>=2147483647){_pfClosedGen.fill(0);_pfOpenGen.fill(0);_pfGen=1;} // stamp overflow (astronomically rare) → reset
+  if(!_pfClosedGen||_pfClosedGen.length!==N){_pfClosedGen=new Int32Array(N);_pfOpenGen=new Int32Array(N);_pfG=new Float64Array(N);_pfH=new Float64Array(N);_pfP=new Int32Array(N);_pfS=new Int32Array(N);_pfGen=0;}
+  if(++_pfGen>=2147483647){_pfClosedGen.fill(0);_pfOpenGen.fill(0);if(_pfWalkGen)_pfWalkGen.fill(0);_pfGen=1;} // stamp overflow (astronomically rare) → reset
   let gen=_pfGen;
-  _pfOpenGen[sx+sy*MAP]=gen;_pfOpenNode[sx+sy*MAP]=startNode;
+  const G=_pfG,H=_pfH,P=_pfP,S=_pfS,OG=_pfOpenGen,CG=_pfClosedGen;
+  // The open list's min-f pick, as the plain scan made it — the lowest f, and of equal f's the earliest slot (the
+  // pop order must not change: determinism) — kept by a tournament tree over the slots: O(log n) a change, not O(n) a
+  // pop. F: each slot's f (Infinity when empty); T: each tree node's winning slot (a tie goes left).
+  if(!_pfF){_pfCap=1;while(_pfCap<MAX_PATH_ITERS*8+8)_pfCap<<=1;_pfF=new Float64Array(_pfCap).fill(Infinity);_pfT=new Int32Array(2*_pfCap);_pfOpen=new Int32Array(_pfCap);
+    for(let i=0;i<_pfCap;i++)_pfT[_pfCap+i]=i; for(let t=_pfCap-1;t>=1;t--)_pfT[t]=_pfT[2*t];}
+  const F=_pfF,T=_pfT,cap=_pfCap,open=_pfOpen;
+  // A short search (most are) just scans F — the same pick — and only a list past PF_TREE_AT builds the tree.
+  let tree=false, hi=0, nOpen=0;                                                    // hi: slots used this call
+  // (a level whose winner stands, and isn't slot i itself, leaves everything above as it was: stop there)
+  const setF=(i,v)=>{F[i]=v;if(i>=hi)hi=i+1;if(!tree)return;for(let t=(i+cap)>>1;t>=1;t>>=1){const l=T[2*t],r=T[2*t+1],w=F[r]<F[l]?r:l;if(w===T[t]&&w!==i)break;T[t]=w;}};
+  const sweep=k=>{let a=cap,b=cap+k-1;while(a>1){a>>=1;b>>=1;for(let t=a;t<=b;t++){const l=T[2*t],rr=T[2*t+1];T[t]=F[rr]<F[l]?rr:l;}}}; // each level over slots 0..k-1
+  const pick=n=>{if(tree)return T[1];let m=0,mf=F[0];for(let i=1;i<n;i++)if(F[i]<mf){mf=F[i];m=i;}return m;};
+  // on the way out: the slots it used back to empty (the tree, if built, swept back with them)
+  const done=r=>{for(let i=0;i<hi;i++)F[i]=Infinity;if(tree)sweep(hi);return r;};
+  const trace=k=>{let path=[];while(k!==sk){path.push({x:k%MAP,y:(k/MAP)|0});k=P[k];}return path.reverse();};
+  // walkable() per tile, asked once a search (a tile is a neighbour of up to 8 expansions; nothing it reads changes
+  // mid-search): stamped by gen. Off the map it's asked straight — never aliased onto a real tile.
+  if(!_pfWalkGen||_pfWalkGen.length!==N){_pfWalkGen=new Int32Array(N);_pfWalk=new Uint8Array(N);}
+  const walk=(x,y)=>{if(x<0||y<0||x>=MAP||y>=MAP)return false;const k=x+y*MAP;if(_pfWalkGen[k]!==gen){_pfWalkGen[k]=gen;_pfWalk[k]=walkable(x,y,ignore)?1:0;}return _pfWalk[k]===1;};
+  // The start may sit off the map (its key then outside the arrays): its coords, g and h are kept here, never read back.
+  const sk=sx+sy*MAP, sh=heur(sx,sy);
+  G[sk]=0;H[sk]=sh;P[sk]=-1;S[sk]=0;open[0]=sk;nOpen=1;setF(0,sh);OG[sk]=gen;
   let iters=0;
   // Track the node that got closest to the goal so far. If the search runs out
   // of budget (large/obstructed maps can need more than the iteration cap) we
   // return a partial path toward it instead of giving up with an empty path —
   // this keeps the unit moving towards a far-off destination over multiple legs
   // rather than appearing to ignore the move command entirely.
-  let bestNode=startNode;
-  while(open.length>0&&iters<MAX_PATH_ITERS){
+  let bestK=sk;
+  while(nOpen>0&&iters<MAX_PATH_ITERS){
     iters++;
-    let minIdx=0;
-    for(let i=1;i<open.length;i++){if(open[i].f<open[minIdx].f)minIdx=i;}
-    let cur=open[minIdx];
-    open[minIdx]=open[open.length-1];open.pop();
-    if(inGoal(cur.x,cur.y)){
-      let path=[];while(cur.p){path.unshift({x:cur.x,y:cur.y});cur=cur.p;}
-      return path;
-    }
-    let ck=cur.x+cur.y*MAP;
-    _pfOpenNode[ck]=undefined; // popped from the open set
-    _pfClosedGen[ck]=gen;
+    let n=nOpen, minIdx=pick(n);
+    let ck=open[minIdx], last=open[n-1];
+    open[minIdx]=last;setF(minIdx,F[n-1]);S[last]=minIdx;setF(n-1,Infinity);nOpen--;
+    let cx=ck===sk?sx:ck%MAP, cy=ck===sk?sy:(ck/MAP)|0;
+    if(inGoal(cx,cy))return done(trace(ck));
+    OG[ck]=0; // popped from the open set
+    CG[ck]=gen;
+    // the 8 neighbours' walkability, each asked once (a diagonal reuses its two sides': the same answers, fewer calls)
+    for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)_pfW[(dy+1)*3+dx+1]=(dx||dy)&&walk(cx+dx,cy+dy);
+    const cg=ck===sk?0:G[ck];
     for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
       if(dx===0&&dy===0)continue;
-      let nx=cur.x+dx,ny=cur.y+dy;
-      if(!walkable(nx,ny,ignore))continue;
+      let nx=cx+dx,ny=cy+dy;
+      if(!_pfW[(dy+1)*3+dx+1])continue;
       // Block diagonal moves that cut through the gap between two touching obstacles
-      if(dx&&dy&&(!walkable(cur.x+dx,cur.y,ignore)||!walkable(cur.x,cur.y+dy,ignore)))continue;
+      if(dx&&dy&&(!_pfW[4+dx]||!_pfW[(dy+1)*3+1]))continue;
       let k=nx+ny*MAP;
-      if(_pfClosedGen[k]===gen)continue;
-      let g=cur.g+(dx&&dy?1.41:1);
-      let existing=_pfOpenGen[k]===gen?_pfOpenNode[k]:undefined;
-      if(existing){if(g<existing.g){existing.g=g;existing.f=g+existing.h;existing.p=cur;}}
+      if(CG[k]===gen)continue;
+      let g=cg+(dx&&dy?1.41:1);
+      if(OG[k]===gen){if(g<G[k]){G[k]=g;P[k]=ck;setF(S[k],g+H[k]);}}
       else{
         let h=heur(nx,ny);
-        let node={x:nx,y:ny,g,h,f:g+h,p:cur};
-        open.push(node);_pfOpenGen[k]=gen;_pfOpenNode[k]=node;
-        if(h<bestNode.h)bestNode=node;
+        G[k]=g;H[k]=h;P[k]=ck;S[k]=nOpen;open[nOpen]=k;setF(nOpen,g+h);nOpen++;OG[k]=gen;
+        if(!tree&&nOpen>PF_TREE_AT){tree=true;sweep(nOpen);}
+        if(h<(bestK===sk?sh:H[bestK]))bestK=k;
       }
     }
   }
@@ -262,11 +280,8 @@ function findPath(sx,sy,ex,ey,ignore,stopDist,goalBldg,claim,bestEffort){
   // bestEffort callers want that same partial path for the EXHAUSTED case too:
   // "walk as close to it as the terrain allows" (AoE2's answer to an order on a
   // target across water / sealed away).
-  if((bestEffort || iters>=MAX_PATH_ITERS) && bestNode!==startNode){
-    let path=[];let cur=bestNode;while(cur.p){path.unshift({x:cur.x,y:cur.y});cur=cur.p;}
-    return path;
-  }
-  return[];
+  if((bestEffort || iters>=MAX_PATH_ITERS) && bestK!==sk)return done(trace(bestK));
+  return done([]);
 }
 
 function clearUnitPath(e){
@@ -282,12 +297,73 @@ function clearUnitPath(e){
   if(e.order&&e.order.kind==='move')e.order=null;
 }
 
+// THE line-on-the-grid primitive: every tile a straight line from (ax,ay) to (bx,by) passes through, in order (tile t
+// spans t-0.5..t+0.5; an exact DDA walk, nothing sampled). visit(tx,ty,px,py) gets each tile entered after the start
+// (px,py = the tile it came from: a diagonal step means the line ran exactly through their shared corner); returning
+// false stops the walk, and walkLineTiles returns false.
+function walkLineTiles(ax,ay,bx,by,visit){
+  const ux=ax+0.5, uy=ay+0.5, dx=bx+0.5-ux, dy=by+0.5-uy;
+  let cx=Math.floor(ux), cy=Math.floor(uy);
+  const ex=Math.floor(bx+0.5), ey=Math.floor(by+0.5), sx=Math.sign(dx), sy=Math.sign(dy);
+  const tdx=sx?Math.abs(1/dx):Infinity, tdy=sy?Math.abs(1/dy):Infinity;
+  let tmx=sx>0?(cx+1-ux)*tdx:sx<0?(ux-cx)*tdx:Infinity, tmy=sy>0?(cy+1-uy)*tdy:sy<0?(uy-cy)*tdy:Infinity;
+  for(let steps=Math.abs(ex-cx)+Math.abs(ey-cy);steps>0&&(cx!==ex||cy!==ey);steps--){ // (each step closes a column or a row)
+    const px=cx, py=cy;
+    if(tmx<tmy){cx+=sx;tmx+=tdx;} else if(tmy<tmx){cy+=sy;tmy+=tdy;} else {cx+=sx;cy+=sy;tmx+=tdx;tmy+=tdy;}
+    if(visit(cx,cy,px,py)===false)return false;
+  }
+  return true;
+}
+// Can `e` walk a straight line from (ax,ay) to (bx,by)? Its BODY must fit (UNIT_BODY_R): the centre line enters only
+// tiles walkable to `e` — standing units block as they do findPath's (passUnits: the steered character's lines go
+// through them, never the dragon's body) — and the two edges of the corridor it sweeps (±UNIT_BODY_R) only open ground,
+// so it never grazes a wall or building corner it would clip through (a tile path keeps ≥0.7 from one). A line through a
+// corner obeys findPath's diagonal rule: both orthogonal sides open, never squeezing between touching obstacles.
+const UNIT_BODY_R = 0.3;
+function lineWalkClear(e,ax,ay,bx,by,passUnits){
+  const open=(tx,ty,units)=>{
+    if(tx<0||ty<0||tx>=MAP||ty>=MAP||!walkable(tx,ty,e.id,!units))return false;
+    const b=unitBlock&&entitiesById.get(unitBlock[tx+ty*MAP]); return !(b&&b.utype==='dragon');
+  };
+  const clear=(x0,y0,x1,y1,units)=>walkLineTiles(x0,y0,x1,y1,(tx,ty,px,py)=>
+    open(tx,ty,units)&&(tx===px||ty===py||(open(tx,py,units)&&open(px,ty,units))));
+  const dx=bx-ax, dy=by-ay, l=Math.sqrt(dx*dx+dy*dy);
+  if(!clear(ax,ay,bx,by,!passUnits))return false;
+  if(l===0)return true;
+  const nx=-dy/l*UNIT_BODY_R, ny=dx/l*UNIT_BODY_R;
+  return clear(ax+nx,ay+ny,bx+nx,by+ny,false)&&clear(ax-nx,ay-ny,bx-nx,by-ny,false);
+}
+// (character-mode steering: a straight line from where the unit stands to an off-grid point)
+function straightWalkClear(e,x,y){ return lineWalkClear(e,e.x,e.y,x,y,true); }
+// ANY-ANGLE walking (AoE2): findPath's tile path is an 8-direction staircase. A unit adopting one walks it as straight
+// legs instead: from each leg start, the farthest of the following waypoints it can see along a clear line (at most
+// SMOOTH_AHEAD on — that bounds the line checks a re-plan pays). The goal is always kept.
+const SMOOTH_AHEAD = 10;
+function smoothPath(e,path){
+  if(path.length<2)return path;
+  const out=[]; let ax=e.x, ay=e.y, i=0;
+  while(i<path.length){
+    let j=i;
+    for(let k=i+1;k<path.length&&k<=i+SMOOTH_AHEAD&&lineWalkClear(e,ax,ay,path[k].x,path[k].y);k++)j=k;
+    out.push(path[j]); ax=path[j].x; ay=path[j].y; i=j+1;
+  }
+  return out;
+}
 function setUnitPath(e,path){
-  e.path=path;
+  e.path=smoothPath(e,path);
   e.moveT=0;
   e.fromX=e.x;
   e.fromY=e.y;
   return e.path;
+}
+// The tiles a walker will enter next along its path, in order, up to `max` — what's in its way (a leg spans several).
+function pathTilesAhead(e,max){
+  const out=[]; let ax=e.x, ay=e.y;
+  for(const n of e.path){
+    if(!walkLineTiles(ax,ay,n.x,n.y,(tx,ty)=>{out.push({x:tx,y:ty}); return out.length<max;}))break;
+    ax=n.x; ay=n.y;
+  }
+  return out;
 }
 
 function pathUnitTo(e,x,y){
@@ -317,8 +393,23 @@ function pathToContact(e,target,claim){
 // Path a unit to INTERACT with a building: onto a FARM plot (walkable — the
 // villager stands on it), else the cheapest contact tile (pathToContact). THE
 // build/repair/dropoff approach, AI and player alike.
+// Co-builders' claims fan a crew out: each takes the nearest contact (or plot) tile nobody else holds.
 function pathToBuilding(e,bldg){
-  return bldg.btype==='FARM' ? pathUnitTo(e,bldg.x,bldg.y) : pathToContact(e,bldg);
+  let claim=contactClaims(e,p=>p.task==='build'&&p.buildTarget===bldg.id);
+  if(bldg.btype!=='FARM'){
+    // Builders ring the site from OUTSIDE (AoE2): its own footprint is walkable to them but never a stand tile.
+    for(let y=bldg.y;y<bldg.y+bldg.h;y++)for(let x=bldg.x;x<bldg.x+bldg.w;x++)claim.add(y*MAP+x);
+    return pathToContact(e,bldg,claim);
+  }
+  // Farm: the nearest unclaimed plot tile (all claimed → the nearest), row order breaking ties.
+  let best=null,bd=Infinity,bestAny=null,bdAny=Infinity;
+  for(let y=bldg.y;y<bldg.y+bldg.h;y++)for(let x=bldg.x;x<bldg.x+bldg.w;x++){
+    let d=(x-e.x)*(x-e.x)+(y-e.y)*(y-e.y);
+    if(d<bdAny){bdAny=d;bestAny={x,y};}
+    if(d<bd&&!claim.has(y*MAP+x)){bd=d;best={x,y};}
+  }
+  let t=best||bestAny;
+  return pathUnitTo(e,t.x,t.y);
 }
 
 // e.speed is tiles per game-second (AoE2 stat). One orthogonal tile step
@@ -340,7 +431,7 @@ const PROJECTILE_TILES_PER_TICK = 7.5 / TPS;
 // moving unit rubber-bands on the guest, and the guest's whole prediction
 // premise is that its stepping matches the host's EXACTLY.
 //
-// `distPx`: how many screen-pixels of progress to consume (host: one whole
+// `distPx`: how many walk-px of progress to consume (legPx; host: one whole
 // tick's worth; guest: fractional, per rendered frame).
 // `checkWalkable`: host-only — it re-validates each tile against the live
 // block grid, which only the host's update() keeps current; the guest
@@ -354,39 +445,37 @@ const PROJECTILE_TILES_PER_TICK = 7.5 / TPS;
 // what a real queue does — the blocker almost always moves on within a
 // few ticks. moveT is reset so unblocking can't teleport banked progress.
 function stepBlocked(e){
-  e.moveT=0;
+  e.fromX=e.x; e.fromY=e.y; // the leg resumes from where it stands: with the progress zeroed, measured from the old
+  e.moveT=0;                // leg start it snapped back there
   e.stepWait=(e.stepWait||0)+1;
-  if(e.stepWait>30){e.stepWait=0;e.path=[];}
+  if(e.stepWait>T30(30)){e.stepWait=0;e.path=[];}
+}
+// A leg's length in walk "px": its WORLD length in tiles × one orthogonal tile's px (√(32²+16²)), so a unit has one
+// ground speed in every direction (AoE2; the isometric view only projects it). Measured on screen, one diagonal walked
+// 1.58× and the other 0.79× the straight-line speed. Orthogonal legs are exactly what they were.
+const TILE_PX = Math.sqrt(HALF_TW * HALF_TW + HALF_TH * HALF_TH);
+function legPx(ax,ay,bx,by){
+  let dx=bx-ax, dy=by-ay;
+  return Math.sqrt(dx*dx+dy*dy)*TILE_PX||1.0;
 }
 function stepUnitAlongPath(e, distPx, checkWalkable){
-  e.moveT += distPx;
-  while(e.path.length>0){
-    let nextTile=e.path[0];
-    let p1=toIso(e.fromX,e.fromY), p2=toIso(nextTile.x,nextTile.y);
-    let sddx=p2.ix-p1.ix, sddy=p2.iy-p1.iy;
-    let screenDist=Math.sqrt(sddx*sddx+sddy*sddy)||1.0;
-    if(e.moveT>=screenDist){
-      if(checkWalkable && !walkable(nextTile.x,nextTile.y,e.id)){
-        stepBlocked(e); return;
-      }
-      e.moveT-=screenDist;
-      let next=e.path.shift();
-      e.fromX=next.x;e.fromY=next.y;e.x=next.x;e.y=next.y;
-    } else break;
+  // Where this advance takes it, finishing legs on the way…
+  const P=e.path, pts=[e.x,e.y]; let moveT=e.moveT+distPx, fx=e.fromX, fy=e.fromY, x=e.x, y=e.y, done=0;
+  while(done<P.length){
+    const n=P[done], L=legPx(fx,fy,n.x,n.y);
+    if(moveT>=L){ moveT-=L; fx=x=n.x; fy=y=n.y; done++; pts.push(x,y); }
+    else { const t=moveT/L; x=fx+(n.x-fx)*t; y=fy+(n.y-fy)*t; break; }
   }
-  if(e.path.length>0){
-    let next=e.path[0];
-    if(checkWalkable && !walkable(next.x,next.y,e.id)){
-      stepBlocked(e); return;
+  pts.push(x,y);
+  // …and every tile it would step into on the way: one taken, it waits where it stands (stepBlocked).
+  if(checkWalkable){
+    for(let i=0;i+3<pts.length;i+=2){
+      if(!walkLineTiles(pts[i],pts[i+1],pts[i+2],pts[i+3],(tx,ty)=>walkable(tx,ty,e.id))){ stepBlocked(e); return; }
     }
-    e.stepWait=0;
-    let p1=toIso(e.fromX,e.fromY), p2=toIso(next.x,next.y);
-    let sddx=p2.ix-p1.ix, sddy=p2.iy-p1.iy;
-    let screenDist=Math.sqrt(sddx*sddx+sddy*sddy)||1.0;
-    let t=e.moveT/screenDist;
-    e.x=e.fromX+(next.x-e.fromX)*t;
-    e.y=e.fromY+(next.y-e.fromY)*t;
   }
+  if(P.length)e.stepWait=0;
+  if(done)P.splice(0,done);
+  e.moveT=moveT; e.fromX=fx; e.fromY=fy; e.x=x; e.y=y;
 }
 
 // Tiles/tick this unit is CURRENTLY moving (null when settled). Mirrors
@@ -400,12 +489,10 @@ function unitVelocityPerTick(e){
   let tdx=next.x-e.x, tdy=next.y-e.y;
   let tileLen=Math.sqrt(tdx*tdx+tdy*tdy);
   if(tileLen<0.000001) return null;
-  let p1=toIso(e.fromX,e.fromY), p2=toIso(next.x,next.y);
-  let sdx=p2.ix-p1.ix, sdy=p2.iy-p1.iy;
-  let screenDist=Math.sqrt(sdx*sdx+sdy*sdy)||1.0;
+  let legLen=legPx(e.fromX,e.fromY,next.x,next.y);
   let ldx=next.x-e.fromX, ldy=next.y-e.fromY;
   let legTile=Math.sqrt(ldx*ldx+ldy*ldy)||1.0;
-  let step=unitMoveSpeed(e)*UNIT_PX_PER_TICK*legTile/screenDist;   // tiles per tick
+  let step=unitMoveSpeed(e)*UNIT_PX_PER_TICK*legTile/legLen;   // tiles per tick
   return {vx:tdx/tileLen*step, vy:tdy/tileLen*step};
 }
 
