@@ -486,32 +486,38 @@ gl_Position = projectionMatrix * mvPosition;`;
   }
   // The links a wall/gate e draws to its same-team wall-like neighbors (at(x, y) → the entity there); shared(n):
   // n draws that link itself, so e leaves its -x/-z one to it.
+  // A wall piece's stretches of wall, TILE BY TILE as the 2D (wallPiece, render-buildings.js): each stands on the piece's
+  // own tile — from its post (or, with two opposite neighbours and no post, straight through) out to the tile's edge
+  // on each side a wall-like neighbour stands; toward a tower or a gate's post, on to that post. A gate draws stretches
+  // only toward towers and other gates (a wall piece runs to it). Sevens: tile centre x, z; axis (0: along x, 1: along
+  // z); from, to (tiles off that centre); end faces left off at the low / the high end (1: lapped into the neighbour's).
   function wallArms(e, at, shared){
     const b = BLDGS[e.btype], w = e.w || b.w, h = e.h || b.h, arms = [], gate = isGateBtype(e.btype);
-    // (the 2D's rules — wallRung, wallDiag, render-buildings.js: no rungs inside a doubled wall, corner-to-corner joins)
     const like = (x, y) => { const n = at(x, y); return !!n && n.team === e.team && isWallLike(n); };
-    // (mid-run — wallBare — a piece has no post: its slabs run to its centre, and its neighbours' to it)
-    const bareAt = (x, y) => { const n = at(x, y); return !!n && n.team === e.team && wallPostless(n, like); };
-    // (a corner the wall wraps round — wallCorner: no post; the slab along x runs on through the corner, the one along
-    // z stops at its side — so their tops don't lie in one another)
-    const cornerAt = (x, y) => { const n = at(x, y); return !!n && n.team === e.team && !!wallCorner(n, like); };
-    const endAt = (x, y, dx, n) => cornerAt(x, y) ? (dx ? -1 : 1) * pillarHalf(n) : bareAt(x, y) ? 0 : pillarHalf(n);
-    arms.corner = !gate && cornerAt(e.x, e.y);
-    arms.bare = !gate && (bareAt(e.x, e.y) || arms.corner);
-    for (let fy = e.y; fy < e.y + h; fy++) for (let fx = e.x; fx < e.x + w; fx++) {
-      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]]) {
-        const n = at(fx + dx, fy + dy), back = dx && dy ? dx < 0 : dx + dy < 0;
-        if (!n || n === e || n.id === e.id || n.team !== e.team || !isWallLike(n)) continue;
-        if (dx && dy ? gate || isGateBtype(n.btype) || !wallDiag(like, fx, fy, dx, dy) : back ? wallRung(like, fx + dx, fy + dy, -dx, -dy) : wallRung(like, fx, fy, dx, dy)) continue;
-        if (back && shared(n)) continue;
-        arms.push(fx, fy, dx, dy, endAt(fx, fy, dx, e), endAt(fx + dx, fy + dy, dx, n));
+    arms.turned = false; arms.gatePost = false; arms.dg = 0;   // (diagonal walls: off — WALL_DIAGONALS)
+    arms.bare = !gate && wallPostless(e, like);
+    if (gate) {
+      for (let fy = e.y; fy < e.y + h; fy++) for (let fx = e.x; fx < e.x + w; fx++) for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const n = at(fx + dx, fy + dy);
+        if (!n || n === e || n.id === e.id || n.team !== e.team || !isWallLike(n) || isWallBtype(n.btype)) continue;
+        if (dx + dy < 0 && shared(n)) continue;   // (the other gate's own)
+        const s0 = pillarHalf(e), s1 = 1 - pillarHalf(n), neg = dx + dy < 0;
+        arms.push(fx + 0.5, fy + 0.5, dx ? 0 : 1, neg ? -s1 : s0, neg ? -s0 : s1, 0, 0);
       }
+      return arms;
     }
-    arms.turned = !gate && isWallBtype(e.btype) && wallTurned(like, e.x, e.y);   // (a post in a diagonal run stands square to it)
-    // a gate on a diagonal run (one tile: gateDiagRun) — its run; and a wall under such a gate's post (the gate's model has it)
-    const dgAt = (x, y) => { const n = at(x, y); return n && n.team === e.team && isGateBtype(n.btype) && (n.w || 1) === 1 && (n.h || 1) === 1 ? gateDiagRun(x, y, like) : 0; };
-    arms.dg = gate && w === 1 && h === 1 ? gateDiagRun(e.x, e.y, like) : 0;
-    arms.gatePost = !gate && (dgAt(e.x + 1, e.y - 1) === 1 || dgAt(e.x - 1, e.y + 1) === 1 || dgAt(e.x + 1, e.y + 1) === 2 || dgAt(e.x - 1, e.y - 1) === 2);
+    const pw2 = pillarHalf(e), LAP = 0.02;
+    // toward (dx, dy): how far the piece reaches (0: no neighbour), and whether it laps into a neighbour's stretch
+    const reach = (dx, dy) => { const n = at(e.x + dx, e.y + dy); if (!n || n.id === e.id || n.team !== e.team || !isWallLike(n)) return [0, 0];
+      if (isWallBtype(n.btype)) return e.complete && n.complete ? [0.5 + LAP, 1] : [0.5, 0];   // (a piece going up: flush, its end face kept)
+      if (isGateBtype(n.btype)) { const len = Math.max(n.w || 1, n.h || 1), i = (n.w || 1) >= (n.h || 1) ? e.x + dx - n.x : e.y + dy - n.y; if (i !== 0 && i !== len - 1) return [0.5, 0]; }
+      return [1 - pillarHalf(n), 0]; };
+    for (const [axis, dx, dy] of [[0, 1, 0], [1, 0, 1]]) {
+      const [rb, lb] = reach(-dx, -dy), [rf, lf] = reach(dx, dy);
+      if (arms.bare) { if (rb && rf) arms.push(e.x + 0.5, e.y + 0.5, axis, -rb, rf, lb, lf); continue; }
+      if (rb) arms.push(e.x + 0.5, e.y + 0.5, axis, -rb, -pw2, lb, 0);
+      if (rf) arms.push(e.x + 0.5, e.y + 0.5, axis, pw2, rf, 0, lf);
+    }
     return arms;
   }
   const wallKey = (e, arms) => (e.complete ? 1 : 0) + ':' + ageOf(e) + ':' + teamColor(e.team) + ':' + arms.join(',') + (arms.turned ? ':t' : '') + (arms.bare ? ':b' : '') + (arms.gatePost ? ':p' : '') + (arms.dg ? ':d' + arms.dg : '');
@@ -523,20 +529,15 @@ gl_Position = projectionMatrix * mvPosition;`;
     const k = 1; // (full height: a site rises by its cut — constructionSite)
     const g = new THREE.Group(), body = stone ? '#cfc8b6|wall' : WOOD.L + '|stakes';
     const pw = (stone ? 9 : 7) / 32, T = pw, linkH = 14 / HPX * k; // links as thick as the pillars (drawWallLink thick = pw/2 px each side)
-    // A link from this pillar's face to the neighbor's (half-widths o1, o2): a slab with a team top.
-    for (let i = 0; i < arms.length; i += 6) {
-      const [fx, fy, dx, dy, o1, o2] = arms.slice(i, i + 6), cx = fx + 0.5, cz = fy + 0.5;
-      if (dx && dy) {   // corner to corner: the same slab, turned
-        const m = boxAt(g, topped(body, tc), -(Math.SQRT2 - o1 - o2) / 2, -T / 2, (Math.SQRT2 - o1 - o2) / 2, T / 2, 0, linkH, 'hull'), mid = (o1 + Math.SQRT2 - o2) / 2 / Math.SQRT2;
-        m.position.x = cx + dx * mid; m.position.z = cz + dy * mid; m.rotation.y = -Math.atan2(dy, dx); continue; }
-      // (an end with no post runs on into the next slab: lapped a little — butted, the two leave a hairline between them)
-      const a0 = o1 || -0.02, a1 = 1 - (o2 || -0.02);
-      const x0 = dx ? Math.min(cx + dx * a0, cx + dx * a1) : cx - T / 2, x1 = dx ? Math.max(cx + dx * a0, cx + dx * a1) : cx + T / 2;
-      const z0 = dy ? Math.min(cz + dy * a0, cz + dy * a1) : cz - T / 2, z1 = dy ? Math.max(cz + dy * a0, cz + dy * a1) : cz + T / 2;
-      const slab = boxAt(g, topped(body, tc), x0, z0, x1, z1, 0, linkH, 'hull'); softEdges(g, x0, z0, x1, z1, 0, linkH, dx ? 'x' : 'z');
-      // a lapped end has no end face: lying in the next slab, its top edge on that slab's walkway showed as a pale dashed line
-      if (!o1 || !o2) { const far = dx + dy > 0 ? 0 : 1, f = dx ? 0 : 4; slab.material = slab.material.slice();
-        if (!o1) slab.material[f + 1 - far] = noFace; if (!o2) slab.material[f + far] = noFace; }
+    // Each stretch (wallArms): a slab with a team top. A lapped end has no end face: lying in the next piece's slab, its
+    // top edge on that slab's walkway showed as a pale dashed line.
+    for (let i = 0; i < arms.length; i += 7) {
+      const [cx, cz, axis, s0, s1, nf0, nf1] = arms.slice(i, i + 7);
+      const x0 = axis ? cx - T / 2 : cx + s0, x1 = axis ? cx + T / 2 : cx + s1, z0 = axis ? cz + s0 : cz - T / 2, z1 = axis ? cz + s1 : cz + T / 2;
+      const slab = boxAt(g, topped(body, tc), x0, z0, x1, z1, 0, linkH, 'hull');
+      slab.userData.arm = true;   // (a gate's selection outline leaves these out: updateSelection)
+      softEdges(g, x0, z0, x1, z1, 0, linkH, axis ? 'z' : 'x');
+      if (nf0 || nf1) { const f = axis ? 4 : 0; slab.material = slab.material.slice(); if (nf0) slab.material[f + 1] = noFace; if (nf1) slab.material[f] = noFace; }
     }
     if (!gate) {
       for (let fy = e.y; fy < e.y + h && !arms.gatePost && !arms.bare; fy++) for (let fx = e.x; fx < e.x + w; fx++) {
@@ -5863,6 +5864,8 @@ gl_Position = projectionMatrix * mvPosition;`;
       const e = entitiesById.get(id); if (!e || e.type !== 'building' || e.hp <= 0 || !rec.obj || !rec.obj.visible) continue;
       const f = buildingFogLevel(e); if (!(f === 2 || sameSide(e.team, myTeam))) continue;
       const hurt = e.hp < e.maxHp, busy = (e.queue && e.queue.length) || e.research, garr = e.team === myTeam && e.garrison && e.garrison.length;
+      // a locked gate's padlock over its door, as the 2D (only in view: a lock state never shows through the shroud)
+      if (e.locked && f === 2 && isGateBtype(e.btype)) { const c = centerOf(e), q = ovProj(c.x, 16 / HPX + 0.22, c.y); if (!q.behind) { ovx.save(); ovx.translate(q.sx, q.sy); ovx.scale(Math.max(1, ZOOM), Math.max(1, ZOOM)); drawPadlock(ovx, 0, 0); ovx.restore(); } }   // (sized with the zoom, as the map's)
       if (!hurt && !busy && !garr) continue;
       if (rec.topY == null || rec.topKey !== rec.key) { _hb.setFromObject(rec.obj); rec.topY = _hb.max.y; rec.topKey = rec.key; }
       const c = centerOf(e), t = ovProj(c.x, rec.topY + 0.08, c.y); if (t.behind) continue;
@@ -6024,7 +6027,8 @@ gl_Position = projectionMatrix * mvPosition;`;
         const shell = o.material && o.material.side === THREE.BackSide;
         if (shell && !bld) { twin(o, 0, M.maskInk, o.geometry); twin(o, 1, M.rimU, o.geometry); }  // a unit's ink shell: its ink marked, the rim pushed wider
         else if (shell) twin(o, 0, M.mask, o.geometry);                                                  // a building's ink shell: marked (the rim starts past it)
-        else { twin(o, 0, M.mask, o.geometry); if (bld) twin(o, 1, M.rimB, smoothNormals(o.geometry)); }
+        // (a gate's wall sections are the adjoining run's, not the gate: marked — no rim across them — but not outlined)
+        else { twin(o, 0, M.mask, o.geometry); if (bld && !(o.userData.arm && isGateBtype(s.btype))) twin(o, 1, M.rimB, smoothNormals(o.geometry)); }
         used.add(o);
       });
     }
