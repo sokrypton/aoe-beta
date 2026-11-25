@@ -301,6 +301,17 @@ function drawBarracksFence(posts, railPaths, darken){
   });
 }
 
+// The Dark barracks' stockade: sharpened stakes (back to front), one lashing rail across them.
+function drawBarracksStakes(pts, railPaths, h, railH, darken){
+  const postC = darken ? darkenColor(WOOD.post) : WOOD.post, w = 1.3;
+  X.strokeStyle = '#000'; X.lineWidth = 2.2;
+  railPaths.forEach(path => { X.beginPath(); path.forEach((p, i) => i ? X.lineTo(p.x, p.y - railH) : X.moveTo(p.x, p.y - railH)); X.stroke(); });
+  X.strokeStyle = postC; X.lineWidth = 0.9;
+  railPaths.forEach(path => { X.beginPath(); path.forEach((p, i) => i ? X.lineTo(p.x, p.y - railH) : X.moveTo(p.x, p.y - railH)); X.stroke(); });
+  X.fillStyle = postC; X.strokeStyle = '#000'; X.lineWidth = 1; X.lineJoin = 'round';
+  for (const p of pts) { X.beginPath(); X.moveTo(p.x - w, p.y + 0.5); X.lineTo(p.x - w, p.y - h + 2.2); X.lineTo(p.x, p.y - h); X.lineTo(p.x + w, p.y - h + 2.2); X.lineTo(p.x + w, p.y + 0.5); X.closePath(); X.fill(); X.stroke(); }
+}
+
 // Mirror of drawDoorLeft: skewed door flat against the Right Wall
 function drawDoorRight(sx,sy,bw,bhh,color,darken=false){
   let c = darken ? darkenColor(color) : color;
@@ -366,10 +377,14 @@ function drawWavingFlag(sx,sy,bh,color,colorDark,poleLen=22){
 // One open-sided tent-annex roof for the TC courtyard: two identical
 // quad faces meeting at an apex line (left face toward ax-48, right toward
 // ax+48). The TC draws this twice, at the left and right quadrant.
-// Open-sided lean-to shelter over one courtyard quadrant (AoE2 TC look):
-// a plank roof plane leaning from the keep wall (high) down to the outer
-// posts (low), open underneath — the shade + posts carry the "open
-// market stall" read. side: -1 = left quadrant, +1 = right quadrant.
+// Open-sided canvas awning over one courtyard quadrant (the TC sprite's): striped fabric leaning from the keep wall (high)
+// down to the outer posts (low). side: -1 = left quadrant, +1 = right quadrant. TC_CANVAS (both views): stripes, the
+// sag between keep and eave, the fold across each stripe, the drape between the corner posts (art px), the tan lit and
+// shaded.
+// thick: the 3D cloth's thickness (art px), its edge showing along the open sides, the posts ending inside it (the 2D's a sheet).
+// wind: how far the cloth lifts and settles in the wind (art px; still where it's tied: the keep, a peak, each post),
+// windRate its pace on the flags' clock (animTick).
+const TC_CANVAS = { n: 6, sag: 4, fold: 1.6, drape: 6, wind: 0.8, windRate: 0.035, thick: 2.5, tan: '#e3c991', tanD: '#c9ad73' };
 function drawTCAnnexRoof(sx, sy, side, tc, tcD, darken){
   const hK = 28, hO = 18; // roof height at the keep edge / outer eave — tall enough for units to walk under
   let s = side;
@@ -380,35 +395,34 @@ function drawTCAnnexRoof(sx, sy, side, tc, tcD, darken){
   let O2 = { x: sx + 48*s, y: sy + 72 }; // outer front corner
   let up = (p, h) => ({ x: p.x, y: p.y - h });
   let K1r = up(K1,hK), K2r = up(K2,hK), O1r = up(O1,hO), O2r = up(O2,hO);
-  // roof plane: wooden planks, lit by orientation (left plane faces the
-  // light, right plane faces away)
-  let plank = s < 0 ? WOOD.plankL : WOOD.plankR;
-  let pl = darken ? darkenColor(plank) : plank;
-  X.strokeStyle='#000000'; X.lineWidth=1.3; X.lineJoin='round';
-  X.fillStyle = pl; X.beginPath();
-  X.moveTo(K1r.x,K1r.y); X.lineTo(O1r.x,O1r.y); X.lineTo(O2r.x,O2r.y); X.lineTo(K2r.x,K2r.y);
-  X.closePath(); X.fill(); X.stroke();
-  // plank seams running down the slope (keep edge → outer eave)
-  X.save();
-  X.strokeStyle='rgba(0,0,0,0.18)'; X.lineWidth=1;
-  for (let t of [0.25, 0.5, 0.75]) {
-    let a = { x: K1r.x + (K2r.x-K1r.x)*t, y: K1r.y + (K2r.y-K1r.y)*t };
-    let b = { x: O1r.x + (O2r.x-O1r.x)*t, y: O1r.y + (O2r.y-O1r.y)*t };
-    X.beginPath(); X.moveTo(a.x,a.y); X.lineTo(b.x,b.y); X.stroke();
+  // the canvas at (u across, 0..1; t down the slope, 0..1): sagging between keep and eave, each stripe's middle sunk
+  // between its seams (the 3D's canvasAwning); stripes team and tan by turns, lit by its side
+  const C = TC_CANVAS, n = C.n, lit = s < 0, dk = c => darken ? darkenColor(c) : c, L = (p, q, t) => ({ x: p.x + (q.x - p.x) * t, y: p.y + (q.y - p.y) * t });
+  const cols = [dk(lit ? tc : tcD), dk(lit ? C.tan : C.tanD)];
+  const at = (u, t) => { const p = L(L(K1r, K2r, u), L(O1r, O2r, u), t), c = (u * n) % 1; return { x: p.x, y: p.y + C.sag * 4 * t * (1 - t) + C.fold * t * (2 - t) * Math.sin(Math.PI * c) + C.drape * 4 * u * (1 - u) * t * t - clothWind(u, t, s + sx * 0.01) }; };   // (straight along its batten at the keep, the folds deepening to the eave)
+  const M = 8, run = (u, t0, t1) => { for (let j = 0; j <= M; j++) { const q = at(u, t0 + (t1 - t0) * j / M); X.lineTo(q.x, q.y); } };
+  X.lineJoin = 'round';
+  for (let i = 0; i < n; i++) for (let h = 0; h < 2; h++) {
+    // each half-stripe; the half turned from the light a shade darker
+    const u0 = (i + h / 2) / n, u1 = (i + (h + 1) / 2) / n;
+    X.fillStyle = cols[i % 2]; X.beginPath(); const p0 = at(u0, 0); X.moveTo(p0.x, p0.y); run(u0, 0, 1); run(u1, 1, 0); X.closePath(); X.fill();
+    if (h === (lit ? 1 : 0)) { X.fillStyle = 'rgba(0,0,0,0.1)'; X.fill(); }
   }
-  X.restore();
-  // team-color fascia boards along the two visible outer eave edges
-  let fs = 3.5;
-  let cOut = darken ? darkenColor(tc) : tc;   // outer edge (side-facing)
-  let cFrt = darken ? darkenColor(tcD) : tcD; // front edge (darker face)
-  X.fillStyle = s < 0 ? cOut : cFrt; X.beginPath();
-  X.moveTo(O1r.x,O1r.y); X.lineTo(O2r.x,O2r.y); X.lineTo(O2r.x,O2r.y+fs); X.lineTo(O1r.x,O1r.y+fs);
-  X.closePath(); X.fill(); X.stroke();
-  X.fillStyle = s < 0 ? cFrt : cOut; X.beginPath();
-  X.moveTo(O2r.x,O2r.y); X.lineTo(K2r.x,K2r.y); X.lineTo(K2r.x,K2r.y+fs); X.lineTo(O2r.x,O2r.y+fs);
-  X.closePath(); X.fill(); X.stroke();
+  X.strokeStyle = '#000'; X.lineWidth = 1.3; X.beginPath();
+  for (let j = 0; j <= 12; j++) { const q = at(j / 12, 0); j ? X.lineTo(q.x, q.y) : X.moveTo(q.x, q.y); }
+  for (let j = 0; j <= M; j++) { const q = at(0, j / M); X.lineTo(q.x, q.y); }
+  for (let j = 0; j <= n * 8; j++) { const q = at(j / (n * 8), 1); X.lineTo(q.x, q.y); }   // (the eave as the cloth hangs: its folds)
+  for (let j = M; j >= 0; j--) { const q = at(1, j / M); X.lineTo(q.x, q.y); }
+  X.stroke();
 }
 
+// The Market's stall tents (both views; the TC's canvas, TC_CANVAS's stripes): n stripes a face, the peak's rise, the
+// sag, fold and drape (art px), the 3D cloth's thickness.
+// The wind on a canvas at (u across 0..1, t down from its tied edge 0..1), art px: one slow, gentle swell across it,
+// nothing where it's tied (t 0, and each post at u 0 and 1), most at the eave between the posts. ph: this cloth's own
+// phase, so neighbours don't move as one. Viewer-only (animTick).
+function clothWind(u, t, ph){ const C = TC_CANVAS, a = animTick * C.windRate + ph; return C.wind * t * t * Math.sin(Math.PI * u) * Math.sin(a - 1.2 * u); }
+const MARKET_TENT = { n: 3, rise: 9, sag: 1.5, fold: 1, drape: 3, thick: 2 };
 function drawGableBlock(sx, sy0, W, hh, wallH, roofH, wallL, wallR, roofC, beamC, darken, afterWalls, noBackEave){
   let wl=darken?darkenColor(wallL):wallL;
   let wr=darken?darkenColor(wallR):wallR;
@@ -978,6 +992,25 @@ const CASTLE_PARTS = [
   CASTLE_WALL([2.45, 3.5, 3.04, 3.92], 'v1'),
   CASTLE_TOWER(3, 3),
 ];
+// The Barracks, both views: on its compound grid (a along the hall, b across: hall walls b = ±13, a = ±30; the yard to
+// b = 51), heights as fractions of the hall wall. Two storeys split by a timber rail (railV): windows in the upper one,
+// the shields hung low on the studs between them.
+// Dark: planks under thatch, a stake stockade; Feudal: plaster and half-timber; Castle: the lower storey stone, flush.
+const BARRACKS_ART = {
+  windows: [-20, 0, 20], winV: [0.62, 0.18], winW: 4.8,
+  shields: [-10, 10], shieldV: 0.27, shieldR: 3,
+  studs: [-10, 10], railV: [0.5, 0.56],
+  // the Dark stockade's stakes: the near end, the front, the far end (from a stake's width off the hall)
+  stakes: [].concat(
+    Array.from({ length: 8 }, (_, i) => [-30, 16 + 35 * i / 7]),
+    Array.from({ length: 11 }, (_, i) => [-30 + 60 * (i + 1) / 12, 51]),
+    Array.from({ length: 8 }, (_, i) => [30, 16 + 35 * i / 7])),
+  stakeH: 11, stakeRail: 5,
+};
+// A heater shield's outline in shield radii (x across, y up): a flat top, the sides curving in to the point.
+const BARRACKS_SHIELD = [[-1, 0.9], [1, 0.9]].concat(
+  Array.from({ length: 6 }, (_, i) => { const t = (i + 1) / 6; return [Math.cos(t * Math.PI / 2), 0.9 - 2.2 * Math.sin(t * Math.PI / 2) ** 1.4]; }),
+  Array.from({ length: 5 }, (_, i) => { const t = (5 - i) / 6; return [-Math.cos(t * Math.PI / 2), 0.9 - 2.2 * Math.sin(t * Math.PI / 2) ** 1.4]; }));
 function buildingShadowPolys(e){
   if (e.btype === 'FARM' || e.btype === 'MARKET') return [];
   const b = BLDGS[e.btype], w = e.w !== undefined ? e.w : b.w, h = e.h !== undefined ? e.h : b.h, x = e.x, y = e.y;   // (a gate is 1×3 or 3×1 as placed)
@@ -1350,11 +1383,10 @@ function drawBuilding(e, part = null){
     // ends at the fascia's bottom edge with no seam, so the roof reads as
     // resting on the beams.
     let posts = [
-      { x: sx - 93.5, y: sy + 48,    h: 15 }, // Left-most corner
-      { x: sx - 48,   y: sy + 70.75, h: 15 }, // Bottom-left corner
-      { x: sx + 93.5, y: sy + 48,    h: 15 }, // Right-most corner
-      { x: sx + 48,   y: sy + 70.75, h: 15 }, // Bottom-right corner
-      { x: sx,        y: sy + 48,    h: 25 }  // Center (under the high keep edge)
+      { x: sx - 93.5, y: sy + 48,    h: 17 }, // Left-most corner
+      { x: sx - 48,   y: sy + 70.75, h: 17 }, // Bottom-left corner
+      { x: sx + 93.5, y: sy + 48,    h: 17 }, // Right-most corner
+      { x: sx + 48,   y: sy + 70.75, h: 17 }  // Bottom-right corner
     ];
     posts.sort((a, b) => a.y - b.y);
     let postColor = WOOD.post;
@@ -1364,25 +1396,12 @@ function drawBuilding(e, part = null){
     // shaded right face, bright top cap — same light rules as buildings.
     let pL = darken ? darkenColor('#9a7a56') : '#9a7a56';
     let pR = darken ? darkenColor('#7c5f40') : '#7c5f40';
-    let pT = darken ? darkenColor('#b08c62') : '#b08c62';
+    // round timber posts (the 3D's), lit on the left, each up to just under the canvas at its corner
     posts.forEach(p => {
-      let w = 2.5, hh2 = 1.25; // half-width / half-height of the post's tiny footprint
-      X.strokeStyle = '#000000'; X.lineWidth = 1.1;
-      // left face
-      X.fillStyle = pL; X.beginPath();
-      X.moveTo(p.x - w, p.y - hh2); X.lineTo(p.x, p.y);
-      X.lineTo(p.x, p.y - p.h); X.lineTo(p.x - w, p.y - hh2 - p.h);
-      X.closePath(); X.fill(); X.stroke();
-      // right face
-      X.fillStyle = pR; X.beginPath();
-      X.moveTo(p.x, p.y); X.lineTo(p.x + w, p.y - hh2);
-      X.lineTo(p.x + w, p.y - hh2 - p.h); X.lineTo(p.x, p.y - p.h);
-      X.closePath(); X.fill(); X.stroke();
-      // top cap
-      X.fillStyle = pT; X.beginPath();
-      X.moveTo(p.x, p.y - p.h); X.lineTo(p.x + w, p.y - hh2 - p.h);
-      X.lineTo(p.x, p.y - 2*hh2 - p.h); X.lineTo(p.x - w, p.y - hh2 - p.h);
-      X.closePath(); X.fill(); X.stroke();
+      const r = 2.6, top = p.y - p.h;
+      X.fillStyle = pL; X.fillRect(p.x - r, top, r, p.h); X.fillStyle = pR; X.fillRect(p.x, top, r, p.h);
+      X.fillStyle = pL; X.beginPath(); X.ellipse(p.x, p.y, r, r / 2, 0, 0, Math.PI); X.fill();
+      X.strokeStyle = '#000000'; X.lineWidth = 1.1; X.beginPath(); X.moveTo(p.x - r, top); X.lineTo(p.x - r, p.y); X.ellipse(p.x, p.y, r, r / 2, 0, Math.PI, 0, true); X.lineTo(p.x + r, top); X.stroke();
     });
 
     } // end 'back' (keep + foundation + support posts) part
@@ -1548,104 +1567,94 @@ function drawBuilding(e, part = null){
     });
     X.restore();
 
-    // 1. Custom rectangular garrison hall: half-length L along the NE
-    // axis, half-depth D across (drawGableBlock only makes square
-    // diamonds). With cx=sx-20, cy=sy+23, L=30, D=13 the math works out
-    // exactly: the NW back wall lies ON the plot's back-left edge from
-    // the left corner (sx-64,sy+32) to the top corner (sx,sy), and the
-    // SE front wall passes through the yard's top corner (sx,sy+26).
-    // roofH > D/2 keeps the back roof slope entirely hidden — no
-    // back-eave artifacts. Ridge overhangs both gable ends slightly.
+    // 1. The hall: half-length L along the NE axis, half-depth D across (on the
+    // yard grid: its NW back wall lies on the plot's back-left edge, its SE
+    // wall on the yard's back edge). roofH > D/2 keeps the back slope's eave
+    // hidden. Per age (BARRACKS_ART, as the 3D): Dark planks under thatch;
+    // Feudal plaster and half-timber with shields; Castle a stone
+    // ground storey under whitewash and oak.
     {
-      // g=0: a ridge overhang past the gable planes projects to a ~1px
-      // sliver between near-parallel edges (the strip's end edge and the
-      // gable roofline differ by only 0.9px perpendicular) — it renders
-      // as a black spike, so the roof ends exactly at the gable faces.
-      const L=30, D=13, wallH=24, roofH=12, g=0;
+      // g=0: a ridge overhang past the gable planes projects to a ~1px black
+      // sliver, so the roof ends exactly at the gable faces.
+      const L=30, D=13, wallH=24, roofH=12, g=0, BA=BARRACKS_ART;
       const cx=sx-20, cy=sy+23;
       const P=(a,b)=>({x:cx+a+b, y:cy-a/2+b/2});
       const up=(p,h)=>({x:p.x, y:p.y-h});
+      const dk=c=>darken?darkenColor(c):c;
       let Wc=P(-L,-D), Sc=P(-L,D), Ec=P(L,D);
       let R1=up(P(-L,0),wallH+roofH), R1e=up(P(-L-g,0),wallH+roofH), R2e=up(P(L+g,0),wallH+roofH);
-      let wl=darken?darkenColor(aw.gl):aw.gl, wr=darken?darkenColor(aw.gr):aw.gr;
+      const wood=ownerAge===0, stone=ownerAge>=2;
+      let wl=dk(wood?WOOD.plankL:aw.gl), wr=dk(wood?WOOD.plankR:aw.gr);
+      const beam=dk(stone?'#57432e':WOOD.beam);
       const thatchB = ownerAge === 0;   // (Dark: thatch, as every first-age roof)
-      let rl=darken?darkenColor(thatchB ? THATCH_2D : tc):(thatchB ? THATCH_2D : tc);
+      let rl=dk(thatchB ? THATCH_2D : tc);
+      // a point on the lit gable end (b across it) or the yard wall (a along it), v up the wall in wall heights;
+      // o: out from the wall (the stone storey stands proud)
+      const GF=(b,v,o=0)=>up(P(-L-o,b),v*wallH), LF=(a,v,o=0)=>up(P(a,D+o),v*wallH);
+      const quad=(F,u0,u1,v0,v1,col,o=0)=>{X.fillStyle=col;X.beginPath();
+        let p=F(u0,v0,o);X.moveTo(p.x,p.y);p=F(u1,v0,o);X.lineTo(p.x,p.y);p=F(u1,v1,o);X.lineTo(p.x,p.y);p=F(u0,v1,o);X.lineTo(p.x,p.y);X.closePath();X.fill();};
       X.strokeStyle='#000';X.lineWidth=1.3;X.lineJoin='round';
       // BACK roof slope first: it recedes NW at screen slope 0.19/unit
       // while the ridge climbs 0.5/unit, so it shows as a strip above the
-      // ridge. Darker (faces away from the light). Eave at v=-(D+2)
-      // offsets each ridge point by (-(D+2), (D+2)*(roofH/D-0.5)).
+      // ridge. Eave at v=-(D+2).
       {
         let bo={x:-(D+2), y:(D+2)*(roofH/D-0.5)};
-        let rd=thatchB ? (darken?darkenColor(THATCH_2D_DARK):THATCH_2D_DARK) : (darken?darkenColor(tcD):tcD);
+        let rd=dk(thatchB ? THATCH_2D_DARK : tcD);
         X.fillStyle=rd;X.beginPath();
         X.moveTo(R1e.x,R1e.y);X.lineTo(R2e.x,R2e.y);
         X.lineTo(R2e.x+bo.x,R2e.y+bo.y);X.lineTo(R1e.x+bo.x,R1e.y+bo.y);
         X.closePath();X.fill();X.stroke();
       }
-      // SW gable end: wall + triangle as one lit face
-      X.fillStyle=wl;X.beginPath();
-      X.moveTo(Wc.x,Wc.y);X.lineTo(Sc.x,Sc.y);
-      X.lineTo(Sc.x,Sc.y-wallH);X.lineTo(R1.x,R1.y);X.lineTo(Wc.x,Wc.y-wallH);
-      X.closePath();X.fill();X.stroke();
-      // SE long wall (shaded side)
-      X.fillStyle=wr;X.beginPath();
-      X.moveTo(Sc.x,Sc.y);X.lineTo(Ec.x,Ec.y);
-      X.lineTo(Ec.x,Ec.y-wallH);X.lineTo(Sc.x,Sc.y-wallH);
-      X.closePath();X.fill();X.stroke();
-      // Door on the GABLE END wall (away from the yard) — the yard-facing
-      // wall carries only windows. Recessed into the wall for real depth,
-      // same architecture as the TC keep windows (drawKeepWindow above):
-      // a deep dark opening shifted back into the wall, revealing a lintel
-      // underside across the top (darkest, faces down) and one side jamb
-      // (mid tone), all clipped to the outer frame and following the
-      // upper-left light. The wall face runs along (1,0.5) per along-unit
-      // and rises straight up; the recess shifts the opening sideways into
-      // the wall + down so the lintel shows (mirrors the TC's +down shift).
-      {
-        let db=P(-L,0);
-        let W=4.5, H=11, depth=2;
-        // frame corners on the wall surface (base on the ground line)
-        let O1={x:db.x-W, y:db.y-W*0.5-H}, O2={x:db.x+W, y:db.y+W*0.5-H}; // top-left, top-right
-        let O3={x:db.x+W, y:db.y+W*0.5},   O4={x:db.x-W, y:db.y-W*0.5};   // bottom-right, bottom-left
-        // opening: pushed back into the wall (along +along) and down, so
-        // the top lintel reveal and the left jamb become visible
-        let B=o=>({x:o.x+depth, y:o.y+depth*0.5+1.5});
-        let B1=B(O1),B2=B(O2),B3=B(O3),B4=B(O4);
-        let doorDark=darken?darkenColor('#241505'):'#241505';
-        let jambC=darken?darkenColor('#6f5330'):'#6f5330';
-        let lintelC=darken?darkenColor('#503a21'):'#503a21';
-        let framePath=()=>{X.beginPath();X.moveTo(O1.x,O1.y);X.lineTo(O2.x,O2.y);X.lineTo(O3.x,O3.y);X.lineTo(O4.x,O4.y);X.closePath();};
-        X.save();
-        framePath();X.clip();
-        // deep dark opening
-        X.fillStyle=doorDark;X.beginPath();
-        X.moveTo(B1.x,B1.y);X.lineTo(B2.x,B2.y);X.lineTo(B3.x,B3.y);X.lineTo(B4.x,B4.y);X.closePath();X.fill();
-        // left jamb reveal (frame's left edge → opening's left edge)
-        X.fillStyle=jambC;X.beginPath();
-        X.moveTo(O1.x,O1.y);X.lineTo(B1.x,B1.y);X.lineTo(B4.x,B4.y);X.lineTo(O4.x,O4.y);X.closePath();X.fill();
-        // lintel underside across the top (darkest)
-        X.fillStyle=lintelC;X.beginPath();
-        X.moveTo(O1.x,O1.y);X.lineTo(O2.x,O2.y);X.lineTo(B2.x,B2.y);X.lineTo(B1.x,B1.y);X.closePath();X.fill();
-        // light interior seams (reveal inner edges)
-        X.strokeStyle='rgba(0,0,0,0.22)';X.lineWidth=1;
-        X.beginPath();X.moveTo(B1.x,B1.y);X.lineTo(B4.x,B4.y);X.moveTo(B1.x,B1.y);X.lineTo(B2.x,B2.y);X.stroke();
+      // the two faces, each with its wall's own texture clipped to it
+      const gablePath=()=>{X.beginPath();X.moveTo(Wc.x,Wc.y);X.lineTo(Sc.x,Sc.y);X.lineTo(Sc.x,Sc.y-wallH);X.lineTo(R1.x,R1.y);X.lineTo(Wc.x,Wc.y-wallH);X.closePath();};
+      const longPath=()=>{X.beginPath();X.moveTo(Sc.x,Sc.y);X.lineTo(Ec.x,Ec.y);X.lineTo(Ec.x,Ec.y-wallH);X.lineTo(Sc.x,Sc.y-wallH);X.closePath();};
+      // each face: its wall, then (Castle) the stone lower storey flush in it, then its beams over both
+      const [rv0,rv1]=BA.railV;
+      const faceTex=(path,F,u0,u1,studs,stoneCol)=>{
+        X.save();path();X.clip();
+        if(wood){ // plank seams: vertical board joints in the light interior-seam stroke
+          X.strokeStyle='rgba(0,0,0,0.22)';X.lineWidth=1;
+          const n=Math.round(Math.abs(u1-u0)/5.5);
+          for(let i=1;i<n;i++){const u=u0+(u1-u0)*i/n,p=F(u,0),q=F(u,1.5);X.beginPath();X.moveTo(p.x,p.y);X.lineTo(q.x,q.y);X.stroke();}
+        } else {
+          if(stone){ // the stone storey: two courses, its joints staggered (the Castle's masonry), up to the rail
+            quad(F,u0,u1,0,rv0,stoneCol);
+            X.strokeStyle='rgba(0,0,0,0.13)';X.lineWidth=1;X.beginPath();
+            const m=F(u0,rv0/2),n=F(u1,rv0/2);X.moveTo(m.x,m.y);X.lineTo(n.x,n.y);
+            for(let k=0;k<2;k++){const sh=k?3.5:0,dir=Math.sign(u1-u0);
+              for(let u=u0+dir*(3.5+sh);dir*(u1-u)>1;u+=dir*7){const p=F(u,rv0*k/2),q=F(u,rv0*(k+1)/2);X.moveTo(p.x,p.y);X.lineTo(q.x,q.y);}}
+            X.stroke();
+          }
+          // half-timbering (the 3D's): sill (Feudal), the storey rail, plate, corner posts, studs — filled beams, no ink
+          const B=1.6, lo=stone?rv1:0.09;
+          if(!stone)quad(F,u0,u1,0,0.09,beam);
+          quad(F,u0,u1,rv0,rv1,beam);quad(F,u0,u1,0.91,1,beam);
+          quad(F,u0,u0+B*Math.sign(u1-u0),stone?rv0:0,1,beam);quad(F,u1-B*Math.sign(u1-u0),u1,stone?rv0:0,1,beam);
+          for(const t of studs)quad(F,t-B/2,t+B/2,lo,0.91,beam);
+        }
         X.restore();
-        // dark door frame outline over the clipped interior
-        X.strokeStyle='#000';X.lineWidth=1.1;framePath();X.stroke();
+      };
+      X.fillStyle=wl;gablePath();X.fill();faceTex(gablePath,GF,-D,D,[],dk('#ded5c2'));X.strokeStyle='#000';X.lineWidth=1.3;gablePath();X.stroke();
+      X.fillStyle=wr;longPath();X.fill();faceTex(longPath,LF,-L,L,BA.studs,dk('#bcb29b'));X.strokeStyle='#000';X.lineWidth=1.3;longPath();X.stroke();
+      // Windows facing the yard (the hall sleeps the garrison)
+      X.fillStyle=dk('#2a2a2a');X.strokeStyle='#000';X.lineWidth=0.9;
+      for(const a of BA.windows){
+        const w2=BA.winW/2, p0=LF(a-w2,BA.winV[0]), p1=LF(a+w2,BA.winV[0]), p2=LF(a+w2,BA.winV[0]+BA.winV[1]), p3=LF(a-w2,BA.winV[0]+BA.winV[1]);
+        X.beginPath();X.moveTo(p0.x,p0.y);X.lineTo(p1.x,p1.y);X.lineTo(p2.x,p2.y);X.lineTo(p3.x,p3.y);X.closePath();X.fill();X.stroke();
       }
-      // Row of small windows facing the yard — the hall SLEEPS the garrison
-      X.fillStyle=darken?darkenColor('#2a2a2a'):'#2a2a2a';X.lineWidth=0.9;
-      [-16,-4,8,20].forEach(a=>{
-        let wb=up(P(a,D), wallH*0.4);
-        X.beginPath();
-        X.moveTo(wb.x-2.4,wb.y+1.2);X.lineTo(wb.x+2.4,wb.y-1.2);
-        X.lineTo(wb.x+2.4,wb.y-1.2-4.5);X.lineTo(wb.x-2.4,wb.y+1.2-4.5);
-        X.closePath();X.fill();X.stroke();
-      });
-      // Roof: single visible front slope, ridge + eaves overhanging
+      if(!wood){
+        // Heater shields hung on the studs between the windows, in team colour (the wall's shaded side)
+        for(const a of BA.shields){
+          const c=LF(a,BA.shieldV);
+          X.save();X.translate(c.x,c.y);X.transform(1,-0.5,0,1,0,0);X.scale(1,-1);
+          X.fillStyle=dk(tcD);X.strokeStyle='#000';X.lineWidth=1;
+          X.beginPath();BARRACKS_SHIELD.forEach(([u,w],i)=>i?X.lineTo(u*BA.shieldR,w*BA.shieldR):X.moveTo(u*BA.shieldR,w*BA.shieldR));X.closePath();X.fill();X.stroke();
+          X.restore();
+        }
+      }
+      // Roof: the visible front slope, eaves overhanging
       let Se=up(P(-L-g,D+2), wallH-1.2), Ee=up(P(L+g,D+2), wallH-1.2);
-      X.fillStyle=rl;X.lineWidth=1.3;
+      X.fillStyle=rl;X.strokeStyle='#000';X.lineWidth=1.3;
       X.beginPath();X.moveTo(R1e.x,R1e.y);X.lineTo(R2e.x,R2e.y);
       X.lineTo(Ee.x,Ee.y);X.lineTo(Se.x,Se.y);X.closePath();X.fill();X.stroke();
       X.save();X.strokeStyle='rgba(0,0,0,0.15)';X.lineWidth=1;
@@ -1657,16 +1666,23 @@ function drawBuilding(e, part = null){
       });
       X.restore();
       if (thatchB) drawThatch2D(R1e, R2e, Ee, Se, e.id, tc, darken);
-      // Team banner flying from the ridge's right end (the tower is gone;
-      // the hall carries the flag now)
-      if(e.complete && visible) drawWavingFlag(R2e.x, sy, 26, tc, tcD); // base on the raised ridge end
+      // the team flag on the ridge's far end
+      if(e.complete && visible) drawWavingFlag(R2e.x, sy, 26, tc, tcD);
     }
 
     // Right-end fence edge FIRST so the yard props (horse especially)
     // stand in front of its rails
-    drawBarracksFence(
-      [BP(bL,26),BP(bL,38.5)],
-      [[BP(bL,bD),BP(bL,bYF)]], darken);
+    // (Dark: a stockade of sharpened stakes; from Feudal the post-and-rail fence)
+    const yardFence=(far)=>{
+      if(ownerAge>0){
+        if(far) drawBarracksFence([BP(bL,26),BP(bL,38.5)],[[BP(bL,bD),BP(bL,bYF)]],darken);
+        else drawBarracksFence([BP(-bL,bD),BP(-bL,26),BP(-bL,38.5),BP(-bL,bYF),BP(-15,bYF),BP(0,bYF),BP(15,bYF),BP(bL,bYF)],[[BP(-bL,bD),BP(-bL,bYF),BP(bL,bYF)]],darken);
+        return;
+      }
+      const BA=BARRACKS_ART, pts=BA.stakes.filter(([A])=>(A===bL)===far).map(([A,B])=>BP(A,B)).sort((p,q)=>p.y-q.y||p.x-q.x);
+      drawBarracksStakes(pts, far?[[BP(bL,bD),BP(bL,bYF)]]:[[BP(-bL,bD),BP(-bL,bYF),BP(bL,bYF)]], BA.stakeH, BA.stakeRail, darken);
+    };
+    yardFence(true);
 
     // Cavalry spot at the FAR end of the yard (right corner): one horse
     // with a haystack — a bay when scouts unlock at Feudal, swapped for
@@ -1755,9 +1771,7 @@ function drawBuilding(e, part = null){
     // 3D post-and-rail fence along the LEFT END and the long FRONT edge
     // (the right end was drawn earlier, behind the props): posts at
     // corners and evenly along the run, two rails between.
-    drawBarracksFence(
-      [BP(-bL,bD),BP(-bL,26),BP(-bL,38.5),BP(-bL,bYF),BP(-15,bYF),BP(0,bYF),BP(15,bYF),BP(bL,bYF)],
-      [[BP(-bL,bD),BP(-bL,bYF),BP(bL,bYF)]], darken);
+    yardFence(false);
     X.restore();
   }
   else if(e.btype==='MARKET'){
@@ -1895,59 +1909,34 @@ function drawBuilding(e, part = null){
       }
     };
 
-    // One market stall: a striped-canvas canopy (a tile-aligned diamond
-    // lifted by H) on 4 posts, goods underneath, and a scalloped valance
-    // hanging from the two front eaves.
+    // One market stall: a little peaked tent (MARKET_TENT — the TC's canvas): four striped faces from a centre peak down to
+    // the eaves, sagging and folded, draped between the four round posts; its goods underneath.
     let stall=(cx,cyc,good)=>{
-      const w=21,h=10.5,H=20;
+      const w=21,h=10.5,H=20,T=MARKET_TENT,n=T.n;
       let corners={T:[cx,cyc-h],R:[cx+w,cyc],B:[cx,cyc+h],L:[cx-w,cyc]};
-      let post=(g)=>{
-        X.lineCap='round';
-        X.strokeStyle='#000';X.lineWidth=3.4;X.beginPath();X.moveTo(g[0],g[1]);X.lineTo(g[0],g[1]-H);X.stroke();
-        X.strokeStyle=postC;X.lineWidth=1.6;X.beginPath();X.moveTo(g[0],g[1]);X.lineTo(g[0],g[1]-H);X.stroke();
-        X.lineCap='butt';
-      };
-      // back + side posts, then goods, then the near (front) post over them;
-      // goods sit at the canopy's center — properly INSIDE the tent
+      // a round post (the TC's), up to just under the eave corner
+      let post=(g)=>{ const r=1.6, top=g[1]-H+1;
+        X.fillStyle=postC; X.fillRect(g[0]-r,top,r,g[1]-top); X.fillStyle=darken?darkenColor('#7c5f40'):'#7c5f40'; X.fillRect(g[0],top,r,g[1]-top);
+        X.strokeStyle='#000'; X.lineWidth=1; X.beginPath(); X.moveTo(g[0]-r,top); X.lineTo(g[0]-r,g[1]); X.ellipse(g[0],g[1],r,r/2,0,Math.PI,0,true); X.lineTo(g[0]+r,top); X.stroke(); };
+      // back + side posts, then goods, then the near (front) post over them; the tent over all
       post(corners.T);post(corners.L);post(corners.R);
       drawGood(cx,cyc+0.5,good);
       post(corners.B);
-      // raised canopy corners
-      let Tr=[corners.T[0],corners.T[1]-H],Rr=[corners.R[0],corners.R[1]-H],
-          Br=[corners.B[0],corners.B[1]-H],Lr=[corners.L[0],corners.L[1]-H];
-      let lerp=(p,q,t)=>[p[0]+(q[0]-p[0])*t, p[1]+(q[1]-p[1])*t];
-      // each triangular face: cream base + 2-of-4 team-color awning stripes
-      // fanning from the eave corner across the Tr→Br ridge (wedges lie
-      // exactly inside the face triangle, so no clip is needed). Quarter
-      // stripes, not fifths: fat enough to survive sub-10px.
-      X.strokeStyle='#000';X.lineWidth=1.3;X.lineJoin='round';
-      let face=(eave,base,stripe)=>{
-        X.fillStyle=base;X.beginPath();X.moveTo(Tr[0],Tr[1]);X.lineTo(eave[0],eave[1]);X.lineTo(Br[0],Br[1]);X.closePath();X.fill();
-        X.fillStyle=stripe;
-        for(let k of [0,2]){
-          let r0=lerp(Tr,Br,k/4), r1=lerp(Tr,Br,(k+1)/4);
-          X.beginPath();X.moveTo(eave[0],eave[1]);X.lineTo(r0[0],r0[1]);X.lineTo(r1[0],r1[1]);X.closePath();X.fill();
-        }
-        X.beginPath();X.moveTo(Tr[0],Tr[1]);X.lineTo(eave[0],eave[1]);X.lineTo(Br[0],Br[1]);X.closePath();X.stroke();
+      const up=p=>[p[0],p[1]-H], apex=[cx,cyc-H-T.rise], L2=(p,q,t)=>[p[0]+(q[0]-p[0])*t,p[1]+(q[1]-p[1])*t];
+      // a face from eave corner a to b (u 0..1), t from the peak (0) down to the eave (1)
+      const face=(a,b,lit)=>{
+        const A=up(a),B=up(b),cols=[lit?tccF:tccR, darken?darkenColor(lit?TC_CANVAS.tan:TC_CANVAS.tanD):(lit?TC_CANVAS.tan:TC_CANVAS.tanD)];
+        const at=(u,t)=>{ const e=L2(A,B,u),p=L2(apex,e,t),c=(u*n)%1; return [p[0],p[1]+T.sag*4*t*(1-t)+T.fold*t*(2-t)*Math.sin(Math.PI*c)+T.drape*4*u*(1-u)*t*t-0.6*clothWind(u,t,cx*0.07+a[0]*0.03)]; };
+        const M=6, run=(u,t0,t1)=>{ for(let j=0;j<=M;j++){ const q=at(u,t0+(t1-t0)*j/M); X.lineTo(q[0],q[1]); } };
+        for(let i=0;i<n;i++) for(let hh=0;hh<2;hh++){ const u0=(i+hh/2)/n,u1=(i+(hh+1)/2)/n;
+          X.fillStyle=cols[i%2]; X.beginPath(); X.moveTo(apex[0],apex[1]); run(u0,0,1); run(u1,1,0); X.closePath(); X.fill();
+          if(hh===(lit?1:0)){ X.fillStyle='rgba(0,0,0,0.1)'; X.fill(); } }
+        X.strokeStyle='#000'; X.lineWidth=1.3; X.lineJoin='round'; X.beginPath(); X.moveTo(apex[0],apex[1]); run(0,0,1);
+        for(let j=0;j<=n*6;j++){ const q=at(j/(n*6),1); X.lineTo(q[0],q[1]); } run(1,1,0); X.stroke();
       };
-      face(Lr, canvasL, tccF);   // lit front-left face
-      face(Rr, canvasR, tccR);   // shaded front-right face
-      X.beginPath();X.moveTo(Tr[0],Tr[1]);X.lineTo(Rr[0],Rr[1]);X.lineTo(Br[0],Br[1]);X.lineTo(Lr[0],Lr[1]);X.closePath();X.stroke();
-      // valance: ONE solid team-color zigzag strip per front eave (Lr-Br
-      // lit, Br-Rr shaded) — three fat teeth instead of alternating
-      // micro-scallops
-      let valance=(p,q,col)=>{
-        X.fillStyle=col;X.lineWidth=1.1;
-        X.beginPath();X.moveTo(p[0],p[1]);
-        for(let k=0;k<3;k++){
-          let s0=lerp(p,q,k/3), s1=lerp(p,q,(k+1)/3);
-          X.lineTo((s0[0]+s1[0])/2,(s0[1]+s1[1])/2+5);
-          X.lineTo(s1[0],s1[1]);
-        }
-        X.closePath();X.fill();X.stroke();
-      };
-      valance(Lr,Br,tccF);
-      valance(Br,Rr,tccR);
+      // back faces first, then the front two (lit: those turned to the upper-left light)
+      face(corners.T,corners.L,true); face(corners.R,corners.T,false);
+      face(corners.L,corners.B,true); face(corners.B,corners.R,false);
     };
 
     // Parts painted back → front (in the proxy path each `only()` hits one).
